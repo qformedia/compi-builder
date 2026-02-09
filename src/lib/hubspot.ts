@@ -1,0 +1,65 @@
+import { invoke } from "@tauri-apps/api/core";
+import type { Clip } from "@/types";
+
+interface HubSpotSearchResponse {
+  total: number;
+  results: Array<{
+    id: string;
+    properties: Record<string, string | null>;
+  }>;
+  paging?: {
+    next?: { after: string };
+  };
+}
+
+/** Search External Clips by tags via the Rust backend (avoids CORS) */
+export async function searchClipsByTags(
+  token: string,
+  tags: string[],
+  after?: string,
+): Promise<{ clips: Clip[]; total: number; nextAfter?: string }> {
+  const data = await invoke<HubSpotSearchResponse>("search_clips", {
+    token,
+    tags,
+    after: after ?? null,
+  });
+
+  const clips = data.results.map(parseClip);
+
+  return {
+    clips,
+    total: data.total,
+    nextAfter: data.paging?.next?.after,
+  };
+}
+
+function parseClip(record: {
+  id: string;
+  properties: Record<string, string | null>;
+}): Clip {
+  const p = record.properties;
+
+  const clipMixLinks: string[] = [];
+  for (let i = 1; i <= 10; i++) {
+    const val = p[`clip_mix_link_${i}`];
+    if (val) clipMixLinks.push(val);
+  }
+
+  return {
+    id: record.id,
+    link: p.link ?? "",
+    tags: p.tags ? p.tags.split(";").map((t) => t.trim()) : [],
+    creatorName: p.creator_name ?? "Unknown",
+    creatorStatus: p.creator_status ?? "",
+    score: p.score ?? undefined,
+    editedDuration: p.edited_duration ? Number(p.edited_duration) : undefined,
+    dateFound: p.date_found ?? undefined,
+    linkNotWorking: p.link_not_working_anymore === "true",
+    availableAskFirst: p.available_ask_first === "true",
+    numPublishedVideoProjects: p.num_of_published_video_project
+      ? Number(p.num_of_published_video_project)
+      : undefined,
+    clipMixLinks,
+    notes: p.notes ?? undefined,
+  };
+}
