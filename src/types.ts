@@ -32,6 +32,7 @@ export interface ProjectClip {
   tags: string[];
   score?: string;
   editedDuration?: number;
+  localDuration?: number;
   localFile?: string;
   downloadStatus: "pending" | "downloading" | "complete" | "failed";
   downloadError?: string;

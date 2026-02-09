@@ -16,6 +16,8 @@ pub struct ProjectClip {
     pub score: Option<String>,
     #[serde(rename = "editedDuration")]
     pub edited_duration: Option<f64>,
+    #[serde(rename = "localDuration")]
+    pub local_duration: Option<f64>,
     #[serde(rename = "localFile")]
     pub local_file: Option<String>,
     #[serde(rename = "downloadStatus")]
@@ -39,6 +41,8 @@ pub struct DownloadProgress {
     pub progress: Option<f64>,
     #[serde(rename = "localFile")]
     pub local_file: Option<String>,
+    #[serde(rename = "localDuration")]
+    pub local_duration: Option<f64>,
     pub error: Option<String>,
 }
 
@@ -519,6 +523,7 @@ async fn download_clip(
         status: "downloading".into(),
         progress: Some(0.0),
         local_file: None,
+        local_duration: None,
         error: None,
     });
 
@@ -548,11 +553,13 @@ async fn download_clip(
     match result {
         Ok(output) if output.status.success() => {
             let local_file = find_downloaded_file(&clips_dir, &clip_id);
+            let local_duration = local_file.as_ref().and_then(|f| probe_duration(f));
             let _ = app.emit("download-progress", DownloadProgress {
                 clip_id,
                 status: "complete".into(),
                 progress: Some(100.0),
                 local_file,
+                local_duration,
                 error: None,
             });
             Ok(())
@@ -565,6 +572,7 @@ async fn download_clip(
                 status: "failed".into(),
                 progress: None,
                 local_file: None,
+                local_duration: None,
                 error: Some(friendly.clone()),
             });
             Err(friendly)
@@ -580,6 +588,7 @@ async fn download_clip(
                 status: "failed".into(),
                 progress: None,
                 local_file: None,
+                local_duration: None,
                 error: Some(msg.clone()),
             });
             Err(msg)
@@ -681,6 +690,28 @@ fn save_project(folder: &PathBuf, project: &Project) -> Result<(), String> {
         .map_err(|e| format!("Failed to serialize: {e}"))?;
     fs::write(folder.join("project.json"), json)
         .map_err(|e| format!("Failed to write project: {e}"))
+}
+
+/// Get duration of a local video file using ffprobe (seconds).
+fn probe_duration(path: &str) -> Option<f64> {
+    let output = std::process::Command::new("ffprobe")
+        .args([
+            "-v", "quiet",
+            "-print_format", "json",
+            "-show_format",
+            path,
+        ])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
+    json.get("format")?
+        .get("duration")?
+        .as_str()?
+        .parse::<f64>()
+        .ok()
 }
 
 fn find_downloaded_file(clips_dir: &PathBuf, clip_id: &str) -> Option<String> {

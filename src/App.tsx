@@ -8,6 +8,7 @@ import { SearchTab } from "@/components/SearchTab";
 import { ProjectTab } from "@/components/ProjectTab";
 import { ArrangeTab } from "@/components/ArrangeTab";
 import type { AppSettings, Clip, Project, ProjectClip } from "@/types";
+import logo from "@/assets/logotipo-quantastic.png";
 import "./App.css";
 
 const DEFAULT_SETTINGS: AppSettings = {
@@ -86,7 +87,10 @@ function App() {
     <div className="flex h-screen flex-col">
       {/* Header */}
       <header className="flex items-center justify-between border-b px-4 py-2">
-        <h1 className="text-lg font-semibold">Compi Builder</h1>
+        <div className="flex items-center gap-2">
+          <img src={logo} alt="Quantastic" className="h-6" />
+          <h1 className="text-lg font-semibold">COMPIFLOW</h1>
+        </div>
         <div className="flex items-center gap-2">
           {project && (
             <span className="text-sm text-muted-foreground">
@@ -158,6 +162,7 @@ function App() {
               settings={settings}
               project={project}
               setProject={setProject}
+              isActive={activeTab === "arrange"}
             />
           </div>
         </Tabs>

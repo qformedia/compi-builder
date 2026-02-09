@@ -21,6 +21,7 @@ interface DownloadProgress {
   status: string;
   progress: number | null;
   localFile: string | null;
+  localDuration: number | null;
   error: string | null;
 }
 
@@ -67,6 +68,7 @@ export function ProjectTab({ settings, project, setProject, removeClip }: Props)
           ...c,
           downloadStatus: dp.status as ProjectClip["downloadStatus"],
           localFile: dp.localFile ?? c.localFile,
+          localDuration: dp.localDuration ?? c.localDuration,
           downloadError: dp.error ?? undefined,
         };
       });

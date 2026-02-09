@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   DndContext,
@@ -24,6 +24,7 @@ interface Props {
   settings: AppSettings;
   project: Project | null;
   setProject: (p: Project | null) => void;
+  isActive: boolean;
 }
 
 function toCardData(clip: ProjectClip): ClipCardData {
@@ -39,7 +40,7 @@ function toCardData(clip: ProjectClip): ClipCardData {
   };
 }
 
-export function ArrangeTab({ settings, project, setProject }: Props) {
+export function ArrangeTab({ settings, project, setProject, isActive }: Props) {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const thumbCache = useRef(new Map<string, string | null>());
@@ -47,6 +48,13 @@ export function ArrangeTab({ settings, project, setProject }: Props) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
   );
+
+  // Pause video when leaving the tab
+  useEffect(() => {
+    if (!isActive && videoRef.current) {
+      videoRef.current.pause();
+    }
+  }, [isActive]);
 
   if (!project) {
     return (
@@ -109,7 +117,7 @@ export function ArrangeTab({ settings, project, setProject }: Props) {
             ref={videoRef}
             key={selectedClip.localFile}
             controls
-            autoPlay
+            autoPlay={isActive}
             className="max-h-full max-w-full rounded-lg"
             src={`localfile://localhost/${encodeURIComponent(selectedClip.localFile)}`}
           />
@@ -121,7 +129,10 @@ export function ArrangeTab({ settings, project, setProject }: Props) {
       {/* Sortable cards row — fixed at bottom */}
       <div className="flex-shrink-0 border-t bg-background pt-2 pb-1 px-1">
         <p className="mb-1 px-1 text-[10px] font-medium text-muted-foreground">
-          {completedClips.length} clip{completedClips.length !== 1 ? "s" : ""} — drag to reorder
+          {completedClips.length} clip{completedClips.length !== 1 ? "s" : ""}
+          {" — "}
+          {formatTotalDuration(completedClips)}
+          {" — drag to reorder"}
         </p>
         <DndContext
           sensors={sensors}
@@ -151,6 +162,16 @@ export function ArrangeTab({ settings, project, setProject }: Props) {
       </div>
     </div>
   );
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function formatTotalDuration(clips: ProjectClip[]): string {
+  const total = clips.reduce((sum, c) => sum + (c.editedDuration ?? c.localDuration ?? 0), 0);
+  if (total === 0) return "0:00";
+  const m = Math.floor(total / 60);
+  const s = Math.round(total % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
 // ── Sortable card wrapper ────────────────────────────────────────────────────
