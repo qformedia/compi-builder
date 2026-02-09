@@ -315,7 +315,12 @@ export function ClipCard({
         <button
           onClick={(e) => {
             e.stopPropagation();
-            openUrl(clip.link);
+            // Instagram: open as /p/ instead of /reel/ or /reels/ for better compatibility
+            let url = clip.link;
+            if (url.includes("instagram.com")) {
+              url = url.replace(/\/reels?\//i, "/p/");
+            }
+            openUrl(url);
           }}
           className={`flex flex-1 items-center justify-center gap-1 py-1.5 text-xs font-medium transition-colors hover:bg-muted hover:text-foreground${
             (hasProject && onToggleProject) || onRemove || (ds === "failed" && onRetryDownload)
