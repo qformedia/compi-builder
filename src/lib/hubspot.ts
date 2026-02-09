@@ -12,15 +12,19 @@ interface HubSpotSearchResponse {
   };
 }
 
-/** Search External Clips by tags via the Rust backend (avoids CORS) */
+/** Search External Clips by tags (and optionally scores) via the Rust backend */
 export async function searchClipsByTags(
   token: string,
   tags: string[],
+  scores: string[] = [],
+  neverUsed = false,
   after?: string,
 ): Promise<{ clips: Clip[]; total: number; nextAfter?: string }> {
   const data = await invoke<HubSpotSearchResponse>("search_clips", {
     token,
     tags,
+    scores,
+    neverUsed,
     after: after ?? null,
   });
 
@@ -33,15 +37,19 @@ export async function searchClipsByTags(
   };
 }
 
-/** Fetch ALL clips for a specific creator matching the same tag filters */
+/** Fetch ALL clips for a specific creator matching the same filters */
 export async function searchCreatorClips(
   token: string,
   tags: string[],
+  scores: string[],
+  neverUsed: boolean,
   creatorName: string,
 ): Promise<Clip[]> {
   const data = await invoke<HubSpotSearchResponse>("search_creator_clips", {
     token,
     tags,
+    scores,
+    neverUsed,
     creatorName,
   });
 

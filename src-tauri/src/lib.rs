@@ -62,8 +62,8 @@ const CLIP_PROPERTIES: &[&str] = &[
     "clip_mix_link_10", "notes",
 ];
 
-/// Build the shared search filters for External Clips (tags + creator_status=Granted)
-fn build_clip_filters(tags: &[String]) -> Vec<serde_json::Value> {
+/// Build the shared search filters for External Clips.
+fn build_clip_filters(tags: &[String], scores: &[String], never_used: bool) -> Vec<serde_json::Value> {
     let mut filters: Vec<serde_json::Value> = tags
         .iter()
         .map(|tag| serde_json::json!({
@@ -72,6 +72,22 @@ fn build_clip_filters(tags: &[String]) -> Vec<serde_json::Value> {
             "value": tag
         }))
         .collect();
+
+    if !scores.is_empty() {
+        filters.push(serde_json::json!({
+            "propertyName": "score",
+            "operator": "IN",
+            "values": scores
+        }));
+    }
+
+    if never_used {
+        filters.push(serde_json::json!({
+            "propertyName": "num_of_published_video_project",
+            "operator": "EQ",
+            "value": "0"
+        }));
+    }
 
     filters.push(serde_json::json!({
         "propertyName": "creator_status",
@@ -86,10 +102,12 @@ fn build_clip_filters(tags: &[String]) -> Vec<serde_json::Value> {
 async fn search_clips(
     token: String,
     tags: Vec<String>,
+    scores: Vec<String>,
+    never_used: bool,
     after: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
-    let filters = build_clip_filters(&tags);
+    let filters = build_clip_filters(&tags, &scores, never_used);
 
     let props: Vec<serde_json::Value> = CLIP_PROPERTIES.iter().map(|p| serde_json::json!(p)).collect();
 
@@ -134,10 +152,12 @@ async fn search_clips(
 async fn search_creator_clips(
     token: String,
     tags: Vec<String>,
+    scores: Vec<String>,
+    never_used: bool,
     creator_name: String,
 ) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
-    let mut filters = build_clip_filters(&tags);
+    let mut filters = build_clip_filters(&tags, &scores, never_used);
 
     // Add creator_name filter
     filters.push(serde_json::json!({

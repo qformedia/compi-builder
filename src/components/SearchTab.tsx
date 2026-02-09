@@ -3,9 +3,11 @@ import { Button } from "@/components/ui/button";
 import { Loader2, X, Cookie, ExternalLink } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { TagPicker } from "@/components/TagPicker";
-import { ClipCard } from "@/components/ClipCard";
+import { ClipCard, SCORE_COLORS } from "@/components/ClipCard";
 import { searchClipsByTags, searchCreatorClips } from "@/lib/hubspot";
 import type { AppSettings, Clip, Project } from "@/types";
+
+const SCORE_OPTIONS = ["XL", "L", "M", "S", "XS"] as const;
 
 interface Props {
   settings: AppSettings;
@@ -16,6 +18,8 @@ interface Props {
 
 export function SearchTab({ settings, project, addClip, removeClip }: Props) {
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [selectedScores, setSelectedScores] = useState<string[]>([]);
+  const [neverUsed, setNeverUsed] = useState(false);
   // Initial search results (used to determine creator order)
   const [initialClips, setInitialClips] = useState<Clip[]>([]);
   const [total, setTotal] = useState(0);
@@ -74,6 +78,8 @@ export function SearchTab({ settings, project, addClip, removeClip }: Props) {
       const result = await searchClipsByTags(
         settings.hubspotToken,
         selectedTags,
+        selectedScores,
+        neverUsed,
         loadMore ? nextAfter : undefined,
       );
 
@@ -118,6 +124,8 @@ export function SearchTab({ settings, project, addClip, removeClip }: Props) {
         const clips = await searchCreatorClips(
           settings.hubspotToken,
           selectedTags,
+          selectedScores,
+          neverUsed,
           creatorName,
         );
         setCreatorClipsMap((prev) => new Map(prev).set(creatorName, clips));
@@ -127,7 +135,7 @@ export function SearchTab({ settings, project, addClip, removeClip }: Props) {
         setCreatorLoadState((prev) => new Map(prev).set(creatorName, "pending"));
       }
     },
-    [settings.hubspotToken, selectedTags, creatorLoadState],
+    [settings.hubspotToken, selectedTags, selectedScores, neverUsed, creatorLoadState],
   );
 
   const isInProject = (clipId: string) =>
@@ -136,17 +144,65 @@ export function SearchTab({ settings, project, addClip, removeClip }: Props) {
   return (
     <div className="flex h-full flex-col gap-3 py-4">
       {/* Search controls */}
-      <div className="flex gap-2">
-        <div className="flex-1">
-          <TagPicker selected={selectedTags} onChange={setSelectedTags} />
+      <div className="flex flex-col gap-2">
+        <div className="flex gap-2">
+          <div className="flex-1">
+            <TagPicker selected={selectedTags} onChange={setSelectedTags} />
+          </div>
+          <Button
+            onClick={() => search(false)}
+            disabled={selectedTags.length === 0 || loading}
+          >
+            {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+            Search
+          </Button>
         </div>
-        <Button
-          onClick={() => search(false)}
-          disabled={selectedTags.length === 0 || loading}
-        >
-          {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-          Search
-        </Button>
+        {/* Score filter */}
+        <div className="flex items-center gap-1.5">
+          <span className="text-[11px] font-medium text-muted-foreground mr-1">Size:</span>
+          {SCORE_OPTIONS.map((score) => {
+            const active = selectedScores.includes(score);
+            return (
+              <button
+                key={score}
+                onClick={() =>
+                  setSelectedScores((prev) =>
+                    active ? prev.filter((s) => s !== score) : [...prev, score],
+                  )
+                }
+                className={`rounded px-2 py-0.5 text-[11px] font-bold uppercase leading-none cursor-pointer transition-all ${
+                  active
+                    ? SCORE_COLORS[score]
+                    : "bg-muted text-muted-foreground hover:bg-muted/80"
+                }`}
+              >
+                {score}
+              </button>
+            );
+          })}
+          {selectedScores.length > 0 && (
+            <button
+              onClick={() => setSelectedScores([])}
+              className="ml-1 text-[10px] text-muted-foreground hover:text-foreground cursor-pointer"
+              title="Clear score filter"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          )}
+
+          <span className="mx-2 text-muted-foreground/30">|</span>
+
+          <button
+            onClick={() => setNeverUsed((v) => !v)}
+            className={`rounded px-2 py-0.5 text-[11px] font-medium cursor-pointer transition-all ${
+              neverUsed
+                ? "bg-green-500 text-white"
+                : "bg-muted text-muted-foreground hover:bg-muted/80"
+            }`}
+          >
+            Never used
+          </button>
+        </div>
       </div>
 
       {error && <p className="text-sm text-destructive">{error}</p>}
