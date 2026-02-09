@@ -38,8 +38,11 @@ export interface ClipCardData {
   link: string;
   tags: string[];
   creatorName: string;
+  creatorMainLink?: string;
+  creatorId?: string;
   score?: string;
   editedDuration?: number;
+  dateFound?: string;
   linkNotWorking?: boolean;
   availableAskFirst?: boolean;
   numPublishedVideoProjects?: number;
@@ -175,7 +178,7 @@ export function ClipCard({
   return (
     <div
       ref={cardRef}
-      className="group relative flex w-48 flex-shrink-0 snap-start flex-col overflow-hidden rounded-lg border bg-card transition-shadow hover:shadow-md"
+      className="group relative flex w-52 flex-shrink-0 snap-start flex-col overflow-hidden rounded-lg border bg-card transition-shadow hover:shadow-md"
     >
       {/* Thumbnail / Preview area */}
       <div
@@ -270,9 +273,36 @@ export function ClipCard({
 
       {/* Info section */}
       <div className="flex flex-col gap-1 p-2">
-        {/* Creator name (shown in project tab context) */}
+        {/* Creator name → HubSpot | icon → social profile */}
         {clip.creatorName && (
-          <p className="truncate text-[10px] font-medium">{clip.creatorName}</p>
+          <div className="flex items-center gap-1 min-w-0">
+            {clip.creatorId ? (
+              <button
+                className="truncate text-[10px] font-medium text-left hover:underline"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openUrl(`https://app-eu1.hubspot.com/contacts/146859718/record/2-191972671/${clip.creatorId}`);
+                }}
+                title="Open creator in HubSpot"
+              >
+                {clip.creatorName}
+              </button>
+            ) : (
+              <span className="truncate text-[10px] font-medium">{clip.creatorName}</span>
+            )}
+            {clip.creatorMainLink && (
+              <button
+                className="flex-shrink-0 text-muted-foreground hover:text-foreground transition-colors"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openUrl(clip.creatorMainLink!);
+                }}
+                title="Open creator profile"
+              >
+                <ExternalLink className="h-2.5 w-2.5" />
+              </button>
+            )}
+          </div>
         )}
 
         {/* Tags */}
@@ -291,6 +321,15 @@ export function ClipCard({
 
         {/* Meta line */}
         <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
+          {clip.dateFound && (
+            <span>
+              {new Date(clip.dateFound).toLocaleDateString(undefined, {
+                year: "numeric",
+                month: "short",
+                day: "numeric",
+              })}
+            </span>
+          )}
           {clip.numPublishedVideoProjects != null &&
             clip.numPublishedVideoProjects > 0 && (
               <Popover open={vpOpen} onOpenChange={(open) => {

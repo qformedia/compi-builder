@@ -71,8 +71,8 @@ async fn search_clips(
     let mut body = serde_json::json!({
         "filterGroups": [{ "filters": filters }],
         "properties": [
-            "link", "tags", "creator_name", "creator_status", "score",
-            "edited_duration", "date_found", "link_not_working_anymore",
+            "link", "tags", "creator_name", "creator_status", "creator_main_link", "creator_id",
+            "score", "edited_duration", "date_found", "link_not_working_anymore",
             "available_ask_first", "num_of_published_video_project",
             "clip_mix_link_1", "clip_mix_link_2", "clip_mix_link_3",
             "clip_mix_link_4", "clip_mix_link_5", "clip_mix_link_6",

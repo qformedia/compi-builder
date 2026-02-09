@@ -5,6 +5,8 @@ export interface Clip {
   tags: string[];
   creatorName: string;
   creatorStatus: string;
+  creatorMainLink?: string;
+  creatorId?: string;
   score?: string;
   editedDuration?: number;
   dateFound?: string;

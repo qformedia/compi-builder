@@ -1,7 +1,8 @@
 import { useState, useMemo, useRef } from "react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Loader2, X, Cookie } from "lucide-react";
+import { Loader2, X, Cookie, ExternalLink } from "lucide-react";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { TagPicker } from "@/components/TagPicker";
 import { ClipCard } from "@/components/ClipCard";
 import { searchClipsByTags } from "@/lib/hubspot";
@@ -109,10 +110,35 @@ export function SearchTab({ settings, project, addClip, removeClip }: Props) {
       {/* Results: horizontal scroll rows per creator */}
       <ScrollArea className="flex-1">
         <div className="flex flex-col gap-5 pb-4">
-          {Array.from(grouped.entries()).map(([creator, creatorClips]) => (
+          {Array.from(grouped.entries()).map(([creator, creatorClips]) => {
+            const firstClip = creatorClips[0];
+            const creatorId = firstClip?.creatorId;
+            const creatorMainLink = firstClip?.creatorMainLink;
+            return (
             <div key={creator}>
-              <h3 className="mb-2 text-sm font-semibold">
-                {creator}{" "}
+              <h3 className="mb-2 flex items-center gap-1.5 text-sm font-semibold">
+                {creatorId ? (
+                  <button
+                    className="hover:underline"
+                    onClick={() =>
+                      openUrl(`https://app-eu1.hubspot.com/contacts/146859718/record/2-191972671/${creatorId}`)
+                    }
+                    title="Open creator in HubSpot"
+                  >
+                    {creator}
+                  </button>
+                ) : (
+                  <span>{creator}</span>
+                )}
+                {creatorMainLink && (
+                  <button
+                    className="text-muted-foreground hover:text-foreground transition-colors"
+                    onClick={() => openUrl(creatorMainLink)}
+                    title="Open creator profile"
+                  >
+                    <ExternalLink className="h-3.5 w-3.5" />
+                  </button>
+                )}
                 <span className="font-normal text-muted-foreground">
                   ({creatorClips.length})
                 </span>
@@ -145,7 +171,8 @@ export function SearchTab({ settings, project, addClip, removeClip }: Props) {
                 ))}
               </div>
             </div>
-          ))}
+          );
+          })}
 
           {nextAfter && (
             <Button
