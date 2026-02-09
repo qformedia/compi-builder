@@ -139,6 +139,8 @@ export function SearchTab({ settings, project, addClip, removeClip }: Props) {
                         ? removeClip(clip.id)
                         : addClip(clip)
                     }
+                    hubspotToken={settings.hubspotToken}
+                    searchTags={selectedTags}
                   />
                 ))}
               </div>

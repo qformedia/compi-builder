@@ -42,6 +42,7 @@ pub struct DownloadProgress {
 // ── HubSpot API ─────────────────────────────────────────────────────────────
 
 const EXTERNAL_CLIPS_OBJECT_ID: &str = "2-192287471";
+const VIDEO_PROJECTS_OBJECT_ID: &str = "2-192286893";
 
 #[tauri::command]
 async fn search_clips(
@@ -109,6 +110,102 @@ async fn search_clips(
     res.json::<serde_json::Value>()
         .await
         .map_err(|e| format!("Failed to parse response: {e}"))
+}
+
+/// Fetch Video Projects associated with an External Clip, returning name + category
+#[tauri::command]
+async fn fetch_clip_video_projects(
+    token: String,
+    clip_id: String,
+) -> Result<Vec<serde_json::Value>, String> {
+    let client = reqwest::Client::new();
+
+    // Step 1: Get associated Video Project IDs
+    let assoc_url = format!(
+        "https://api.hubapi.com/crm/v3/objects/{}/{}/associations/{}",
+        EXTERNAL_CLIPS_OBJECT_ID, clip_id, VIDEO_PROJECTS_OBJECT_ID
+    );
+
+    let res = client
+        .get(&assoc_url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("HubSpot associations error ({}): {}", status, text));
+    }
+
+    let body: serde_json::Value = res.json().await
+        .map_err(|e| format!("Failed to parse associations: {e}"))?;
+
+    let project_ids: Vec<String> = body
+        .get("results")
+        .and_then(|r| r.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|item| item.get("id").and_then(|id| id.as_str()).map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if project_ids.is_empty() {
+        return Ok(vec![]);
+    }
+
+    // Step 2: Batch-read those Video Projects
+    let batch_url = format!(
+        "https://api.hubapi.com/crm/v3/objects/{}/batch/read",
+        VIDEO_PROJECTS_OBJECT_ID
+    );
+
+    let batch_body = serde_json::json!({
+        "properties": ["name", "tag", "pub_date", "youtube_video_id", "status"],
+        "inputs": project_ids.iter().map(|id| serde_json::json!({ "id": id })).collect::<Vec<_>>()
+    });
+
+    let res2 = client
+        .post(&batch_url)
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
+        .json(&batch_body)
+        .send()
+        .await
+        .map_err(|e| format!("Batch read failed: {e}"))?;
+
+    if !res2.status().is_success() {
+        let status = res2.status();
+        let text = res2.text().await.unwrap_or_default();
+        return Err(format!("HubSpot batch read error ({}): {}", status, text));
+    }
+
+    let batch_result: serde_json::Value = res2.json().await
+        .map_err(|e| format!("Failed to parse batch read: {e}"))?;
+
+    let projects = batch_result
+        .get("results")
+        .and_then(|r| r.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|item| {
+                    let props = item.get("properties").cloned().unwrap_or(serde_json::json!({}));
+                    serde_json::json!({
+                        "id": item.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                        "name": props.get("name").and_then(|v| v.as_str()).unwrap_or("Unnamed"),
+                        "tag": props.get("tag").and_then(|v| v.as_str()).unwrap_or(""),
+                        "pubDate": props.get("pub_date").and_then(|v| v.as_str()).unwrap_or(""),
+                        "youtubeVideoId": props.get("youtube_video_id").and_then(|v| v.as_str()).unwrap_or(""),
+                        "status": props.get("status").and_then(|v| v.as_str()).unwrap_or(""),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+
+    Ok(projects)
 }
 
 /// Resolve a thumbnail URL for a video link via oEmbed, URL patterns, or yt-dlp fallback
@@ -556,6 +653,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             search_clips,
+            fetch_clip_video_projects,
             fetch_thumbnail,
             create_project,
             load_project,

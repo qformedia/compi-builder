@@ -3,6 +3,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Badge } from "@/components/ui/badge";
 import {
+  Popover,
+  PopoverTrigger,
+  PopoverContent,
+} from "@/components/ui/popover";
+import {
   ExternalLink,
   AlertTriangle,
   Loader2,
@@ -59,9 +64,21 @@ export interface ClipCardProps {
   onToggleProject?: () => void;
   onRemove?: () => void;
   onRetryDownload?: () => void;
+  // "Used Xx" popover context
+  hubspotToken?: string;
+  searchTags?: string[];
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
+
+interface VideoProjectInfo {
+  id: string;
+  name: string;
+  tag: string;
+  pubDate: string;
+  youtubeVideoId: string;
+  status: string;
+}
 
 export function ClipCard({
   clip,
@@ -76,6 +93,8 @@ export function ClipCard({
   onToggleProject,
   onRemove,
   onRetryDownload,
+  hubspotToken,
+  searchTags = [],
 }: ClipCardProps) {
   const [thumb, setThumb] = useState<string | null>(
     thumbCache.current?.get(clip.link) ?? null,
@@ -83,6 +102,27 @@ export function ClipCard({
   const [thumbLoading, setThumbLoading] = useState(false);
   const [thumbError, setThumbError] = useState(false);
   const cardRef = useRef<HTMLDivElement>(null);
+
+  // "Used Xx" popover state
+  const [vpOpen, setVpOpen] = useState(false);
+  const [vpLoading, setVpLoading] = useState(false);
+  const [vpProjects, setVpProjects] = useState<VideoProjectInfo[] | null>(null);
+
+  const loadVideoProjects = useCallback(async () => {
+    if (vpProjects !== null || !hubspotToken) return; // already loaded or no token
+    setVpLoading(true);
+    try {
+      const results = await invoke<VideoProjectInfo[]>("fetch_clip_video_projects", {
+        token: hubspotToken,
+        clipId: clip.id,
+      });
+      setVpProjects(results);
+    } catch {
+      setVpProjects([]);
+    } finally {
+      setVpLoading(false);
+    }
+  }, [clip.id, hubspotToken, vpProjects]);
 
   // Lazy-load thumbnail when card scrolls into view
   const loadThumb = useCallback(async () => {
@@ -253,7 +293,100 @@ export function ClipCard({
         <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
           {clip.numPublishedVideoProjects != null &&
             clip.numPublishedVideoProjects > 0 && (
-              <span>Used {clip.numPublishedVideoProjects}x</span>
+              <Popover open={vpOpen} onOpenChange={(open) => {
+                setVpOpen(open);
+                if (open) loadVideoProjects();
+              }}>
+                <PopoverTrigger asChild>
+                  <button
+                    className="cursor-pointer underline decoration-dotted underline-offset-2 hover:text-foreground transition-colors"
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    Used {clip.numPublishedVideoProjects}x
+                  </button>
+                </PopoverTrigger>
+                <PopoverContent
+                  className="w-64 p-3"
+                  align="start"
+                  onClick={(e) => e.stopPropagation()}
+                >
+                  <p className="mb-2 text-xs font-semibold">Video Projects</p>
+                  {vpLoading ? (
+                    <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                      <Loader2 className="h-3 w-3 animate-spin" /> Loading…
+                    </div>
+                  ) : vpProjects && vpProjects.length > 0 ? (
+                    <ul className="flex flex-col gap-2">
+                      {vpProjects.map((vp) => {
+                        const tags = vp.tag
+                          ? vp.tag.split(";").map((c) => c.trim())
+                          : [];
+                        const searchTagsLower = searchTags.map((t) => t.toLowerCase());
+                        const dateStr = vp.pubDate
+                          ? new Date(vp.pubDate).toLocaleDateString(undefined, {
+                              year: "numeric",
+                              month: "short",
+                              day: "numeric",
+                            })
+                          : "";
+                        const hubspotUrl = `https://app-eu1.hubspot.com/contacts/146859718/record/2-192286893/${vp.id}`;
+                        const youtubeUrl = vp.youtubeVideoId
+                          ? `https://www.youtube.com/watch?v=${vp.youtubeVideoId}`
+                          : null;
+                        return (
+                          <li key={vp.id} className="text-xs">
+                            <div className="flex items-center gap-1">
+                              <button
+                                className="font-medium text-left hover:underline truncate"
+                                onClick={() => openUrl(hubspotUrl)}
+                                title="Open in HubSpot"
+                              >
+                                {vp.name}
+                              </button>
+                              {youtubeUrl && (
+                                <button
+                                  className="flex-shrink-0 text-red-500 hover:text-red-600 transition-colors"
+                                  onClick={() => openUrl(youtubeUrl)}
+                                  title="Watch on YouTube"
+                                >
+                                  <svg className="h-3.5 w-3.5" viewBox="0 0 24 24" fill="currentColor">
+                                    <path d="M23.498 6.186a3.016 3.016 0 0 0-2.122-2.136C19.505 3.545 12 3.545 12 3.545s-7.505 0-9.377.505A3.017 3.017 0 0 0 .502 6.186C0 8.07 0 12 0 12s0 3.93.502 5.814a3.016 3.016 0 0 0 2.122 2.136c1.871.505 9.376.505 9.376.505s7.505 0 9.377-.505a3.015 3.015 0 0 0 2.122-2.136C24 15.93 24 12 24 12s0-3.93-.502-5.814zM9.545 15.568V8.432L15.818 12l-6.273 3.568z"/>
+                                  </svg>
+                                </button>
+                              )}
+                            </div>
+                            {dateStr && (
+                              <span className="text-[10px] text-muted-foreground">{dateStr}</span>
+                            )}
+                            {tags.length > 0 && (
+                              <div className="mt-0.5 flex flex-wrap gap-1">
+                                {tags.map((cat) => {
+                                  const matches = searchTagsLower.includes(cat.toLowerCase());
+                                  return (
+                                    <Badge
+                                      key={cat}
+                                      variant="outline"
+                                      className={`text-[10px] px-1 py-0 ${
+                                        matches
+                                          ? "border-primary bg-primary/10 text-primary font-semibold"
+                                          : ""
+                                      }`}
+                                    >
+                                      {cat}
+                                    </Badge>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  ) : (
+                    <p className="text-xs text-muted-foreground">No projects found</p>
+                  )}
+                </PopoverContent>
+              </Popover>
             )}
           {clip.availableAskFirst && (
             <span className="text-orange-500 font-medium">Ask first</span>
