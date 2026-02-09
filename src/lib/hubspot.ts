@@ -68,7 +68,7 @@ function parseClip(record: {
     creatorStatus: p.creator_status ?? "",
     creatorMainLink: p.creator_main_link ?? undefined,
     creatorId: p.creator_id ?? undefined,
-    score: p.score ?? undefined,
+    score: p.score?.trim() || undefined,
     editedDuration: p.edited_duration ? Number(p.edited_duration) : undefined,
     dateFound: p.date_found ?? undefined,
     linkNotWorking: p.link_not_working_anymore === "true",

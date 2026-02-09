@@ -246,7 +246,7 @@ export function ClipCard({
         {clip.score && (
           <div className="absolute right-1.5 top-1.5">
             <span
-              className={`inline-block rounded px-2 py-1 text-[15px] font-bold uppercase leading-none ${SCORE_COLORS[clip.score] ?? "bg-gray-500 text-white"}`}
+              className={`inline-block rounded px-2 py-1 text-[15px] font-bold uppercase leading-none ${SCORE_COLORS[clip.score.toUpperCase()] ?? SCORE_COLORS[clip.score] ?? "bg-gray-500 text-white"}`}
             >
               {clip.score}
             </span>
