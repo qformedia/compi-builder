@@ -13,6 +13,9 @@ pub struct ProjectClip {
     #[serde(rename = "creatorName")]
     pub creator_name: String,
     pub tags: Vec<String>,
+    pub score: Option<String>,
+    #[serde(rename = "editedDuration")]
+    pub edited_duration: Option<f64>,
     #[serde(rename = "localFile")]
     pub local_file: Option<String>,
     #[serde(rename = "downloadStatus")]
@@ -44,15 +47,19 @@ pub struct DownloadProgress {
 const EXTERNAL_CLIPS_OBJECT_ID: &str = "2-192287471";
 const VIDEO_PROJECTS_OBJECT_ID: &str = "2-192286893";
 
-#[tauri::command]
-async fn search_clips(
-    token: String,
-    tags: Vec<String>,
-    after: Option<String>,
-) -> Result<serde_json::Value, String> {
-    let client = reqwest::Client::new();
+/// Shared clip properties requested from HubSpot
+const CLIP_PROPERTIES: &[&str] = &[
+    "link", "tags", "creator_name", "creator_status", "creator_main_link", "creator_id",
+    "score", "edited_duration", "date_found", "link_not_working_anymore",
+    "available_ask_first", "num_of_published_video_project",
+    "clip_mix_link_1", "clip_mix_link_2", "clip_mix_link_3",
+    "clip_mix_link_4", "clip_mix_link_5", "clip_mix_link_6",
+    "clip_mix_link_7", "clip_mix_link_8", "clip_mix_link_9",
+    "clip_mix_link_10", "notes",
+];
 
-    // Build filters: each tag as EQ + creator_status=Granted
+/// Build the shared search filters for External Clips (tags + creator_status=Granted)
+fn build_clip_filters(tags: &[String]) -> Vec<serde_json::Value> {
     let mut filters: Vec<serde_json::Value> = tags
         .iter()
         .map(|tag| serde_json::json!({
@@ -68,17 +75,23 @@ async fn search_clips(
         "value": "Granted"
     }));
 
+    filters
+}
+
+#[tauri::command]
+async fn search_clips(
+    token: String,
+    tags: Vec<String>,
+    after: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let filters = build_clip_filters(&tags);
+
+    let props: Vec<serde_json::Value> = CLIP_PROPERTIES.iter().map(|p| serde_json::json!(p)).collect();
+
     let mut body = serde_json::json!({
         "filterGroups": [{ "filters": filters }],
-        "properties": [
-            "link", "tags", "creator_name", "creator_status", "creator_main_link", "creator_id",
-            "score", "edited_duration", "date_found", "link_not_working_anymore",
-            "available_ask_first", "num_of_published_video_project",
-            "clip_mix_link_1", "clip_mix_link_2", "clip_mix_link_3",
-            "clip_mix_link_4", "clip_mix_link_5", "clip_mix_link_6",
-            "clip_mix_link_7", "clip_mix_link_8", "clip_mix_link_9",
-            "clip_mix_link_10", "notes"
-        ],
+        "properties": props,
         "sorts": [{ "propertyName": "date_found", "direction": "DESCENDING" }],
         "limit": 50
     });
@@ -110,6 +123,85 @@ async fn search_clips(
     res.json::<serde_json::Value>()
         .await
         .map_err(|e| format!("Failed to parse response: {e}"))
+}
+
+/// Fetch ALL clips for a specific creator matching the same tag filters, auto-paginating.
+#[tauri::command]
+async fn search_creator_clips(
+    token: String,
+    tags: Vec<String>,
+    creator_name: String,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let mut filters = build_clip_filters(&tags);
+
+    // Add creator_name filter
+    filters.push(serde_json::json!({
+        "propertyName": "creator_name",
+        "operator": "EQ",
+        "value": creator_name
+    }));
+
+    let props: Vec<serde_json::Value> = CLIP_PROPERTIES.iter().map(|p| serde_json::json!(p)).collect();
+    let url = format!(
+        "https://api.hubapi.com/crm/v3/objects/{}/search",
+        EXTERNAL_CLIPS_OBJECT_ID
+    );
+
+    let mut all_results: Vec<serde_json::Value> = Vec::new();
+    let mut after: Option<String> = None;
+
+    loop {
+        let mut body = serde_json::json!({
+            "filterGroups": [{ "filters": filters }],
+            "properties": props,
+            "sorts": [{ "propertyName": "date_found", "direction": "DESCENDING" }],
+            "limit": 100
+        });
+
+        if let Some(ref after_val) = after {
+            body.as_object_mut().unwrap().insert("after".into(), serde_json::json!(after_val));
+        }
+
+        let res = client
+            .post(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Request failed: {e}"))?;
+
+        if !res.status().is_success() {
+            let status = res.status();
+            let text = res.text().await.unwrap_or_default();
+            return Err(format!("HubSpot API error ({}): {}", status, text));
+        }
+
+        let page: serde_json::Value = res.json().await
+            .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+        if let Some(results) = page.get("results").and_then(|r| r.as_array()) {
+            all_results.extend(results.iter().cloned());
+        }
+
+        // Check for next page
+        after = page
+            .get("paging")
+            .and_then(|p| p.get("next"))
+            .and_then(|n| n.get("after"))
+            .and_then(|a| a.as_str())
+            .map(String::from);
+
+        if after.is_none() {
+            break;
+        }
+    }
+
+    Ok(serde_json::json!({
+        "total": all_results.len(),
+        "results": all_results
+    }))
 }
 
 /// Fetch Video Projects associated with an External Clip, returning name + category
@@ -653,6 +745,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             search_clips,
+            search_creator_clips,
             fetch_clip_video_projects,
             fetch_thumbnail,
             create_project,

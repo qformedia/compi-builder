@@ -31,6 +31,8 @@ function toCardData(clip: ProjectClip): ClipCardData {
     link: clip.link,
     tags: clip.tags,
     creatorName: clip.creatorName,
+    score: clip.score,
+    editedDuration: clip.editedDuration,
     downloadStatus: clip.downloadStatus,
     downloadError: clip.downloadError,
   };

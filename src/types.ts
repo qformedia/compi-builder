@@ -30,6 +30,8 @@ export interface ProjectClip {
   link: string;
   creatorName: string;
   tags: string[];
+  score?: string;
+  editedDuration?: number;
   localFile?: string;
   downloadStatus: "pending" | "downloading" | "complete" | "failed";
   downloadError?: string;

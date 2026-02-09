@@ -15,7 +15,7 @@ import {
   arrayMove,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { GripVertical } from "lucide-react";
+import { GripHorizontal } from "lucide-react";
 import { ClipCard } from "@/components/ClipCard";
 import type { AppSettings, Project, ProjectClip } from "@/types";
 import type { ClipCardData } from "@/components/ClipCard";
@@ -32,6 +32,8 @@ function toCardData(clip: ProjectClip): ClipCardData {
     link: clip.link,
     tags: clip.tags,
     creatorName: clip.creatorName,
+    score: clip.score,
+    editedDuration: clip.editedDuration,
     downloadStatus: clip.downloadStatus,
     downloadError: clip.downloadError,
   };
@@ -99,9 +101,9 @@ export function ArrangeTab({ settings, project, setProject }: Props) {
   };
 
   return (
-    <div className="flex h-full flex-col gap-4 py-4">
-      {/* Video player */}
-      <div className="flex max-h-[60%] flex-1 items-center justify-center rounded-lg bg-black">
+    <div className="flex h-full flex-col">
+      {/* Video player — fills remaining space above cards */}
+      <div className="flex min-h-0 flex-1 items-center justify-center rounded-lg bg-black">
         {selectedClip?.localFile ? (
           <video
             ref={videoRef}
@@ -116,9 +118,9 @@ export function ArrangeTab({ settings, project, setProject }: Props) {
         )}
       </div>
 
-      {/* Sortable cards row */}
-      <div className="flex-shrink-0">
-        <p className="mb-2 text-xs font-medium text-muted-foreground">
+      {/* Sortable cards row — fixed at bottom */}
+      <div className="flex-shrink-0 border-t bg-background pt-2 pb-1 px-1">
+        <p className="mb-1 px-1 text-[10px] font-medium text-muted-foreground">
           {completedClips.length} clip{completedClips.length !== 1 ? "s" : ""} — drag to reorder
         </p>
         <DndContext
@@ -130,7 +132,7 @@ export function ArrangeTab({ settings, project, setProject }: Props) {
             items={completedClips.map((c) => c.hubspotId)}
             strategy={horizontalListSortingStrategy}
           >
-            <div className="flex gap-3 overflow-x-auto pb-2 scroll-smooth">
+            <div className="flex gap-2 overflow-x-auto pb-1 scroll-smooth">
               {completedClips.map((clip, index) => (
                 <SortableCard
                   key={clip.hubspotId}
@@ -189,28 +191,24 @@ function SortableCard({
     <div
       ref={setNodeRef}
       style={style}
-      className="relative flex-shrink-0"
+      className={`flex-shrink-0 rounded-lg overflow-hidden cursor-grab touch-none [&_*]:!cursor-grab ${isSelected ? "border-2 border-green-500" : "border border-border"}`}
       onClick={onSelect}
+      {...attributes}
+      {...listeners}
     >
-      {/* Order badge + drag handle */}
-      <div
-        className="absolute -left-1 -top-1 z-10 flex cursor-grab touch-none items-center gap-0.5 rounded-br-md rounded-tl-lg bg-black/70 px-1 py-0.5 text-white"
-        {...attributes}
-        {...listeners}
-      >
-        <GripVertical className="h-3 w-3" />
-        <span className="text-[10px] font-bold">{index + 1}</span>
+      {/* Top bar: order number + drag icon */}
+      <div className="flex items-center justify-between border-b bg-muted/50 px-2 py-1">
+        <span className="text-[11px] font-bold text-muted-foreground">#{index + 1}</span>
+        <GripHorizontal className="h-3.5 w-3.5 text-muted-foreground" />
       </div>
 
-      {/* Selection ring */}
-      <div className={`rounded-lg ${isSelected ? "ring-2 ring-primary ring-offset-1" : ""}`}>
-        <ClipCard
-          clip={toCardData(clip)}
-          thumbCache={thumbCache}
-          cookiesBrowser={cookiesBrowser}
-          cookiesFile={cookiesFile}
-        />
-      </div>
+      <ClipCard
+        clip={toCardData(clip)}
+        thumbCache={thumbCache}
+        cookiesBrowser={cookiesBrowser}
+        cookiesFile={cookiesFile}
+        compact
+      />
     </div>
   );
 }

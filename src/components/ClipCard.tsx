@@ -17,7 +17,6 @@ import {
   Trash2,
   Download,
   CheckCircle,
-  XCircle,
 } from "lucide-react";
 
 // ── Score badge colors (mimicking HubSpot) ──────────────────────────────────
@@ -70,6 +69,8 @@ export interface ClipCardProps {
   // "Used Xx" popover context
   hubspotToken?: string;
   searchTags?: string[];
+  // Compact mode: thumbnail + overlays only (no info/tags/action bar)
+  compact?: boolean;
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -98,6 +99,7 @@ export function ClipCard({
   onRetryDownload,
   hubspotToken,
   searchTags = [],
+  compact = false,
 }: ClipCardProps) {
   const [thumb, setThumb] = useState<string | null>(
     thumbCache.current?.get(clip.link) ?? null,
@@ -178,7 +180,7 @@ export function ClipCard({
   return (
     <div
       ref={cardRef}
-      className="group relative flex w-52 flex-shrink-0 snap-start flex-col overflow-hidden rounded-lg border bg-card transition-shadow hover:shadow-md"
+      className={`group relative flex flex-shrink-0 snap-start flex-col overflow-hidden rounded-lg border bg-card transition-shadow hover:shadow-md ${compact ? "w-28" : "w-52"}`}
     >
       {/* Thumbnail / Preview area */}
       <div
@@ -233,28 +235,18 @@ export function ClipCard({
           </div>
         )}
 
-        {/* Download status overlay */}
+        {/* Download status overlay (only spinner while downloading) */}
         {ds === "downloading" && (
           <div className="absolute inset-0 flex items-center justify-center bg-black/40">
             <Loader2 className="h-6 w-6 animate-spin text-white" />
           </div>
         )}
-        {ds === "complete" && (
-          <div className="absolute right-1.5 top-1.5">
-            <CheckCircle className="h-4 w-4 text-green-400 drop-shadow" />
-          </div>
-        )}
-        {ds === "failed" && (
-          <div className="absolute right-1.5 top-1.5">
-            <XCircle className="h-4 w-4 text-red-400 drop-shadow" />
-          </div>
-        )}
 
         {/* Score badge */}
         {clip.score && (
-          <div className="absolute left-1.5 bottom-1.5">
+          <div className="absolute right-1.5 top-1.5">
             <span
-              className={`inline-block rounded px-1.5 py-0.5 text-[10px] font-bold uppercase leading-none ${SCORE_COLORS[clip.score] ?? "bg-gray-500 text-white"}`}
+              className={`inline-block rounded px-2 py-1 text-[15px] font-bold uppercase leading-none ${SCORE_COLORS[clip.score] ?? "bg-gray-500 text-white"}`}
             >
               {clip.score}
             </span>
@@ -264,54 +256,47 @@ export function ClipCard({
         {/* Duration overlay */}
         {clip.editedDuration != null && (
           <div className="absolute bottom-1.5 right-1.5">
-            <span className="rounded bg-black/70 px-1.5 py-0.5 text-[10px] font-medium text-white">
+            <span className="rounded bg-black/70 px-1.5 py-0.5 text-[13px] font-medium text-white">
               {formatDuration(clip.editedDuration)}
             </span>
           </div>
         )}
       </div>
 
-      {/* Info section */}
-      <div className="flex flex-col gap-1 p-2">
-        {/* Creator name → HubSpot | icon → social profile */}
+      {/* Info section (hidden in compact mode) */}
+      {!compact && <div className="flex flex-col gap-1 p-2">
+        {/* Creator name → links to External Clip in HubSpot */}
         {clip.creatorName && (
-          <div className="flex items-center gap-1 min-w-0">
-            {clip.creatorId ? (
-              <button
-                className="truncate text-[10px] font-medium text-left hover:underline"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  openUrl(`https://app-eu1.hubspot.com/contacts/146859718/record/2-191972671/${clip.creatorId}`);
-                }}
-                title="Open creator in HubSpot"
-              >
-                {clip.creatorName}
-              </button>
-            ) : (
-              <span className="truncate text-[10px] font-medium">{clip.creatorName}</span>
-            )}
-            {clip.creatorMainLink && (
-              <button
-                className="flex-shrink-0 text-muted-foreground hover:text-foreground transition-colors"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  openUrl(clip.creatorMainLink!);
-                }}
-                title="Open creator profile"
-              >
-                <ExternalLink className="h-2.5 w-2.5" />
-              </button>
-            )}
-          </div>
+          <button
+            className="truncate text-[10px] font-medium text-left cursor-pointer hover:underline"
+            onClick={(e) => {
+              e.stopPropagation();
+              openUrl(`https://app-eu1.hubspot.com/contacts/146859718/record/2-192287471/${clip.id}`);
+            }}
+            title="Open clip in HubSpot"
+          >
+            {clip.creatorName}
+          </button>
         )}
 
         {/* Tags */}
         <div className="flex flex-wrap gap-1">
-          {clip.tags.slice(0, 3).map((tag) => (
-            <Badge key={tag} variant="outline" className="text-[10px] px-1 py-0">
-              {tag}
-            </Badge>
-          ))}
+          {clip.tags.slice(0, 3).map((tag) => {
+            const isSearched = searchTags.some((t) => t.toLowerCase() === tag.toLowerCase());
+            return (
+              <Badge
+                key={tag}
+                variant="outline"
+                className={`text-[10px] px-1 py-0 ${
+                  isSearched
+                    ? "border-green-400 bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300 dark:border-green-700"
+                    : ""
+                }`}
+              >
+                {tag}
+              </Badge>
+            );
+          })}
           {clip.tags.length > 3 && (
             <Badge variant="outline" className="text-[10px] px-1 py-0">
               +{clip.tags.length - 3}
@@ -321,15 +306,19 @@ export function ClipCard({
 
         {/* Meta line */}
         <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
-          {clip.dateFound && (
-            <span>
-              {new Date(clip.dateFound).toLocaleDateString(undefined, {
-                year: "numeric",
-                month: "short",
-                day: "numeric",
-              })}
-            </span>
-          )}
+          {clip.dateFound && (() => {
+            const d = new Date(clip.dateFound);
+            const isRecent = Date.now() - d.getTime() < 30 * 24 * 60 * 60 * 1000;
+            return (
+              <span className={isRecent ? "text-green-500 font-semibold" : ""}>
+                {d.toLocaleDateString(undefined, {
+                  year: "numeric",
+                  month: "short",
+                  day: "numeric",
+                })}
+              </span>
+            );
+          })()}
           {clip.numPublishedVideoProjects != null &&
             clip.numPublishedVideoProjects > 0 && (
               <Popover open={vpOpen} onOpenChange={(open) => {
@@ -407,7 +396,7 @@ export function ClipCard({
                                       variant="outline"
                                       className={`text-[10px] px-1 py-0 ${
                                         matches
-                                          ? "border-primary bg-primary/10 text-primary font-semibold"
+                                          ? "border-green-400 bg-green-100 text-green-700 font-semibold dark:bg-green-950 dark:text-green-300 dark:border-green-700"
                                           : ""
                                       }`}
                                     >
@@ -438,15 +427,15 @@ export function ClipCard({
             {clip.downloadError}
           </p>
         )}
-      </div>
+      </div>}
 
-      {/* Action buttons bar */}
-      <div className="mt-auto flex border-t">
+      {/* Action buttons bar (hidden in compact mode) */}
+      {!compact && <div className="mt-auto flex border-t">
         {/* Add/Remove for search context */}
         {hasProject && onToggleProject && (
           <button
             onClick={onToggleProject}
-            className={`flex flex-1 items-center justify-center gap-1 py-1.5 text-xs font-medium transition-colors ${
+            className={`flex flex-1 items-center justify-center gap-1 py-1.5 text-xs font-medium cursor-pointer transition-colors ${
               inProject
                 ? "bg-primary text-primary-foreground"
                 : "hover:bg-muted"
@@ -461,22 +450,37 @@ export function ClipCard({
           </button>
         )}
 
-        {/* Retry download for failed clips */}
+        {/* Download status + Retry in bottom-left, next to bin */}
         {ds === "failed" && onRetryDownload && (
           <button
             onClick={onRetryDownload}
-            className="flex flex-1 items-center justify-center gap-1 py-1.5 text-xs font-medium text-orange-600 transition-colors hover:bg-muted"
+            className="flex items-center justify-center gap-1 px-2 py-1.5 text-xs font-medium text-orange-600 transition-colors hover:bg-muted cursor-pointer"
             title="Retry download"
           >
             <Download className="h-3.5 w-3.5" /> Retry
           </button>
+        )}
+        {ds === "downloading" && (
+          <span className="flex items-center gap-1 px-2 py-1.5 text-[10px] text-muted-foreground">
+            <Loader2 className="h-3 w-3 animate-spin" />
+          </span>
+        )}
+        {ds === "complete" && (
+          <span className="flex items-center gap-1 px-2 py-1.5 text-[10px] text-green-600">
+            <CheckCircle className="h-3 w-3" />
+          </span>
+        )}
+        {ds === "pending" && onRemove && (
+          <span className="flex items-center gap-1 px-2 py-1.5 text-[10px] text-muted-foreground">
+            <Download className="h-3 w-3" />
+          </span>
         )}
 
         {/* Remove from project */}
         {onRemove && (
           <button
             onClick={onRemove}
-            className="flex items-center justify-center gap-1 px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-destructive"
+            className="flex items-center justify-center gap-1 px-2 py-1.5 text-xs text-muted-foreground transition-colors hover:bg-muted hover:text-destructive cursor-pointer"
             title="Remove from project"
           >
             <Trash2 className="h-3.5 w-3.5" />
@@ -494,16 +498,16 @@ export function ClipCard({
             }
             openUrl(url);
           }}
-          className={`flex flex-1 items-center justify-center gap-1 py-1.5 text-xs font-medium transition-colors hover:bg-muted hover:text-foreground${
+          className={`flex flex-1 items-center justify-center gap-1 py-1.5 text-xs font-medium cursor-pointer transition-colors hover:bg-muted${
             (hasProject && onToggleProject) || onRemove || (ds === "failed" && onRetryDownload)
-              ? " border-l text-muted-foreground"
+              ? " border-l"
               : ""
           }`}
           title="Open in browser"
         >
           <ExternalLink className="h-3.5 w-3.5" /> Open
         </button>
-      </div>
+      </div>}
     </div>
   );
 }

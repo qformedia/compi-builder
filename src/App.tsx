@@ -43,6 +43,8 @@ function App() {
       link: clip.link,
       creatorName: clip.creatorName,
       tags: clip.tags,
+      score: clip.score,
+      editedDuration: clip.editedDuration,
       downloadStatus: "pending",
       order: project.clips.length,
     };

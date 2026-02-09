@@ -33,6 +33,21 @@ export async function searchClipsByTags(
   };
 }
 
+/** Fetch ALL clips for a specific creator matching the same tag filters */
+export async function searchCreatorClips(
+  token: string,
+  tags: string[],
+  creatorName: string,
+): Promise<Clip[]> {
+  const data = await invoke<HubSpotSearchResponse>("search_creator_clips", {
+    token,
+    tags,
+    creatorName,
+  });
+
+  return data.results.map(parseClip);
+}
+
 function parseClip(record: {
   id: string;
   properties: Record<string, string | null>;
