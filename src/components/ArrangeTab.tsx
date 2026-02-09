@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   DndContext,
@@ -10,17 +10,15 @@ import {
 } from "@dnd-kit/core";
 import {
   SortableContext,
-  sortableKeyboardCoordinates,
-  verticalListSortingStrategy,
+  horizontalListSortingStrategy,
   useSortable,
   arrayMove,
 } from "@dnd-kit/sortable";
-import { KeyboardSensor } from "@dnd-kit/core";
 import { CSS } from "@dnd-kit/utilities";
-import { Card } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
-import { GripVertical, Play } from "lucide-react";
+import { GripVertical } from "lucide-react";
+import { ClipCard } from "@/components/ClipCard";
 import type { AppSettings, Project, ProjectClip } from "@/types";
+import type { ClipCardData } from "@/components/ClipCard";
 
 interface Props {
   settings: AppSettings;
@@ -28,14 +26,24 @@ interface Props {
   setProject: (p: Project | null) => void;
 }
 
+function toCardData(clip: ProjectClip): ClipCardData {
+  return {
+    id: clip.hubspotId,
+    link: clip.link,
+    tags: clip.tags,
+    creatorName: clip.creatorName,
+    downloadStatus: clip.downloadStatus,
+    downloadError: clip.downloadError,
+  };
+}
+
 export function ArrangeTab({ settings, project, setProject }: Props) {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const thumbCache = useRef(new Map<string, string | null>());
 
   const sensors = useSensors(
-    useSensor(PointerSensor),
-    useSensor(KeyboardSensor, {
-      coordinateGetter: sortableKeyboardCoordinates,
-    }),
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
   );
 
   if (!project) {
@@ -60,7 +68,7 @@ export function ArrangeTab({ settings, project, setProject }: Props) {
 
   const selectedClip = completedClips.find(
     (c) => c.hubspotId === selectedClipId,
-  );
+  ) ?? completedClips[0];
 
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
@@ -74,7 +82,6 @@ export function ArrangeTab({ settings, project, setProject }: Props) {
     );
     const reordered = arrayMove(completedClips, oldIndex, newIndex);
 
-    // Rebuild full clips list: keep non-completed as-is, replace completed with reordered
     const nonCompleted = project.clips.filter(
       (c) => c.downloadStatus !== "complete" || !c.localFile,
     );
@@ -92,10 +99,26 @@ export function ArrangeTab({ settings, project, setProject }: Props) {
   };
 
   return (
-    <div className="flex h-full gap-4 py-4">
-      {/* Left: sortable list */}
-      <div className="flex w-80 flex-shrink-0 flex-col gap-2">
-        <p className="text-sm font-medium">
+    <div className="flex h-full flex-col gap-4 py-4">
+      {/* Video player */}
+      <div className="flex max-h-[60%] flex-1 items-center justify-center rounded-lg bg-black">
+        {selectedClip?.localFile ? (
+          <video
+            ref={videoRef}
+            key={selectedClip.localFile}
+            controls
+            autoPlay
+            className="max-h-full max-w-full rounded-lg"
+            src={`localfile://localhost/${encodeURIComponent(selectedClip.localFile)}`}
+          />
+        ) : (
+          <p className="text-sm text-white/40">Select a clip to preview</p>
+        )}
+      </div>
+
+      {/* Sortable cards row */}
+      <div className="flex-shrink-0">
+        <p className="mb-2 text-xs font-medium text-muted-foreground">
           {completedClips.length} clip{completedClips.length !== 1 ? "s" : ""} — drag to reorder
         </p>
         <DndContext
@@ -105,60 +128,47 @@ export function ArrangeTab({ settings, project, setProject }: Props) {
         >
           <SortableContext
             items={completedClips.map((c) => c.hubspotId)}
-            strategy={verticalListSortingStrategy}
+            strategy={horizontalListSortingStrategy}
           >
-            <div className="flex flex-col gap-1">
+            <div className="flex gap-3 overflow-x-auto pb-2 scroll-smooth">
               {completedClips.map((clip, index) => (
-                <SortableClipItem
+                <SortableCard
                   key={clip.hubspotId}
                   clip={clip}
                   index={index}
-                  isSelected={clip.hubspotId === selectedClipId}
+                  isSelected={clip.hubspotId === selectedClip?.hubspotId}
                   onSelect={() => setSelectedClipId(clip.hubspotId)}
+                  thumbCache={thumbCache}
+                  cookiesBrowser={settings.cookiesBrowser}
+                  cookiesFile={settings.cookiesFile}
                 />
               ))}
             </div>
           </SortableContext>
         </DndContext>
       </div>
-
-      {/* Right: video player */}
-      <div className="flex flex-1 flex-col gap-2">
-        {selectedClip?.localFile ? (
-          <>
-            <video
-              key={selectedClip.localFile}
-              controls
-              autoPlay
-              className="max-h-[70vh] w-full rounded-lg bg-black"
-              src={`localfile://localhost/${encodeURIComponent(selectedClip.localFile)}`}
-            />
-            <p className="text-sm text-muted-foreground">
-              {selectedClip.creatorName} — {selectedClip.tags.join(", ")}
-            </p>
-          </>
-        ) : (
-          <div className="flex flex-1 items-center justify-center rounded-lg border border-dashed">
-            <p className="text-sm text-muted-foreground">
-              Select a clip to preview
-            </p>
-          </div>
-        )}
-      </div>
     </div>
   );
 }
 
-function SortableClipItem({
+// ── Sortable card wrapper ────────────────────────────────────────────────────
+
+function SortableCard({
   clip,
   index,
   isSelected,
   onSelect,
+  thumbCache,
+  cookiesBrowser,
+  cookiesFile,
 }: {
   clip: ProjectClip;
   index: number;
   isSelected: boolean;
   onSelect: () => void;
+  thumbCache: React.RefObject<Map<string, string | null>>;
+  cookiesBrowser: string;
+  cookiesFile: string;
 }) {
   const {
     attributes,
@@ -176,35 +186,31 @@ function SortableClipItem({
   };
 
   return (
-    <Card
+    <div
       ref={setNodeRef}
       style={style}
-      className={`flex cursor-pointer items-center gap-2 p-2 ${
-        isSelected ? "border-primary" : ""
-      }`}
+      className="relative flex-shrink-0"
       onClick={onSelect}
     >
+      {/* Order badge + drag handle */}
       <div
-        className="cursor-grab touch-none text-muted-foreground"
+        className="absolute -left-1 -top-1 z-10 flex cursor-grab touch-none items-center gap-0.5 rounded-br-md rounded-tl-lg bg-black/70 px-1 py-0.5 text-white"
         {...attributes}
         {...listeners}
       >
-        <GripVertical className="h-4 w-4" />
+        <GripVertical className="h-3 w-3" />
+        <span className="text-[10px] font-bold">{index + 1}</span>
       </div>
-      <span className="text-xs font-medium text-muted-foreground w-5">
-        {index + 1}
-      </span>
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-sm">{clip.creatorName}</p>
-        <div className="flex gap-1">
-          {clip.tags.slice(0, 2).map((tag) => (
-            <Badge key={tag} variant="outline" className="text-xs">
-              {tag}
-            </Badge>
-          ))}
-        </div>
+
+      {/* Selection ring */}
+      <div className={`rounded-lg ${isSelected ? "ring-2 ring-primary ring-offset-1" : ""}`}>
+        <ClipCard
+          clip={toCardData(clip)}
+          thumbCache={thumbCache}
+          cookiesBrowser={cookiesBrowser}
+          cookiesFile={cookiesFile}
+        />
       </div>
-      <Play className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground" />
-    </Card>
+    </div>
   );
 }

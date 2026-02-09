@@ -38,4 +38,6 @@ export interface ProjectClip {
 export interface AppSettings {
   hubspotToken: string;
   rootFolder: string;
+  cookiesBrowser: string; // "chrome" | "firefox" | "safari" | "edge" | "brave" | "opera" | "chromium" | ""
+  cookiesFile: string;    // manual cookies.txt fallback
 }

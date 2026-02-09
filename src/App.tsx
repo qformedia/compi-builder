@@ -13,6 +13,8 @@ import "./App.css";
 const DEFAULT_SETTINGS: AppSettings = {
   hubspotToken: "",
   rootFolder: "",
+  cookiesBrowser: "chrome",
+  cookiesFile: "",
 };
 
 function App() {
@@ -57,6 +59,8 @@ function App() {
       projectName: project.name,
       clipId: clip.id,
       url: clip.link,
+      cookiesBrowser: settings.cookiesBrowser || null,
+      cookiesFile: settings.cookiesFile || null,
     }).catch(() => {});
   };
 

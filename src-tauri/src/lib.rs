@@ -111,6 +111,156 @@ async fn search_clips(
         .map_err(|e| format!("Failed to parse response: {e}"))
 }
 
+/// Resolve a thumbnail URL for a video link via oEmbed, URL patterns, or yt-dlp fallback
+#[tauri::command]
+async fn fetch_thumbnail(url: String, cookies_browser: Option<String>, cookies_file: Option<String>) -> Result<Option<String>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // YouTube: construct thumbnail directly (instant, no API call)
+    if url.contains("youtube.com") || url.contains("youtu.be") {
+        let video_id = if url.contains("youtu.be/") {
+            url.split("youtu.be/").nth(1).and_then(|s| s.split(['?', '&']).next())
+        } else if url.contains("/shorts/") {
+            url.split("/shorts/").nth(1).and_then(|s| s.split(['?', '&']).next())
+        } else {
+            url.split("v=").nth(1).and_then(|s| s.split(['&', '#']).next())
+        };
+        if let Some(id) = video_id {
+            return Ok(Some(format!("https://img.youtube.com/vi/{}/hqdefault.jpg", id)));
+        }
+    }
+
+    // TikTok: oEmbed API (fast)
+    if url.contains("tiktok.com") {
+        let oembed_url = format!("https://www.tiktok.com/oembed?url={}", urlencoding::encode(&url));
+        if let Ok(res) = client.get(&oembed_url).send().await {
+            if let Ok(json) = res.json::<serde_json::Value>().await {
+                if let Some(thumb) = json.get("thumbnail_url").and_then(|v| v.as_str()) {
+                    return Ok(Some(thumb.to_string()));
+                }
+            }
+        }
+    }
+
+    // Universal fallback: yt-dlp --dump-json
+    // Try browser cookies first, then fall back to cookies file if that fails
+    let has_browser = cookies_browser.as_ref().map_or(false, |b| !b.is_empty());
+    let has_file = cookies_file.as_ref().map_or(false, |f| !f.is_empty() && PathBuf::from(f).exists());
+
+    if has_browser {
+        match ytdlp_thumbnail_with(&url, &cookies_browser, &None).await {
+            Ok(Some(thumb)) => return Ok(Some(thumb)),
+            Err(err) => return Err(err), // cookie extraction error
+            Ok(None) if has_file => {
+                // Browser cookies failed for this URL, retry with cookies file
+                match ytdlp_thumbnail_with(&url, &None, &cookies_file).await {
+                    Ok(Some(thumb)) => return Ok(Some(thumb)),
+                    _ => return Ok(None),
+                }
+            }
+            Ok(None) => return Ok(None),
+        }
+    } else if has_file {
+        match ytdlp_thumbnail_with(&url, &None, &cookies_file).await {
+            Ok(Some(thumb)) => return Ok(Some(thumb)),
+            Err(err) => return Err(err),
+            Ok(None) => return Ok(None),
+        }
+    } else {
+        match ytdlp_thumbnail_with(&url, &None, &None).await {
+            Ok(Some(thumb)) => return Ok(Some(thumb)),
+            Err(err) => return Err(err),
+            Ok(None) => return Ok(None),
+        }
+    }
+}
+
+/// Run yt-dlp --dump-json with a specific cookie method
+async fn ytdlp_thumbnail_with(url: &str, cookies_browser: &Option<String>, cookies_file: &Option<String>) -> Result<Option<String>, String> {
+    let mut args = vec![
+        "--dump-json",
+        "--skip-download",
+        "--no-playlist",
+    ];
+
+    let browser_string;
+    if let Some(ref browser) = cookies_browser {
+        if !browser.is_empty() {
+            args.push("--cookies-from-browser");
+            browser_string = browser.clone();
+            args.push(&browser_string);
+        }
+    }
+
+    let cf_string;
+    if let Some(ref cf) = cookies_file {
+        if !cf.is_empty() && PathBuf::from(cf).exists() {
+            args.push("--cookies");
+            cf_string = cf.clone();
+            args.push(&cf_string);
+        }
+    }
+
+    args.push(url);
+
+    let output = match tokio::process::Command::new("yt-dlp")
+        .args(&args)
+        .output()
+        .await
+    {
+        Ok(o) => o,
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                return Err("yt-dlp is not installed. Install it with: brew install yt-dlp".into());
+            }
+            return Ok(None);
+        }
+    };
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stderr_lower = stderr.to_lowercase();
+
+        // Douyin extractor is broken in yt-dlp (known bug #9667)
+        if stderr_lower.contains("[douyin]") && stderr_lower.contains("fresh cookies") {
+            return Ok(None); // not a cookie error, just a broken extractor
+        }
+
+        if (stderr_lower.contains("could not find") && stderr_lower.contains("cookie"))
+            || stderr_lower.contains("no suitable cookie")
+            || stderr_lower.contains("failed to decrypt")
+        {
+            let browser_name = cookies_browser.as_ref().map(|b| b.as_str()).unwrap_or("your browser");
+            return Err(format!(
+                "Could not read cookies from {}. Make sure {} is installed and try closing it before searching.",
+                browser_name, browser_name
+            ));
+        }
+
+        return Ok(None);
+    }
+
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .map_err(|_| "Failed to parse yt-dlp output".to_string())?;
+    Ok(json.get("thumbnail")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string()))
+}
+
+/// Detect platform name from URL for user-friendly error messages
+fn detect_platform(url: &str) -> &str {
+    if url.contains("instagram.com") { "Instagram" }
+    else if url.contains("tiktok.com") { "TikTok" }
+    else if url.contains("douyin.com") { "Douyin" }
+    else if url.contains("youtube.com") || url.contains("youtu.be") { "YouTube" }
+    else if url.contains("bilibili.com") { "Bilibili" }
+    else if url.contains("xiaohongshu.com") { "Xiaohongshu" }
+    else { "this platform" }
+}
+
 // ── Project Commands ────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -168,12 +318,13 @@ async fn download_clip(
     project_name: String,
     clip_id: String,
     url: String,
+    cookies_browser: Option<String>,
+    cookies_file: Option<String>,
 ) -> Result<(), String> {
     let clips_dir = PathBuf::from(&root_folder)
         .join(&project_name)
         .join("clips");
 
-    // Emit downloading status
     let _ = app.emit("download-progress", DownloadProgress {
         clip_id: clip_id.clone(),
         status: "downloading".into(),
@@ -182,28 +333,31 @@ async fn download_clip(
         error: None,
     });
 
-    // Build yt-dlp command
     let output_template = clips_dir
         .join(format!("{}_%(title).50s.%(ext)s", &clip_id))
         .to_string_lossy()
         .to_string();
 
-    let result = tokio::process::Command::new("yt-dlp")
-        .args([
-            "--no-warnings",
-            "-f", "bestvideo+bestaudio/best",
-            "--merge-output-format", "mp4",
-            "-o", &output_template,
-            "--newline",
-            "--progress-template", "%(progress._percent_str)s",
-            &url,
-        ])
-        .output()
-        .await;
+    let has_browser = cookies_browser.as_ref().map_or(false, |b| !b.is_empty());
+    let has_file = cookies_file.as_ref().map_or(false, |f| !f.is_empty() && PathBuf::from(f).exists());
+
+    // Try browser cookies first
+    let result = run_ytdlp_download(
+        &url, &output_template,
+        if has_browser { &cookies_browser } else { &None },
+        if has_browser { &None } else { &cookies_file },
+    ).await;
+
+    // If browser cookies failed and we have a cookies file, retry with file
+    let result = match &result {
+        Ok(output) if !output.status.success() && has_browser && has_file => {
+            run_ytdlp_download(&url, &output_template, &None, &cookies_file).await
+        }
+        _ => result,
+    };
 
     match result {
         Ok(output) if output.status.success() => {
-            // Find the downloaded file
             let local_file = find_downloaded_file(&clips_dir, &clip_id);
             let _ = app.emit("download-progress", DownloadProgress {
                 clip_id,
@@ -216,14 +370,15 @@ async fn download_clip(
         }
         Ok(output) => {
             let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+            let friendly = friendly_download_error(&stderr, &url, &cookies_browser);
             let _ = app.emit("download-progress", DownloadProgress {
                 clip_id,
                 status: "failed".into(),
                 progress: None,
                 local_file: None,
-                error: Some(stderr.clone()),
+                error: Some(friendly.clone()),
             });
-            Err(stderr)
+            Err(friendly)
         }
         Err(e) => {
             let msg = if e.kind() == std::io::ErrorKind::NotFound {
@@ -243,7 +398,94 @@ async fn download_clip(
     }
 }
 
+/// Run yt-dlp download with a specific cookie method
+async fn run_ytdlp_download(
+    url: &str,
+    output_template: &str,
+    cookies_browser: &Option<String>,
+    cookies_file: &Option<String>,
+) -> Result<std::process::Output, std::io::Error> {
+    let mut args = vec![
+        "--no-warnings".to_string(),
+        "-f".to_string(), "bestvideo+bestaudio/best".to_string(),
+        "--merge-output-format".to_string(), "mp4".to_string(),
+        "-o".to_string(), output_template.to_string(),
+        "--newline".to_string(),
+        "--progress-template".to_string(), "%(progress._percent_str)s".to_string(),
+    ];
+
+    if let Some(ref browser) = cookies_browser {
+        if !browser.is_empty() {
+            args.push("--cookies-from-browser".to_string());
+            args.push(browser.clone());
+        }
+    }
+
+    if let Some(ref cf) = cookies_file {
+        if !cf.is_empty() && PathBuf::from(cf).exists() {
+            args.push("--cookies".to_string());
+            args.push(cf.clone());
+        }
+    }
+
+    args.push(url.to_string());
+
+    tokio::process::Command::new("yt-dlp")
+        .args(&args)
+        .output()
+        .await
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+/// Translate raw yt-dlp stderr into user-friendly error messages
+fn friendly_download_error(stderr: &str, url: &str, cookies_browser: &Option<String>) -> String {
+    let lower = stderr.to_lowercase();
+    let platform = detect_platform(url);
+    let browser = cookies_browser.as_deref().unwrap_or("your browser");
+
+    // Douyin extractor is broken in yt-dlp (known upstream bug)
+    if lower.contains("[douyin]") && lower.contains("fresh cookies") {
+        return "Douyin downloads are temporarily broken in yt-dlp (known bug). Check for yt-dlp updates.".into();
+    }
+
+    if lower.contains("not granting access") || lower.contains("empty media response") {
+        return format!(
+            "Login required. Open {} and log into {}, then close it and retry.",
+            browser, platform
+        );
+    }
+    if lower.contains("could not find") && lower.contains("cookie") {
+        return format!(
+            "Could not read cookies from {}. Make sure it's installed. Try closing {} before downloading.",
+            browser, browser
+        );
+    }
+    if lower.contains("failed to decrypt") && lower.contains("cookie") {
+        return format!(
+            "Cannot decrypt {} cookies. Try closing {} completely and retry.",
+            browser, browser
+        );
+    }
+    if lower.contains("video is unavailable") || lower.contains("removed") {
+        return format!("This {} video is no longer available.", platform);
+    }
+    if lower.contains("private video") {
+        return format!("This {} video is private. Log into {} first.", platform, browser);
+    }
+    if lower.contains("urlopen error") || lower.contains("connection") {
+        return "Network error. Check your internet connection.".into();
+    }
+
+    // Fallback: show the last meaningful line of stderr
+    stderr
+        .lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or(stderr)
+        .trim()
+        .to_string()
+}
 
 fn save_project(folder: &PathBuf, project: &Project) -> Result<(), String> {
     let json = serde_json::to_string_pretty(project)
@@ -314,6 +556,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             search_clips,
+            fetch_thumbnail,
             create_project,
             load_project,
             save_project_data,

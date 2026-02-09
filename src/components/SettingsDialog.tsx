@@ -10,8 +10,25 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import { FolderOpen } from "lucide-react";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { FolderOpen, FileText } from "lucide-react";
 import type { AppSettings } from "@/types";
+
+const BROWSER_OPTIONS = [
+  { value: "chrome", label: "Google Chrome" },
+  { value: "firefox", label: "Firefox" },
+  { value: "safari", label: "Safari" },
+  { value: "edge", label: "Microsoft Edge" },
+  { value: "brave", label: "Brave" },
+  { value: "opera", label: "Opera" },
+  { value: "chromium", label: "Chromium" },
+];
 
 interface Props {
   open: boolean;
@@ -41,6 +58,7 @@ export function SettingsDialog({ open, onOpenChange, settings, onSave }: Props) 
           <DialogTitle>Settings</DialogTitle>
         </DialogHeader>
         <div className="grid gap-4 py-4">
+          {/* HubSpot Token */}
           <div className="grid gap-2">
             <Label htmlFor="token">HubSpot Private App Token</Label>
             <Input
@@ -53,6 +71,8 @@ export function SettingsDialog({ open, onOpenChange, settings, onSave }: Props) 
               placeholder="pat-na1-..."
             />
           </div>
+
+          {/* Root Folder */}
           <div className="grid gap-2">
             <Label htmlFor="folder">Projects Root Folder</Label>
             <div className="flex gap-2">
@@ -81,6 +101,87 @@ export function SettingsDialog({ open, onOpenChange, settings, onSave }: Props) 
               Each video project will create a subfolder here.
             </p>
           </div>
+
+          {/* Browser Cookies */}
+          <div className="grid gap-2">
+            <Label>Browser for Cookies</Label>
+            <Select
+              value={draft.cookiesBrowser || "_none"}
+              onValueChange={(val) =>
+                setDraft({ ...draft, cookiesBrowser: val === "_none" ? "" : val })
+              }
+            >
+              <SelectTrigger>
+                <SelectValue placeholder="Select browser..." />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="_none">None (disabled)</SelectItem>
+                {BROWSER_OPTIONS.map((opt) => (
+                  <SelectItem key={opt.value} value={opt.value}>
+                    {opt.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <div className="rounded-md bg-muted p-2.5 text-xs text-muted-foreground">
+              <p className="font-medium text-foreground">
+                Required for Instagram, Douyin, and private content
+              </p>
+              <p className="mt-1">
+                Select the browser where you are logged into Instagram / Douyin.
+                The app reads your browser cookies automatically to download
+                videos and fetch thumbnails. No extensions or exports needed.
+              </p>
+              <p className="mt-1.5 font-medium text-orange-500">
+                Keep Chrome closed while downloading if you get cookie errors.
+              </p>
+            </div>
+          </div>
+
+          {/* Manual Cookies File (advanced) */}
+          <details className="group">
+            <summary className="cursor-pointer text-xs font-medium text-muted-foreground hover:text-foreground">
+              Advanced: Manual cookies.txt file
+            </summary>
+            <div className="mt-2 grid gap-2">
+              <div className="flex gap-2">
+                <Input
+                  id="cookies"
+                  value={draft.cookiesFile}
+                  onChange={(e) =>
+                    setDraft({ ...draft, cookiesFile: e.target.value })
+                  }
+                  placeholder="Optional: path to cookies.txt"
+                />
+                <Button
+                  variant="outline"
+                  size="icon"
+                  onClick={async () => {
+                    const selected = await openDialog({
+                      filters: [{ name: "Cookies", extensions: ["txt"] }],
+                    });
+                    if (selected) {
+                      setDraft({ ...draft, cookiesFile: selected });
+                    }
+                  }}
+                >
+                  <FileText className="h-4 w-4" />
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Only needed if browser cookies above don't work. Export with the{" "}
+                <a
+                  href="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="underline"
+                >
+                  Get cookies.txt LOCALLY
+                </a>{" "}
+                extension.
+              </p>
+            </div>
+          </details>
         </div>
         <DialogFooter>
           <Button onClick={handleSave}>Save</Button>
