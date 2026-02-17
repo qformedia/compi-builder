@@ -1,7 +1,121 @@
-# Tauri + React + Typescript
+# CompiFlow
 
-This template should help get you started developing with Tauri, React and Typescript in Vite.
+Desktop application for building video compilations from licensed third-party content. Built for [Quantastic](https://www.youtube.com/@Quantastic), a YouTube channel that creates video compilations.
 
-## Recommended IDE Setup
+CompiFlow connects to HubSpot CRM to manage External Clips and Video Projects, downloads clips via `yt-dlp`, and provides a drag-and-drop interface for arranging clips into compilations.
 
-- [VS Code](https://code.visualstudio.com/) + [Tauri](https://marketplace.visualstudio.com/items?itemName=tauri-apps.tauri-vscode) + [rust-analyzer](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust-analyzer)
+## Features
+
+- **Search & filter** External Clips from HubSpot by tags, score, and usage
+- **Per-creator lazy loading** with horizontal scroll (Netflix-style rows)
+- **Auto-download** clips via `yt-dlp` with browser cookie support
+- **Manual import** for clips that can't be auto-downloaded (Douyin, etc.)
+- **Drag-and-drop arrange** tab with video preview
+- **Finish Video** workflow: generates CSV, renames clips with order prefix, creates a zip for sharing with editors
+- **HubSpot sync**: Video Projects are created/opened from HubSpot, clips are associated/disassociated in real time
+
+## Tech Stack
+
+- **Desktop framework**: [Tauri 2.0](https://tauri.app/) (Rust backend, web frontend)
+- **Frontend**: React 19, TypeScript, Tailwind CSS 4, Shadcn/ui
+- **Drag & drop**: dnd-kit
+- **Video downloading**: yt-dlp + ffmpeg
+- **CRM**: HubSpot API (Private App token)
+
+## Prerequisites
+
+Install these before running CompiFlow:
+
+1. **Rust** (latest stable)
+   ```bash
+   curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+   ```
+
+2. **Node.js** (v18+)
+   ```bash
+   brew install node
+   ```
+
+3. **yt-dlp** (for downloading clips)
+   ```bash
+   brew install yt-dlp
+   ```
+
+4. **ffmpeg** (for video processing / duration probing)
+   ```bash
+   brew install ffmpeg
+   ```
+
+5. **HubSpot Private App token** with scopes:
+   - `crm.objects.custom.read`
+   - `crm.objects.custom.write`
+   - `crm.schemas.custom.read`
+   - `crm.schemas.custom.write`
+
+## Getting Started
+
+```bash
+# Clone the repo
+git clone <repo-url>
+cd compi-builder
+
+# Install frontend dependencies
+npm install
+
+# Run in development mode
+npm run tauri dev
+```
+
+On first launch:
+1. Click the **Settings** gear icon
+2. Enter your **HubSpot token**
+3. Set a **root folder** for projects (e.g. `~/Documents/CompiFlow`)
+4. Optionally configure **browser cookies** (Chrome by default) for downloading from Instagram, etc.
+
+## Project Structure
+
+```
+compi-builder/
+├── src/                      # Frontend (React + TypeScript)
+│   ├── App.tsx               # Main app, tabs, Finish Video flow
+│   ├── types.ts              # Shared TypeScript interfaces
+│   ├── lib/
+│   │   └── hubspot.ts        # HubSpot API client (search, parse clips)
+│   ├── components/
+│   │   ├── ProjectTab.tsx     # Project management (open/create from HubSpot)
+│   │   ├── SearchTab.tsx      # Clip search with tag/score/usage filters
+│   │   ├── ArrangeTab.tsx     # Drag-and-drop clip ordering + video player
+│   │   ├── ClipCard.tsx       # Reusable clip card (thumbnail, score, actions)
+│   │   ├── TagPicker.tsx      # Tag multi-select combobox
+│   │   ├── SettingsDialog.tsx  # App settings
+│   │   └── ui/               # Shadcn/ui components
+│   └── assets/               # Logo, images
+├── src-tauri/                # Backend (Rust)
+│   ├── src/
+│   │   └── lib.rs            # All Tauri commands (HubSpot API, yt-dlp, file ops)
+│   ├── icons/                # App icons (generated)
+│   ├── Cargo.toml            # Rust dependencies
+│   └── tauri.conf.json       # Tauri configuration
+├── package.json
+└── index.html
+```
+
+## Workflow
+
+1. **Open/Create** a Video Project from HubSpot in the Project tab
+2. **Search** for clips in the Search tab using tags and filters
+3. **Add** clips to the project (auto-downloads + associates in HubSpot)
+4. **Arrange** clips in the desired order using drag-and-drop
+5. **Finish Video** to generate CSV, rename clips, and create a zip for editors
+
+## Building for Production
+
+```bash
+npm run tauri build
+```
+
+The built app will be in `src-tauri/target/release/bundle/`.
+
+## License
+
+Private - Quantastic / Miquel Tolosa

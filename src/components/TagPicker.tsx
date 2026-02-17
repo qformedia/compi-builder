@@ -15,23 +15,28 @@ import {
   CommandList,
 } from "@/components/ui/command";
 import { X, ChevronsUpDown } from "lucide-react";
-import { ALL_TAGS } from "@/lib/tags";
+import type { TagOption } from "@/lib/tags";
 
 interface Props {
+  options: TagOption[];
+  /** Selected internal values */
   selected: string[];
-  onChange: (tags: string[]) => void;
+  onChange: (values: string[]) => void;
 }
 
-export function TagPicker({ selected, onChange }: Props) {
+export function TagPicker({ options, selected, onChange }: Props) {
   const [open, setOpen] = useState(false);
 
-  const toggle = (tag: string) => {
+  const toggle = (value: string) => {
     onChange(
-      selected.includes(tag)
-        ? selected.filter((t) => t !== tag)
-        : [...selected, tag],
+      selected.includes(value)
+        ? selected.filter((v) => v !== value)
+        : [...selected, value],
     );
   };
+
+  const labelFor = (value: string) =>
+    options.find((o) => o.value === value)?.label ?? value;
 
   return (
     <div className="flex flex-col gap-2">
@@ -53,19 +58,19 @@ export function TagPicker({ selected, onChange }: Props) {
             <CommandList>
               <CommandEmpty>No tags found.</CommandEmpty>
               <CommandGroup>
-                {ALL_TAGS.map((tag) => (
+                {options.map((opt) => (
                   <CommandItem
-                    key={tag}
-                    value={tag}
-                    onSelect={() => toggle(tag)}
+                    key={opt.value}
+                    value={opt.label}
+                    onSelect={() => toggle(opt.value)}
                   >
                     <span
                       className={
-                        selected.includes(tag) ? "font-semibold" : ""
+                        selected.includes(opt.value) ? "font-semibold" : ""
                       }
                     >
-                      {selected.includes(tag) ? "✓ " : ""}
-                      {tag}
+                      {selected.includes(opt.value) ? "✓ " : ""}
+                      {opt.label}
                     </span>
                   </CommandItem>
                 ))}
@@ -77,11 +82,11 @@ export function TagPicker({ selected, onChange }: Props) {
 
       {selected.length > 0 && (
         <div className="flex flex-wrap gap-1">
-          {selected.map((tag) => (
-            <Badge key={tag} variant="secondary" className="gap-1">
-              {tag}
+          {selected.map((value) => (
+            <Badge key={value} variant="secondary" className="gap-1">
+              {labelFor(value)}
               <button
-                onClick={() => toggle(tag)}
+                onClick={() => toggle(value)}
                 className="ml-0.5 rounded-full hover:bg-muted"
               >
                 <X className="h-3 w-3" />

@@ -17,6 +17,7 @@ import {
   Trash2,
   Download,
   CheckCircle,
+  FolderOpen,
 } from "lucide-react";
 
 // ── Score badge colors (mimicking HubSpot) ──────────────────────────────────
@@ -45,6 +46,8 @@ export interface ClipCardData {
   linkNotWorking?: boolean;
   availableAskFirst?: boolean;
   numPublishedVideoProjects?: number;
+  licenseType?: string;
+  notes?: string;
   // Project-specific fields (optional)
   downloadStatus?: "pending" | "downloading" | "complete" | "failed";
   downloadError?: string;
@@ -66,11 +69,14 @@ export interface ClipCardProps {
   onToggleProject?: () => void;
   onRemove?: () => void;
   onRetryDownload?: () => void;
+  onImportFile?: () => void;
   // "Used Xx" popover context
   hubspotToken?: string;
   searchTags?: string[];
   // Compact mode: thumbnail + overlays only (no info/tags/action bar)
   compact?: boolean;
+  // Increment to trigger retry of failed thumbnails (e.g. on window focus)
+  thumbRetryKey?: number;
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -97,9 +103,11 @@ export function ClipCard({
   onToggleProject,
   onRemove,
   onRetryDownload,
+  onImportFile,
   hubspotToken,
   searchTags = [],
   compact = false,
+  thumbRetryKey = 0,
 }: ClipCardProps) {
   const [thumb, setThumb] = useState<string | null>(
     thumbCache.current?.get(clip.link) ?? null,
@@ -130,9 +138,12 @@ export function ClipCard({
   }, [clip.id, hubspotToken, vpProjects]);
 
   // Lazy-load thumbnail when card scrolls into view
-  const loadThumb = useCallback(async () => {
-    if (thumbCache.current?.has(clip.link)) {
-      setThumb(thumbCache.current.get(clip.link) ?? null);
+  const loadThumb = useCallback(async (isRetry = false) => {
+    if (!isRetry && thumbCache.current?.has(clip.link)) {
+      const cached = thumbCache.current.get(clip.link);
+      if (cached !== null) {
+        setThumb(cached);
+      }
       return;
     }
     setThumbLoading(true);
@@ -157,6 +168,7 @@ export function ClipCard({
     }
   }, [clip.link, thumbCache, cookiesBrowser, cookiesFile, onCookieError]);
 
+  // Initial load via IntersectionObserver
   useEffect(() => {
     const el = cardRef.current;
     if (!el) return;
@@ -173,14 +185,24 @@ export function ClipCard({
     return () => observer.disconnect();
   }, [loadThumb]);
 
+  // Retry failed thumbnails when thumbRetryKey changes (e.g. on window focus)
+  useEffect(() => {
+    if (thumbRetryKey === 0) return;
+    if (!thumbError) return;
+    thumbCache.current?.delete(clip.link);
+    loadThumb(true);
+  }, [thumbRetryKey]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const embedUrl = isActive ? getEmbedUrl(clip.link) : null;
   const platform = getPlatform(clip.link);
   const ds = clip.downloadStatus;
+  const showLicenseType =
+    clip.licenseType && clip.licenseType.toLowerCase() !== "recurrent";
 
   return (
     <div
       ref={cardRef}
-      className={`group relative flex flex-shrink-0 snap-start flex-col overflow-hidden rounded-lg border bg-card transition-shadow hover:shadow-md ${compact ? "w-28" : "w-52"}`}
+      className={`group relative flex flex-shrink-0 snap-start flex-col overflow-hidden rounded-lg bg-card transition-shadow hover:shadow-md ${compact ? "w-28" : "w-52 border"}`}
     >
       {/* Thumbnail / Preview area */}
       <div
@@ -228,10 +250,19 @@ export function ClipCard({
           </div>
         )}
 
-        {/* Link broken warning */}
-        {clip.linkNotWorking && (
-          <div className="absolute left-1 top-1 rounded-full bg-destructive p-1">
-            <AlertTriangle className="h-3 w-3 text-white" />
+        {/* Top-left: duration + link broken warning */}
+        {(clip.editedDuration != null || clip.linkNotWorking) && (
+          <div className="absolute left-1.5 top-1.5 flex items-center gap-1">
+            {clip.editedDuration != null && (
+              <span className="rounded bg-black/70 px-1.5 py-0.5 text-[13px] font-medium text-white">
+                {formatDuration(clip.editedDuration)}
+              </span>
+            )}
+            {clip.linkNotWorking && (
+              <span className="rounded-full bg-destructive p-1">
+                <AlertTriangle className="h-3 w-3 text-white" />
+              </span>
+            )}
           </div>
         )}
 
@@ -253,15 +284,57 @@ export function ClipCard({
           </div>
         )}
 
-        {/* Duration overlay */}
-        {clip.editedDuration != null && (
-          <div className="absolute bottom-1.5 right-1.5">
-            <span className="rounded bg-black/70 px-1.5 py-0.5 text-[13px] font-medium text-white">
-              {formatDuration(clip.editedDuration)}
-            </span>
+        {/* Bottom-center: license type + notes */}
+        {(showLicenseType || clip.notes) && (
+          <div className="absolute bottom-1.5 left-1/2 -translate-x-1/2 flex flex-col items-center gap-0.5 max-w-[90%]">
+            {showLicenseType && (
+              <span className="rounded bg-amber-500/90 px-1.5 py-0.5 text-[10px] font-semibold text-white whitespace-nowrap">
+                {clip.licenseType}
+              </span>
+            )}
+            {clip.notes && (
+              <div className="group/notes relative max-w-full">
+                <span className="block truncate rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-white/80 max-w-[8rem]">
+                  {clip.notes}
+                </span>
+                <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1 hidden group-hover/notes:block z-20 w-48 rounded bg-black/90 px-2 py-1.5 text-[11px] leading-snug text-white shadow-lg">
+                  {clip.notes}
+                </div>
+              </div>
+            )}
           </div>
         )}
       </div>
+
+      {/* Compact action bar (arrange mode only) */}
+      {compact && (
+        <div className="flex border-t">
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              openUrl(`https://app-eu1.hubspot.com/contacts/146859718/record/2-192287471/${clip.id}`);
+            }}
+            className="flex flex-1 items-center justify-center py-1 cursor-pointer transition-colors hover:bg-muted"
+            title="Open in HubSpot"
+          >
+            <HubSpotIcon className="h-3.5 w-3.5" />
+          </button>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              let url = clip.link;
+              if (url.includes("instagram.com")) {
+                url = url.replace(/\/reels?\//i, "/p/");
+              }
+              openUrl(url);
+            }}
+            className="flex flex-1 items-center justify-center py-1 border-l cursor-pointer transition-colors hover:bg-muted"
+            title="Open in browser"
+          >
+            <ExternalLink className="h-3 w-3" />
+          </button>
+        </div>
+      )}
 
       {/* Info section (hidden in compact mode) */}
       {!compact && <div className="flex flex-col gap-1 p-2">
@@ -450,7 +523,7 @@ export function ClipCard({
           </button>
         )}
 
-        {/* Download status + Retry in bottom-left, next to bin */}
+        {/* Download status + Retry + Browse for failed/pending clips */}
         {ds === "failed" && onRetryDownload && (
           <button
             onClick={onRetryDownload}
@@ -458,6 +531,15 @@ export function ClipCard({
             title="Retry download"
           >
             <Download className="h-3.5 w-3.5" /> Retry
+          </button>
+        )}
+        {(ds === "failed" || ds === "pending") && onImportFile && (
+          <button
+            onClick={onImportFile}
+            className="flex items-center justify-center gap-1 px-2 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted cursor-pointer"
+            title="Import file manually"
+          >
+            <FolderOpen className="h-3.5 w-3.5" /> Browse
           </button>
         )}
         {ds === "downloading" && (
@@ -561,4 +643,21 @@ export function getEmbedUrl(url: string): string | null {
   } catch {
     return null;
   }
+}
+
+/** HubSpot sprocket icon (orange) */
+export function HubSpotIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 512 512"
+      className={className}
+      fill="none"
+      xmlns="http://www.w3.org/2000/svg"
+    >
+      <path
+        d="M374.8 185.5v-56.8a44.3 44.3 0 0 0 25.6-40V87a44.3 44.3 0 0 0-44.3-44.3h-1.7A44.3 44.3 0 0 0 310 87v1.7a44.3 44.3 0 0 0 25.6 40v56.8a129.3 129.3 0 0 0-62.5 29l-166-129.2a47.2 47.2 0 1 0-17.8 23.7l162.9 126.7a129.8 129.8 0 0 0 5.3 179.5L227 448.7a46 46 0 0 0-13.4-2 47.2 47.2 0 1 0 47.2 47.2 46 46 0 0 0-2-13.4l30-32.2a129.7 129.7 0 0 0 155.6-5.8A129.8 129.8 0 0 0 374.8 185.5ZM355.3 382a74.8 74.8 0 1 1 0-105.8 74.8 74.8 0 0 1 0 105.8Z"
+        fill="#FF7A59"
+      />
+    </svg>
+  );
 }

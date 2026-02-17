@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { resolveTagLabel } from "@/lib/tags";
 import type { Clip } from "@/types";
 
 interface HubSpotSearchResponse {
@@ -18,6 +19,7 @@ export async function searchClipsByTags(
   tags: string[],
   scores: string[] = [],
   neverUsed = false,
+  tagMode = "AND",
   after?: string,
 ): Promise<{ clips: Clip[]; total: number; nextAfter?: string }> {
   const data = await invoke<HubSpotSearchResponse>("search_clips", {
@@ -25,6 +27,7 @@ export async function searchClipsByTags(
     tags,
     scores,
     neverUsed,
+    tagMode,
     after: after ?? null,
   });
 
@@ -43,6 +46,7 @@ export async function searchCreatorClips(
   tags: string[],
   scores: string[],
   neverUsed: boolean,
+  tagMode: string,
   creatorName: string,
 ): Promise<Clip[]> {
   const data = await invoke<HubSpotSearchResponse>("search_creator_clips", {
@@ -50,9 +54,48 @@ export async function searchCreatorClips(
     tags,
     scores,
     neverUsed,
+    tagMode,
     creatorName,
   });
 
+  return data.results.map(parseClip);
+}
+
+/** Search Video Projects by name */
+export interface VideoProjectSummary {
+  id: string;
+  name: string;
+  status: string;
+  tag: string;
+  pubDate: string;
+}
+
+export async function searchVideoProjects(
+  token: string,
+  query: string,
+): Promise<VideoProjectSummary[]> {
+  const data = await invoke<{
+    results: Array<{ id: string; properties: Record<string, string | null> }>;
+  }>("search_video_projects", { token, query });
+
+  return data.results.map((r) => ({
+    id: r.id,
+    name: r.properties.name ?? "Unnamed",
+    status: r.properties.status ?? "",
+    tag: r.properties.tag ?? "",
+    pubDate: r.properties.pub_date ?? "",
+  }));
+}
+
+/** Fetch all External Clips associated with a Video Project */
+export async function fetchVideoProjectClips(
+  token: string,
+  projectId: string,
+): Promise<Clip[]> {
+  const data = await invoke<HubSpotSearchResponse>("fetch_video_project_clips", {
+    token,
+    projectId,
+  });
   return data.results.map(parseClip);
 }
 
@@ -71,7 +114,7 @@ function parseClip(record: {
   return {
     id: record.id,
     link: p.link ?? "",
-    tags: p.tags ? p.tags.split(";").map((t) => t.trim()) : [],
+    tags: p.tags ? p.tags.split(";").map((t) => resolveTagLabel(t.trim())) : [],
     creatorName: p.creator_name ?? "Unknown",
     creatorStatus: p.creator_status ?? "",
     creatorMainLink: p.creator_main_link ?? undefined,
@@ -85,6 +128,7 @@ function parseClip(record: {
       ? Number(p.num_of_published_video_project)
       : undefined,
     clipMixLinks,
-    notes: p.notes ?? undefined,
+    notes: p.creator_notes ?? p.notes ?? undefined,
+    licenseType: p.creator_license_type ?? undefined,
   };
 }

@@ -5,6 +5,8 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { TagPicker } from "@/components/TagPicker";
 import { ClipCard, SCORE_COLORS } from "@/components/ClipCard";
 import { searchClipsByTags, searchCreatorClips } from "@/lib/hubspot";
+import { fetchTagOptions } from "@/lib/tags";
+import type { TagOption } from "@/lib/tags";
 import type { AppSettings, Clip, Project } from "@/types";
 
 const SCORE_OPTIONS = ["XL", "L", "M", "S", "XS"] as const;
@@ -17,7 +19,31 @@ interface Props {
 }
 
 export function SearchTab({ settings, project, addClip, removeClip }: Props) {
+  const [tagOptions, setTagOptions] = useState<TagOption[]>([]);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  const [tagMode, setTagMode] = useState<"AND" | "OR">("AND");
+
+  // Retry failed thumbnails when window regains focus (cookies may have refreshed)
+  const [thumbRetryKey, setThumbRetryKey] = useState(0);
+  useEffect(() => {
+    let lastRetry = 0;
+    const onFocus = () => {
+      const now = Date.now();
+      if (now - lastRetry > 60_000) {
+        lastRetry = now;
+        setThumbRetryKey((k) => k + 1);
+      }
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
+
+  // Fetch tag options from HubSpot on mount
+  useEffect(() => {
+    if (settings.hubspotToken) {
+      fetchTagOptions(settings.hubspotToken).then(setTagOptions).catch(() => {});
+    }
+  }, [settings.hubspotToken]);
   const [selectedScores, setSelectedScores] = useState<string[]>([]);
   const [neverUsed, setNeverUsed] = useState(false);
   // Initial search results (used to determine creator order)
@@ -80,6 +106,7 @@ export function SearchTab({ settings, project, addClip, removeClip }: Props) {
         selectedTags,
         selectedScores,
         neverUsed,
+        tagMode,
         loadMore ? nextAfter : undefined,
       );
 
@@ -126,6 +153,7 @@ export function SearchTab({ settings, project, addClip, removeClip }: Props) {
           selectedTags,
           selectedScores,
           neverUsed,
+          tagMode,
           creatorName,
         );
         setCreatorClipsMap((prev) => new Map(prev).set(creatorName, clips));
@@ -135,8 +163,17 @@ export function SearchTab({ settings, project, addClip, removeClip }: Props) {
         setCreatorLoadState((prev) => new Map(prev).set(creatorName, "pending"));
       }
     },
-    [settings.hubspotToken, selectedTags, selectedScores, neverUsed, creatorLoadState],
+    [settings.hubspotToken, selectedTags, selectedScores, neverUsed, tagMode, creatorLoadState],
   );
+
+  // Auto-search when filters change
+  const searchRef = useRef(search);
+  searchRef.current = search;
+  useEffect(() => {
+    if (selectedTags.length > 0) {
+      searchRef.current(false);
+    }
+  }, [selectedTags, selectedScores, neverUsed, tagMode]);
 
   const isInProject = (clipId: string) =>
     project?.clips.some((c) => c.hubspotId === clipId) ?? false;
@@ -147,7 +184,7 @@ export function SearchTab({ settings, project, addClip, removeClip }: Props) {
       <div className="flex flex-col gap-2">
         <div className="flex gap-2">
           <div className="flex-1">
-            <TagPicker selected={selectedTags} onChange={setSelectedTags} />
+            <TagPicker options={tagOptions} selected={selectedTags} onChange={setSelectedTags} />
           </div>
           <Button
             onClick={() => search(false)}
@@ -157,8 +194,25 @@ export function SearchTab({ settings, project, addClip, removeClip }: Props) {
             Search
           </Button>
         </div>
-        {/* Score filter */}
+        {/* Filters row */}
         <div className="flex items-center gap-1.5">
+          {/* AND/OR toggle (only shown when 2+ tags selected) */}
+          {selectedTags.length >= 2 && (
+            <>
+              <button
+                onClick={() => setTagMode((m) => (m === "AND" ? "OR" : "AND"))}
+                className={`rounded px-2 py-0.5 text-[11px] font-bold cursor-pointer transition-all ${
+                  tagMode === "AND"
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-blue-500 text-white"
+                }`}
+                title={tagMode === "AND" ? "Clips must match ALL tags" : "Clips must match ANY tag"}
+              >
+                {tagMode}
+              </button>
+              <span className="mx-1 text-muted-foreground/30">|</span>
+            </>
+          )}
           <span className="text-[11px] font-medium text-muted-foreground mr-1">Size:</span>
           {SCORE_OPTIONS.map((score) => {
             const active = selectedScores.includes(score);
@@ -390,6 +444,7 @@ function CreatorRow({
             }
             hubspotToken={settings.hubspotToken}
             searchTags={selectedTags}
+            thumbRetryKey={thumbRetryKey}
           />
         ))}
       </div>

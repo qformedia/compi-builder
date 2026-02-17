@@ -17,6 +17,7 @@ import {
 import { CSS } from "@dnd-kit/utilities";
 import { GripHorizontal } from "lucide-react";
 import { ClipCard } from "@/components/ClipCard";
+import { resolveClipPath } from "@/types";
 import type { AppSettings, Project, ProjectClip } from "@/types";
 import type { ClipCardData } from "@/components/ClipCard";
 
@@ -37,6 +38,8 @@ function toCardData(clip: ProjectClip): ClipCardData {
     editedDuration: clip.editedDuration,
     downloadStatus: clip.downloadStatus,
     downloadError: clip.downloadError,
+    licenseType: clip.licenseType,
+    notes: clip.notes,
   };
 }
 
@@ -44,6 +47,21 @@ export function ArrangeTab({ settings, project, setProject, isActive }: Props) {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const thumbCache = useRef(new Map<string, string | null>());
+
+  // Retry failed thumbnails when window regains focus (cookies may have refreshed)
+  const [thumbRetryKey, setThumbRetryKey] = useState(0);
+  useEffect(() => {
+    let lastRetry = 0;
+    const onFocus = () => {
+      const now = Date.now();
+      if (now - lastRetry > 60_000) {
+        lastRetry = now;
+        setThumbRetryKey((k) => k + 1);
+      }
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, []);
 
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
@@ -119,7 +137,7 @@ export function ArrangeTab({ settings, project, setProject, isActive }: Props) {
             controls
             autoPlay={isActive}
             className="max-h-full max-w-full rounded-lg"
-            src={`localfile://localhost/${encodeURIComponent(selectedClip.localFile)}`}
+            src={`localfile://localhost/${encodeURIComponent(resolveClipPath(settings.rootFolder, project.name, selectedClip.localFile))}`}
           />
         ) : (
           <p className="text-sm text-white/40">Select a clip to preview</p>
@@ -127,13 +145,7 @@ export function ArrangeTab({ settings, project, setProject, isActive }: Props) {
       </div>
 
       {/* Sortable cards row — fixed at bottom */}
-      <div className="flex-shrink-0 border-t bg-background pt-2 pb-1 px-1">
-        <p className="mb-1 px-1 text-[10px] font-medium text-muted-foreground">
-          {completedClips.length} clip{completedClips.length !== 1 ? "s" : ""}
-          {" — "}
-          {formatTotalDuration(completedClips)}
-          {" — drag to reorder"}
-        </p>
+      <div className="flex-shrink-0 border-t bg-background pt-1 pb-1 px-1">
         <DndContext
           sensors={sensors}
           collisionDetection={closestCenter}
@@ -154,6 +166,7 @@ export function ArrangeTab({ settings, project, setProject, isActive }: Props) {
                   thumbCache={thumbCache}
                   cookiesBrowser={settings.cookiesBrowser}
                   cookiesFile={settings.cookiesFile}
+                  thumbRetryKey={thumbRetryKey}
                 />
               ))}
             </div>
@@ -166,14 +179,6 @@ export function ArrangeTab({ settings, project, setProject, isActive }: Props) {
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function formatTotalDuration(clips: ProjectClip[]): string {
-  const total = clips.reduce((sum, c) => sum + (c.editedDuration ?? c.localDuration ?? 0), 0);
-  if (total === 0) return "0:00";
-  const m = Math.floor(total / 60);
-  const s = Math.round(total % 60);
-  return `${m}:${s.toString().padStart(2, "0")}`;
-}
-
 // ── Sortable card wrapper ────────────────────────────────────────────────────
 
 function SortableCard({
@@ -184,6 +189,7 @@ function SortableCard({
   thumbCache,
   cookiesBrowser,
   cookiesFile,
+  thumbRetryKey,
 }: {
   clip: ProjectClip;
   index: number;
@@ -192,6 +198,7 @@ function SortableCard({
   thumbCache: React.RefObject<Map<string, string | null>>;
   cookiesBrowser: string;
   cookiesFile: string;
+  thumbRetryKey?: number;
 }) {
   const {
     attributes,
@@ -229,6 +236,7 @@ function SortableCard({
         cookiesBrowser={cookiesBrowser}
         cookiesFile={cookiesFile}
         compact
+        thumbRetryKey={thumbRetryKey}
       />
     </div>
   );
