@@ -42,6 +42,7 @@ function toCardData(clip: ProjectClip): ClipCardData {
     downloadError: clip.downloadError,
     licenseType: clip.licenseType,
     notes: clip.notes,
+    fetchedThumbnail: clip.fetchedThumbnail,
   };
 }
 
@@ -273,6 +274,7 @@ export function ProjectTab({ settings, project, setProject, removeClip }: Props)
           order: project.clips.length + i,
           licenseType: c.licenseType,
           notes: c.notes,
+          fetchedThumbnail: c.fetchedThumbnail,
         }));
 
       // Keep only clips that still exist in HubSpot, refresh metadata
@@ -289,6 +291,7 @@ export function ProjectTab({ settings, project, setProject, removeClip }: Props)
             editedDuration: hs.editedDuration,
             licenseType: hs.licenseType,
             notes: hs.notes,
+            fetchedThumbnail: hs.fetchedThumbnail,
           };
         });
 
@@ -582,6 +585,7 @@ export function ProjectTab({ settings, project, setProject, removeClip }: Props)
                     : undefined
                 }
                 thumbRetryKey={thumbRetryKey}
+                hubspotToken={settings.hubspotToken}
               />
             ))}
           </div>

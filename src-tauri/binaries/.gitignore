@@ -1,0 +1,3 @@
+# Ignore downloaded sidecar binaries (they are large and platform-specific)
+*
+!.gitignore

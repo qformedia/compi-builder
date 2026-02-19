@@ -20,6 +20,40 @@ import {
   FolderOpen,
 } from "lucide-react";
 
+// ── Persistent thumbnail cache (survives app restarts & cookie issues) ───────
+
+const THUMB_STORAGE_KEY = "compi-thumb-cache";
+
+function getPersistedThumb(clipUrl: string): string | null {
+  try {
+    const raw = localStorage.getItem(THUMB_STORAGE_KEY);
+    if (!raw) return null;
+    const cache = JSON.parse(raw);
+    return cache[clipUrl] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function persistThumb(clipUrl: string, thumbUrl: string) {
+  try {
+    const raw = localStorage.getItem(THUMB_STORAGE_KEY);
+    const cache = raw ? JSON.parse(raw) : {};
+    cache[clipUrl] = thumbUrl;
+    localStorage.setItem(THUMB_STORAGE_KEY, JSON.stringify(cache));
+  } catch { /* localStorage full or unavailable */ }
+}
+
+function clearPersistedThumb(clipUrl: string) {
+  try {
+    const raw = localStorage.getItem(THUMB_STORAGE_KEY);
+    if (!raw) return;
+    const cache = JSON.parse(raw);
+    delete cache[clipUrl];
+    localStorage.setItem(THUMB_STORAGE_KEY, JSON.stringify(cache));
+  } catch { /* ignore */ }
+}
+
 // ── Score badge colors (mimicking HubSpot) ──────────────────────────────────
 
 export const SCORE_COLORS: Record<string, string> = {
@@ -48,6 +82,7 @@ export interface ClipCardData {
   numPublishedVideoProjects?: number;
   licenseType?: string;
   notes?: string;
+  fetchedThumbnail?: string;
   // Project-specific fields (optional)
   downloadStatus?: "pending" | "downloading" | "complete" | "failed";
   downloadError?: string;
@@ -114,6 +149,8 @@ export function ClipCard({
   );
   const [thumbLoading, setThumbLoading] = useState(false);
   const [thumbError, setThumbError] = useState(false);
+  const [thumbErrorMsg, setThumbErrorMsg] = useState<string | null>(null);
+  const thumbRetriedRef = useRef(false);
   const cardRef = useRef<HTMLDivElement>(null);
 
   // "Used Xx" popover state
@@ -137,36 +174,85 @@ export function ClipCard({
     }
   }, [clip.id, hubspotToken, vpProjects]);
 
-  // Lazy-load thumbnail when card scrolls into view
+  // Lazy-load thumbnail: HubSpot → in-memory cache → localStorage → fetch → upload to HubSpot
   const loadThumb = useCallback(async (isRetry = false) => {
-    if (!isRetry && thumbCache.current?.has(clip.link)) {
-      const cached = thumbCache.current.get(clip.link);
-      if (cached !== null) {
-        setThumb(cached);
-      }
+    // 1. Check HubSpot-stored thumbnail (permanent, no fetch needed)
+    if (clip.fetchedThumbnail) {
+      thumbCache.current?.set(clip.link, clip.fetchedThumbnail);
+      setThumb(clip.fetchedThumbnail);
       return;
     }
+
+    // 2. Check in-memory cache
+    if (!isRetry && thumbCache.current?.has(clip.link)) {
+      const cached = thumbCache.current.get(clip.link);
+      if (cached != null) {
+        setThumb(cached);
+        return;
+      }
+    }
+
+    // 3. Check persistent localStorage cache (skip on retry since cached URL may be stale)
+    if (!isRetry) {
+      const persisted = getPersistedThumb(clip.link);
+      if (persisted) {
+        thumbCache.current?.set(clip.link, persisted);
+        setThumb(persisted);
+        return;
+      }
+    }
+
+    // 4. Fetch fresh
     setThumbLoading(true);
     setThumbError(false);
+    setThumbErrorMsg(null);
     try {
       const url = await invoke<string | null>("fetch_thumbnail", {
         url: clip.link,
         cookiesBrowser: cookiesBrowser || null,
         cookiesFile: cookiesFile || null,
       });
-      thumbCache.current?.set(clip.link, url);
-      setThumb(url);
+
+      if (url) {
+        setThumb(url);
+
+        // Upload to HubSpot and cache the permanent URL
+        if (hubspotToken && clip.id) {
+          try {
+            const hubspotUrl = await invoke<string>("upload_clip_thumbnail", {
+              token: hubspotToken,
+              clipId: clip.id,
+              thumbnailUrl: url,
+            });
+            thumbCache.current?.set(clip.link, hubspotUrl);
+            persistThumb(clip.link, hubspotUrl);
+            setThumb(hubspotUrl);
+          } catch {
+            // Upload failed; cache original as fallback
+            thumbCache.current?.set(clip.link, url);
+            persistThumb(clip.link, url);
+          }
+        } else {
+          thumbCache.current?.set(clip.link, url);
+          persistThumb(clip.link, url);
+        }
+      } else {
+        thumbCache.current?.set(clip.link, null);
+        setThumbError(true);
+        setThumbErrorMsg("No thumbnail found");
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       thumbCache.current?.set(clip.link, null);
       setThumbError(true);
+      setThumbErrorMsg(msg);
       if (msg.toLowerCase().includes("cookie") && onCookieError) {
         onCookieError(msg);
       }
     } finally {
       setThumbLoading(false);
     }
-  }, [clip.link, thumbCache, cookiesBrowser, cookiesFile, onCookieError]);
+  }, [clip.link, clip.fetchedThumbnail, clip.id, thumbCache, cookiesBrowser, cookiesFile, onCookieError, hubspotToken]);
 
   // Initial load via IntersectionObserver
   useEffect(() => {
@@ -232,6 +318,19 @@ export function ClipCard({
             src={thumb}
             alt=""
             className="absolute inset-0 h-full w-full object-cover"
+            onError={() => {
+              if (thumbRetriedRef.current) {
+                setThumb(null);
+                setThumbError(true);
+                setThumbErrorMsg("Image URL expired");
+                return;
+              }
+              thumbRetriedRef.current = true;
+              thumbCache.current?.delete(clip.link);
+              clearPersistedThumb(clip.link);
+              setThumb(null);
+              loadThumb(true);
+            }}
           />
         ) : (
           <div className="flex h-full flex-col items-center justify-center gap-1 text-muted-foreground">
@@ -240,8 +339,8 @@ export function ClipCard({
             ) : thumbError ? (
               <>
                 <AlertTriangle className="h-4 w-4 text-muted-foreground/50" />
-                <span className="px-2 text-center text-[9px] leading-tight text-muted-foreground">
-                  No preview
+                <span className="px-2 text-center text-[9px] leading-tight text-muted-foreground/70">
+                  {thumbErrorMsg || "No preview"}
                 </span>
               </>
             ) : (

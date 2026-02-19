@@ -130,5 +130,6 @@ function parseClip(record: {
     clipMixLinks,
     notes: p.creator_notes ?? p.notes ?? undefined,
     licenseType: p.creator_license_type ?? undefined,
+    fetchedThumbnail: p.fetched_social_thumbnail ?? undefined,
   };
 }

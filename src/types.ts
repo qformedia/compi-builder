@@ -16,6 +16,7 @@ export interface Clip {
   clipMixLinks: string[];
   notes?: string;
   licenseType?: string;
+  fetchedThumbnail?: string;
 }
 
 /** A local video project */
@@ -43,6 +44,7 @@ export interface ProjectClip {
   order: number;
   licenseType?: string;
   notes?: string;
+  fetchedThumbnail?: string;
 }
 
 /** Resolve a relative localFile path to an absolute path.

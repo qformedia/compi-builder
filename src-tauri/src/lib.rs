@@ -1,7 +1,14 @@
 use serde::{Deserialize, Serialize};
 use std::fs;
+use std::io::BufReader;
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter};
+use tauri_plugin_shell::ShellExt;
+use once_cell::sync::Lazy;
+use tokio::sync::Semaphore;
+
+/// Rate limiter: max 1 concurrent Instagram yt-dlp request
+static INSTAGRAM_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(1));
 
 // ── Data types ──────────────────────────────────────────────────────────────
 
@@ -27,6 +34,8 @@ pub struct ProjectClip {
     pub license_type: Option<String>,
     #[serde(default)]
     pub notes: Option<String>,
+    #[serde(rename = "fetchedThumbnail", default)]
+    pub fetched_thumbnail: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -66,6 +75,7 @@ const CLIP_PROPERTIES: &[&str] = &[
     "clip_mix_link_4", "clip_mix_link_5", "clip_mix_link_6",
     "clip_mix_link_7", "clip_mix_link_8", "clip_mix_link_9",
     "clip_mix_link_10", "notes", "creator_license_type", "creator_notes",
+    "fetched_social_thumbnail",
 ];
 
 /// Fetch the options for the "tags" property (label + internal value)
@@ -230,7 +240,10 @@ async fn search_creator_clips(
     tag_mode: String,
     creator_name: String,
 ) -> Result<serde_json::Value, String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
     let mut filter_groups = build_filter_groups(&tags, &scores, never_used, &tag_mode);
 
     // Add creator_name filter to every group
@@ -1027,7 +1040,7 @@ async fn import_clip_file(
 
 /// Resolve a thumbnail URL for a video link via oEmbed, URL patterns, or yt-dlp fallback
 #[tauri::command]
-async fn fetch_thumbnail(url: String, cookies_browser: Option<String>, cookies_file: Option<String>) -> Result<Option<String>, String> {
+async fn fetch_thumbnail(app: AppHandle, url: String, cookies_browser: Option<String>, cookies_file: Option<String>) -> Result<Option<String>, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
@@ -1059,88 +1072,264 @@ async fn fetch_thumbnail(url: String, cookies_browser: Option<String>, cookies_f
         }
     }
 
+    // Instagram: try embed page scraping (no cookies needed)
+    if url.contains("instagram.com") {
+        if let Some(thumb) = instagram_embed_thumbnail(&client, &url).await {
+            return Ok(Some(thumb));
+        }
+    }
+
     // Universal fallback: yt-dlp --dump-json
-    // Try browser cookies first, then fall back to cookies file if that fails
+    // Try browser cookies → cookies file → no cookies (graceful degradation)
     let has_browser = cookies_browser.as_ref().map_or(false, |b| !b.is_empty());
     let has_file = cookies_file.as_ref().map_or(false, |f| !f.is_empty() && PathBuf::from(f).exists());
+    let mut cookie_error: Option<String> = None;
+    let is_instagram = url.contains("instagram.com");
 
+    // 1. Try with browser cookies (rate-limited for Instagram)
     if has_browser {
-        match ytdlp_thumbnail_with(&url, &cookies_browser, &None).await {
+        let result = if is_instagram {
+            let _permit = INSTAGRAM_SEMAPHORE.acquire().await.map_err(|e| e.to_string())?;
+            let r = ytdlp_thumbnail_with(&app, &url, &cookies_browser, &None).await;
+            instagram_delay().await;
+            r
+        } else {
+            ytdlp_thumbnail_with(&app, &url, &cookies_browser, &None).await
+        };
+        match result {
             Ok(Some(thumb)) => return Ok(Some(thumb)),
-            Err(err) => return Err(err), // cookie extraction error
-            Ok(None) if has_file => {
-                // Browser cookies failed for this URL, retry with cookies file
-                match ytdlp_thumbnail_with(&url, &None, &cookies_file).await {
-                    Ok(Some(thumb)) => return Ok(Some(thumb)),
-                    _ => return Ok(None),
+            Err(err) => { cookie_error = Some(err); }
+            Ok(None) => {}
+        }
+    }
+
+    // 2. Try with cookies file
+    if has_file {
+        match ytdlp_thumbnail_with(&app, &url, &None, &cookies_file).await {
+            Ok(Some(thumb)) => return Ok(Some(thumb)),
+            _ => {}
+        }
+    }
+
+    // 3. Try without any cookies (works for many platforms)
+    match ytdlp_thumbnail_with(&app, &url, &None, &None).await {
+        Ok(Some(thumb)) => return Ok(Some(thumb)),
+        _ => {}
+    }
+
+    // If we had a cookie error and all fallbacks failed, report it
+    if let Some(err) = cookie_error {
+        return Err(err);
+    }
+
+    Ok(None)
+}
+
+/// Try to extract Instagram thumbnail without cookies, using multiple strategies
+async fn instagram_embed_thumbnail(client: &reqwest::Client, url: &str) -> Option<String> {
+    // Extract path type and shortcode: /reel/CODE/, /reels/CODE/, /p/CODE/
+    let re = regex::Regex::new(r"/(reel|reels|p)/([^/?]+)").ok()?;
+    let caps = re.captures(url)?;
+    let path_type = caps.get(1)?.as_str();
+    let shortcode = caps.get(2)?.as_str();
+
+    // Strategy 1: Instagram native oEmbed (no auth needed for public posts)
+    let oembed_url = format!(
+        "https://www.instagram.com/api/v1/oembed/?url={}",
+        urlencoding::encode(url)
+    );
+    if let Ok(res) = client
+        .get(&oembed_url)
+        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        .send()
+        .await
+    {
+        if res.status().is_success() {
+            if let Ok(json) = res.json::<serde_json::Value>().await {
+                if let Some(thumb) = json.get("thumbnail_url").and_then(|v| v.as_str()) {
+                    if thumb.starts_with("http") {
+                        return Some(thumb.to_string());
+                    }
                 }
             }
-            Ok(None) => return Ok(None),
         }
-    } else if has_file {
-        match ytdlp_thumbnail_with(&url, &None, &cookies_file).await {
-            Ok(Some(thumb)) => return Ok(Some(thumb)),
-            Err(err) => return Err(err),
-            Ok(None) => return Ok(None),
-        }
+    }
+
+    // Strategy 2: Embed page scraping
+    let embed_path = if path_type.starts_with("reel") {
+        format!("https://www.instagram.com/reel/{}/embed/captioned/", shortcode)
     } else {
-        match ytdlp_thumbnail_with(&url, &None, &None).await {
-            Ok(Some(thumb)) => return Ok(Some(thumb)),
-            Err(err) => return Err(err),
-            Ok(None) => return Ok(None),
-        }
+        format!("https://www.instagram.com/p/{}/embed/captioned/", shortcode)
+    };
+
+    if let Some(thumb) = scrape_instagram_embed(client, &embed_path).await {
+        return Some(thumb);
+    }
+
+    None
+}
+
+/// Scrape an Instagram embed page for a thumbnail URL
+async fn scrape_instagram_embed(client: &reqwest::Client, embed_url: &str) -> Option<String> {
+    let res = client
+        .get(embed_url)
+        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15")
+        .header("Accept", "text/html,application/xhtml+xml")
+        .header("Accept-Language", "en-US,en;q=0.9")
+        .send()
+        .await
+        .ok()?;
+
+    if !res.status().is_success() {
+        return None;
+    }
+
+    let html = res.text().await.ok()?;
+
+    // Pattern 1: og:image meta tag
+    if let Some(thumb) = extract_meta_content(&html, "og:image") {
+        return Some(thumb);
+    }
+
+    // Pattern 2: img src with Instagram CDN URL (class="EmbeddedMediaImage" or similar)
+    if let Some(thumb) = extract_img_src(&html) {
+        return Some(thumb);
+    }
+
+    // Pattern 3: "display_url" in embedded JSON
+    if let Some(thumb) = extract_json_field(&html, "display_url") {
+        return Some(thumb);
+    }
+
+    // Pattern 4: "thumbnail_src" in embedded JSON
+    if let Some(thumb) = extract_json_field(&html, "thumbnail_src") {
+        return Some(thumb);
+    }
+
+    None
+}
+
+/// Extract an img src URL pointing to Instagram CDN from HTML
+fn extract_img_src(html: &str) -> Option<String> {
+    let re = regex::Regex::new(r#"<img[^>]+src="(https://[^"]*?(?:cdninstagram|fbcdn)[^"]*?)""#).ok()?;
+    let caps = re.captures(html)?;
+    let url = caps.get(1)?.as_str();
+    Some(url.replace("&amp;", "&"))
+}
+
+/// Extract content from a meta property tag in HTML
+fn extract_meta_content(html: &str, property: &str) -> Option<String> {
+    let search = format!("property=\"{}\"", property);
+    let pos = html.find(&search).or_else(|| {
+        let alt = format!("name=\"{}\"", property);
+        html.find(&alt)
+    })?;
+
+    let region = &html[pos.saturating_sub(200)..std::cmp::min(pos + 500, html.len())];
+    let content_re = regex::Regex::new(r#"content="([^"]+)""#).ok()?;
+    let caps = content_re.captures(region)?;
+    let value = caps.get(1)?.as_str();
+
+    if value.starts_with("http") {
+        Some(value.replace("&amp;", "&"))
+    } else {
+        None
     }
 }
 
-/// Run yt-dlp --dump-json with a specific cookie method
-async fn ytdlp_thumbnail_with(url: &str, cookies_browser: &Option<String>, cookies_file: &Option<String>) -> Result<Option<String>, String> {
-    let mut args = vec![
-        "--dump-json",
-        "--skip-download",
-        "--no-playlist",
-    ];
+/// Extract a URL value from a JSON field embedded in HTML
+fn extract_json_field(html: &str, field: &str) -> Option<String> {
+    let needle = format!("\"{}\":\"", field);
+    let pos = html.find(&needle)?;
+    let start = pos + needle.len();
+    let end = html[start..].find('"')?;
+    let value = &html[start..start + end];
+    let decoded = value.replace("\\/", "/").replace("\\u0026", "&");
+    if decoded.starts_with("http") {
+        Some(decoded)
+    } else {
+        None
+    }
+}
 
-    let browser_string;
-    if let Some(ref browser) = cookies_browser {
-        if !browser.is_empty() {
-            args.push("--cookies-from-browser");
-            browser_string = browser.clone();
-            args.push(&browser_string);
+/// Random delay between 0.5 and 3.0 seconds for Instagram rate limiting
+async fn instagram_delay() {
+    use rand::Rng;
+    let ms = rand::thread_rng().gen_range(500..=3000);
+    tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+}
+
+struct YtDlpOutput {
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+/// Run yt-dlp with args, trying bundled sidecar first then system PATH as fallback
+async fn run_ytdlp(app: &AppHandle, args: &[String]) -> Result<YtDlpOutput, String> {
+    // Try bundled sidecar first
+    if let Ok(cmd) = app.shell().sidecar("binaries/yt-dlp") {
+        if let Ok(out) = cmd.args(args).output().await {
+            return Ok(YtDlpOutput {
+                success: out.status.success(),
+                stdout: out.stdout,
+                stderr: out.stderr,
+            });
         }
     }
 
-    let cf_string;
-    if let Some(ref cf) = cookies_file {
-        if !cf.is_empty() && PathBuf::from(cf).exists() {
-            args.push("--cookies");
-            cf_string = cf.clone();
-            args.push(&cf_string);
-        }
-    }
-
-    args.push(url);
-
-    let output = match tokio::process::Command::new("yt-dlp")
-        .args(&args)
+    // Fallback: system-installed yt-dlp (works in dev mode)
+    let out = tokio::process::Command::new("yt-dlp")
+        .args(args)
         .output()
         .await
-    {
-        Ok(o) => o,
-        Err(e) => {
+        .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
-                return Err("yt-dlp is not installed. Install it with: brew install yt-dlp".into());
+                "yt-dlp is not installed. Install it with: brew install yt-dlp".into()
+            } else {
+                format!("Failed to run yt-dlp: {}", e)
             }
-            return Ok(None);
-        }
-    };
+        })?;
 
-    if !output.status.success() {
+    Ok(YtDlpOutput {
+        success: out.status.success(),
+        stdout: out.stdout,
+        stderr: out.stderr,
+    })
+}
+
+/// Run yt-dlp --dump-json with a specific cookie method
+async fn ytdlp_thumbnail_with(app: &AppHandle, url: &str, cookies_browser: &Option<String>, cookies_file: &Option<String>) -> Result<Option<String>, String> {
+    let mut args: Vec<String> = vec![
+        "--dump-json".into(),
+        "--skip-download".into(),
+        "--no-playlist".into(),
+    ];
+
+    if let Some(ref browser) = cookies_browser {
+        if !browser.is_empty() {
+            args.push("--cookies-from-browser".into());
+            args.push(browser.clone());
+        }
+    }
+
+    if let Some(ref cf) = cookies_file {
+        if !cf.is_empty() && PathBuf::from(cf).exists() {
+            args.push("--cookies".into());
+            args.push(cf.clone());
+        }
+    }
+
+    args.push(url.to_string());
+
+    let output = run_ytdlp(app, &args).await?;
+
+    if !output.success {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         let stderr_lower = stderr.to_lowercase();
 
-        // Douyin extractor is broken in yt-dlp (known bug #9667)
         if stderr_lower.contains("[douyin]") && stderr_lower.contains("fresh cookies") {
-            return Ok(None); // not a cookie error, just a broken extractor
+            return Ok(None);
         }
 
         if (stderr_lower.contains("could not find") && stderr_lower.contains("cookie"))
@@ -1162,6 +1351,114 @@ async fn ytdlp_thumbnail_with(url: &str, cookies_browser: &Option<String>, cooki
     Ok(json.get("thumbnail")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string()))
+}
+
+/// Download a thumbnail image, upload to HubSpot File Manager, and set it on the clip
+#[tauri::command]
+async fn upload_clip_thumbnail(token: String, clip_id: String, thumbnail_url: String) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // 1. Download the thumbnail image
+    let img_response = client
+        .get(&thumbnail_url)
+        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        .send()
+        .await
+        .map_err(|e| format!("Failed to download thumbnail: {}", e))?;
+
+    let content_type = img_response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image/jpeg")
+        .to_string();
+
+    let ext = if content_type.contains("png") { "png" }
+        else if content_type.contains("webp") { "webp" }
+        else { "jpg" };
+
+    let img_bytes = img_response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read thumbnail bytes: {}", e))?;
+
+    if img_bytes.is_empty() {
+        return Err("Downloaded thumbnail is empty".into());
+    }
+
+    // 2. Upload to HubSpot File Manager
+    let filename = format!("thumb_{}.{}", clip_id, ext);
+    let file_part = reqwest::multipart::Part::bytes(img_bytes.to_vec())
+        .file_name(filename.clone())
+        .mime_str(&content_type)
+        .map_err(|e| e.to_string())?;
+
+    let options = serde_json::json!({
+        "access": "PUBLIC_NOT_INDEXABLE",
+        "overwrite": true,
+        "duplicateValidationStrategy": "NONE",
+        "duplicateValidationScope": "ENTIRE_PORTAL"
+    });
+
+    let form = reqwest::multipart::Form::new()
+        .part("file", file_part)
+        .text("options", options.to_string())
+        .text("folderPath", "/thumbnails")
+        .text("fileName", filename);
+
+    let upload_res = client
+        .post("https://api.hubapi.com/files/v3/files")
+        .bearer_auth(&token)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to upload to HubSpot: {}", e))?;
+
+    if !upload_res.status().is_success() {
+        let status = upload_res.status();
+        let body = upload_res.text().await.unwrap_or_default();
+        return Err(format!("HubSpot file upload failed ({}): {}", status, body));
+    }
+
+    let upload_json: serde_json::Value = upload_res
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse upload response: {}", e))?;
+
+    let file_url = upload_json
+        .get("url")
+        .and_then(|v| v.as_str())
+        .ok_or("No URL in upload response")?
+        .to_string();
+
+    // 3. Update the clip's fetched_social_thumbnail property
+    let update_body = serde_json::json!({
+        "properties": {
+            "fetched_social_thumbnail": file_url
+        }
+    });
+
+    let update_res = client
+        .patch(&format!(
+            "https://api.hubapi.com/crm/v3/objects/{}/{}",
+            EXTERNAL_CLIPS_OBJECT_ID, clip_id
+        ))
+        .bearer_auth(&token)
+        .json(&update_body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to update clip: {}", e))?;
+
+    if !update_res.status().is_success() {
+        let status = update_res.status();
+        let body = update_res.text().await.unwrap_or_default();
+        return Err(format!("HubSpot clip update failed ({}): {}", status, body));
+    }
+
+    Ok(file_url)
 }
 
 /// Detect platform name from URL for user-friendly error messages
@@ -1259,23 +1556,22 @@ async fn download_clip(
 
     // Try browser cookies first
     let result = run_ytdlp_download(
-        &url, &output_template,
+        &app, &url, &output_template,
         if has_browser { &cookies_browser } else { &None },
         if has_browser { &None } else { &cookies_file },
     ).await;
 
     // If browser cookies failed and we have a cookies file, retry with file
     let result = match &result {
-        Ok(output) if !output.status.success() && has_browser && has_file => {
-            run_ytdlp_download(&url, &output_template, &None, &cookies_file).await
+        Ok((success, _)) if !success && has_browser && has_file => {
+            run_ytdlp_download(&app, &url, &output_template, &None, &cookies_file).await
         }
         _ => result,
     };
 
     match result {
-        Ok(output) if output.status.success() => {
+        Ok((true, _)) => {
             let local_file = find_downloaded_file(&clips_dir, &clip_id);
-            // Resolve to absolute for ffprobe, but emit relative path
             let project_dir = PathBuf::from(&root_folder).join(&project_name);
             let local_duration = local_file.as_ref().and_then(|rel| {
                 let abs = project_dir.join(rel);
@@ -1291,8 +1587,8 @@ async fn download_clip(
             });
             Ok(())
         }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        Ok((false, stderr_bytes)) => {
+            let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
             let friendly = friendly_download_error(&stderr, &url, &cookies_browser);
             let _ = app.emit("download-progress", DownloadProgress {
                 clip_id,
@@ -1304,12 +1600,7 @@ async fn download_clip(
             });
             Err(friendly)
         }
-        Err(e) => {
-            let msg = if e.kind() == std::io::ErrorKind::NotFound {
-                "yt-dlp not found. Please install it: https://github.com/yt-dlp/yt-dlp#installation".into()
-            } else {
-                format!("Failed to run yt-dlp: {e}")
-            };
+        Err(msg) => {
             let _ = app.emit("download-progress", DownloadProgress {
                 clip_id,
                 status: "failed".into(),
@@ -1325,11 +1616,12 @@ async fn download_clip(
 
 /// Run yt-dlp download with a specific cookie method
 async fn run_ytdlp_download(
+    app: &AppHandle,
     url: &str,
     output_template: &str,
     cookies_browser: &Option<String>,
     cookies_file: &Option<String>,
-) -> Result<std::process::Output, std::io::Error> {
+) -> Result<(bool, Vec<u8>), String> {
     let mut args = vec![
         "--no-warnings".to_string(),
         "-f".to_string(), "bestvideo+bestaudio/best".to_string(),
@@ -1355,10 +1647,8 @@ async fn run_ytdlp_download(
 
     args.push(url.to_string());
 
-    tokio::process::Command::new("yt-dlp")
-        .args(&args)
-        .output()
-        .await
+    let output = run_ytdlp(app, &args).await?;
+    Ok((output.success, output.stderr))
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -1419,26 +1709,13 @@ fn save_project(folder: &PathBuf, project: &Project) -> Result<(), String> {
         .map_err(|e| format!("Failed to write project: {e}"))
 }
 
-/// Get duration of a local video file using ffprobe (seconds).
+/// Get duration of a local video file by reading MP4 headers (no external binary needed).
 fn probe_duration(path: &str) -> Option<f64> {
-    let output = std::process::Command::new("ffprobe")
-        .args([
-            "-v", "quiet",
-            "-print_format", "json",
-            "-show_format",
-            path,
-        ])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout).ok()?;
-    json.get("format")?
-        .get("duration")?
-        .as_str()?
-        .parse::<f64>()
-        .ok()
+    let file = fs::File::open(path).ok()?;
+    let size = file.metadata().ok()?.len();
+    let reader = BufReader::new(file);
+    let mp4 = mp4::Mp4Reader::read_header(reader, size).ok()?;
+    Some(mp4.duration().as_secs_f64())
 }
 
 /// Find a downloaded file by clip ID prefix. Returns a **relative** path like "clips/ID_title.mp4".
@@ -1517,6 +1794,7 @@ pub fn run() {
             order_clips,
             import_clip_file,
             fetch_thumbnail,
+            upload_clip_thumbnail,
             create_project,
             load_project,
             save_project_data,

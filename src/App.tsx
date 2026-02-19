@@ -89,6 +89,7 @@ function App() {
           order: project.clips.length + i,
           licenseType: c.licenseType,
           notes: c.notes,
+          fetchedThumbnail: c.fetchedThumbnail,
         }));
 
       // Build a lookup from HubSpot data to refresh metadata on existing clips
@@ -105,6 +106,7 @@ function App() {
             editedDuration: hs.editedDuration,
             licenseType: hs.licenseType,
             notes: hs.notes,
+            fetchedThumbnail: hs.fetchedThumbnail,
           };
         });
       const allClips = [...keptClips, ...newClips].map((c, i) => ({ ...c, order: i }));
@@ -149,6 +151,7 @@ function App() {
       order: project.clips.length,
       licenseType: clip.licenseType,
       notes: clip.notes,
+      fetchedThumbnail: clip.fetchedThumbnail,
     };
     const updated = { ...project, clips: [...project.clips, newClip] };
     setProject(updated);

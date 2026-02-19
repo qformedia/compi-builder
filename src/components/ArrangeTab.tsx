@@ -40,6 +40,7 @@ function toCardData(clip: ProjectClip): ClipCardData {
     downloadError: clip.downloadError,
     licenseType: clip.licenseType,
     notes: clip.notes,
+    fetchedThumbnail: clip.fetchedThumbnail,
   };
 }
 
@@ -167,6 +168,7 @@ export function ArrangeTab({ settings, project, setProject, isActive }: Props) {
                   cookiesBrowser={settings.cookiesBrowser}
                   cookiesFile={settings.cookiesFile}
                   thumbRetryKey={thumbRetryKey}
+                  hubspotToken={settings.hubspotToken}
                 />
               ))}
             </div>
@@ -190,6 +192,7 @@ function SortableCard({
   cookiesBrowser,
   cookiesFile,
   thumbRetryKey,
+  hubspotToken,
 }: {
   clip: ProjectClip;
   index: number;
@@ -199,6 +202,7 @@ function SortableCard({
   cookiesBrowser: string;
   cookiesFile: string;
   thumbRetryKey?: number;
+  hubspotToken?: string;
 }) {
   const {
     attributes,
@@ -237,6 +241,7 @@ function SortableCard({
         cookiesFile={cookiesFile}
         compact
         thumbRetryKey={thumbRetryKey}
+        hubspotToken={hubspotToken}
       />
     </div>
   );

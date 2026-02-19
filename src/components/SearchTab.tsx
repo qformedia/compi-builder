@@ -143,10 +143,12 @@ export function SearchTab({ settings, project, addClip, removeClip }: Props) {
   // Load all clips for a creator
   const loadCreator = useCallback(
     async (creatorName: string) => {
-      const state = creatorLoadState.get(creatorName);
-      if (state === "loading" || state === "loaded") return;
+      setCreatorLoadState((prev) => {
+        const state = prev.get(creatorName);
+        if (state === "loading" || state === "loaded") return prev;
+        return new Map(prev).set(creatorName, "loading");
+      });
 
-      setCreatorLoadState((prev) => new Map(prev).set(creatorName, "loading"));
       try {
         const clips = await searchCreatorClips(
           settings.hubspotToken,
@@ -159,11 +161,10 @@ export function SearchTab({ settings, project, addClip, removeClip }: Props) {
         setCreatorClipsMap((prev) => new Map(prev).set(creatorName, clips));
         setCreatorLoadState((prev) => new Map(prev).set(creatorName, "loaded"));
       } catch {
-        // On failure, revert to pending so it can retry
         setCreatorLoadState((prev) => new Map(prev).set(creatorName, "pending"));
       }
     },
-    [settings.hubspotToken, selectedTags, selectedScores, neverUsed, tagMode, creatorLoadState],
+    [settings.hubspotToken, selectedTags, selectedScores, neverUsed, tagMode],
   );
 
   // Auto-search when filters change
@@ -310,6 +311,7 @@ export function SearchTab({ settings, project, addClip, removeClip }: Props) {
               addClip={addClip}
               removeClip={removeClip}
               onCookieError={setCookieWarning}
+              thumbRetryKey={thumbRetryKey}
             />
           ))}
 
@@ -347,6 +349,7 @@ interface CreatorRowProps {
   addClip: (clip: Clip) => void;
   removeClip: (hubspotId: string) => void;
   onCookieError: (msg: string) => void;
+  thumbRetryKey: number;
 }
 
 function CreatorRow({
@@ -365,6 +368,7 @@ function CreatorRow({
   addClip,
   removeClip,
   onCookieError,
+  thumbRetryKey,
 }: CreatorRowProps) {
   const rowRef = useRef<HTMLDivElement>(null);
 
