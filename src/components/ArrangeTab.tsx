@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
   DndContext,
@@ -16,6 +16,10 @@ import {
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import { GripHorizontal } from "lucide-react";
+import { MediaPlayer, MediaProvider, type MediaPlayerInstance } from "@vidstack/react";
+import { defaultLayoutIcons, DefaultVideoLayout } from "@vidstack/react/player/layouts/default";
+import "@vidstack/react/player/styles/default/theme.css";
+import "@vidstack/react/player/styles/default/layouts/video.css";
 import { ClipCard } from "@/components/ClipCard";
 import { resolveClipPath } from "@/types";
 import type { AppSettings, Project, ProjectClip } from "@/types";
@@ -46,7 +50,7 @@ function toCardData(clip: ProjectClip): ClipCardData {
 
 export function ArrangeTab({ settings, project, setProject, isActive }: Props) {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
-  const videoRef = useRef<HTMLVideoElement>(null);
+  const playerRef = useRef<MediaPlayerInstance>(null);
   const thumbCache = useRef(new Map<string, string | null>());
 
   // Retry failed thumbnails when window regains focus (cookies may have refreshed)
@@ -70,10 +74,28 @@ export function ArrangeTab({ settings, project, setProject, isActive }: Props) {
 
   // Pause video when leaving the tab
   useEffect(() => {
-    if (!isActive && videoRef.current) {
-      videoRef.current.pause();
+    if (!isActive && playerRef.current) {
+      playerRef.current.pause();
     }
   }, [isActive]);
+
+  const completedClips = project?.clips.filter(
+    (c) => c.downloadStatus === "complete" && c.localFile,
+  ) ?? [];
+
+  const selectedClip = completedClips.find(
+    (c) => c.hubspotId === selectedClipId,
+  ) ?? completedClips[0] ?? null;
+
+  const handleNextClip = useCallback(() => {
+    if (!selectedClip) return;
+    const currentIndex = completedClips.findIndex(
+      (c) => c.hubspotId === selectedClip.hubspotId,
+    );
+    if (currentIndex < completedClips.length - 1) {
+      setSelectedClipId(completedClips[currentIndex + 1].hubspotId);
+    }
+  }, [completedClips, selectedClip]);
 
   if (!project) {
     return (
@@ -83,10 +105,6 @@ export function ArrangeTab({ settings, project, setProject, isActive }: Props) {
     );
   }
 
-  const completedClips = project.clips.filter(
-    (c) => c.downloadStatus === "complete" && c.localFile,
-  );
-
   if (completedClips.length === 0) {
     return (
       <div className="flex h-full items-center justify-center text-muted-foreground">
@@ -94,10 +112,6 @@ export function ArrangeTab({ settings, project, setProject, isActive }: Props) {
       </div>
     );
   }
-
-  const selectedClip = completedClips.find(
-    (c) => c.hubspotId === selectedClipId,
-  ) ?? completedClips[0];
 
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;
@@ -128,20 +142,26 @@ export function ArrangeTab({ settings, project, setProject, isActive }: Props) {
   };
 
   return (
-    <div className="flex h-full flex-col">
+    <div className="flex h-full flex-col overflow-hidden">
       {/* Video player — fills remaining space above cards */}
-      <div className="flex min-h-0 flex-1 items-center justify-center rounded-lg bg-black">
+      <div className="relative min-h-0 flex-1 rounded-lg bg-black overflow-hidden">
         {selectedClip?.localFile ? (
-          <video
-            ref={videoRef}
+          <MediaPlayer
+            ref={playerRef}
             key={selectedClip.localFile}
-            controls
-            autoPlay={isActive}
-            className="max-h-full max-w-full rounded-lg"
             src={`localfile://localhost/${encodeURIComponent(resolveClipPath(settings.rootFolder, project.name, selectedClip.localFile))}`}
-          />
+            autoPlay={isActive}
+            onEnded={handleNextClip}
+            keyTarget="document"
+            className="absolute inset-0 !w-full !h-full [&_video]:!absolute [&_video]:!inset-0 [&_video]:!w-full [&_video]:!h-full [&_video]:!object-contain"
+          >
+            <MediaProvider />
+            <DefaultVideoLayout icons={defaultLayoutIcons} seekStep={5} slots={{ pipButton: null, fullscreenButton: null }} />
+          </MediaPlayer>
         ) : (
-          <p className="text-sm text-white/40">Select a clip to preview</p>
+          <div className="flex h-full items-center justify-center">
+            <p className="text-sm text-white/40">Select a clip to preview</p>
+          </div>
         )}
       </div>
 

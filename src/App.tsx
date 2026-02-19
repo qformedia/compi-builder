@@ -1,4 +1,4 @@
-import { useState, useMemo } from "react";
+import { useState, useMemo, Component, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Clock, Film, CheckCircle, Loader2, Sparkles, RefreshCw } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -14,7 +14,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Settings, Search, Download, ListOrdered } from "lucide-react";
+import { Settings, Search, Download, ListOrdered, AlertTriangle } from "lucide-react";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { SearchTab } from "@/components/SearchTab";
 import { ProjectTab } from "@/components/ProjectTab";
@@ -22,6 +22,34 @@ import { ArrangeTab } from "@/components/ArrangeTab";
 import type { AppSettings, Clip, Project, ProjectClip } from "@/types";
 import logo from "@/assets/logotipo-quantastic.png";
 import "./App.css";
+
+class TabErrorBoundary extends Component<
+  { name: string; children: ReactNode },
+  { error: Error | null }
+> {
+  state: { error: Error | null } = { error: null };
+  static getDerivedStateFromError(error: Error) { return { error }; }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="flex h-full flex-col items-center justify-center gap-3 text-sm text-destructive p-8">
+          <AlertTriangle className="h-8 w-8" />
+          <p className="font-semibold">{this.props.name} tab crashed</p>
+          <pre className="max-w-full overflow-auto rounded bg-muted p-3 text-[11px] text-muted-foreground whitespace-pre-wrap">
+            {this.state.error.message}
+          </pre>
+          <button
+            className="mt-2 rounded bg-primary px-4 py-1.5 text-xs text-primary-foreground hover:bg-primary/90"
+            onClick={() => this.setState({ error: null })}
+          >
+            Retry
+          </button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
 
 const FINISH_STEPS: { label: string; buttonLabel: string }[] = [
   { label: "Verify Video Project in HubSpot", buttonLabel: "Open VP in HS" },
@@ -448,28 +476,34 @@ function App() {
 
           {/* Keep all tabs mounted, toggle visibility with CSS */}
           <div className={`flex-1 overflow-auto px-4 ${activeTab === "project" ? "" : "hidden"}`}>
-            <ProjectTab
-              settings={settings}
-              project={project}
-              setProject={setProject}
-              removeClip={removeClipFromProject}
-            />
+            <TabErrorBoundary name="Project">
+              <ProjectTab
+                settings={settings}
+                project={project}
+                setProject={setProject}
+                removeClip={removeClipFromProject}
+              />
+            </TabErrorBoundary>
           </div>
           <div className={`flex-1 overflow-auto px-4 ${activeTab === "search" ? "" : "hidden"}`}>
-            <SearchTab
-              settings={settings}
-              project={project}
-              addClip={addClipToProject}
-              removeClip={removeClipFromProject}
-            />
+            <TabErrorBoundary name="Search">
+              <SearchTab
+                settings={settings}
+                project={project}
+                addClip={addClipToProject}
+                removeClip={removeClipFromProject}
+              />
+            </TabErrorBoundary>
           </div>
           <div className={`flex-1 overflow-auto px-4 ${activeTab === "arrange" ? "" : "hidden"}`}>
-            <ArrangeTab
-              settings={settings}
-              project={project}
-              setProject={setProject}
-              isActive={activeTab === "arrange"}
-            />
+            <TabErrorBoundary name="Arrange">
+              <ArrangeTab
+                settings={settings}
+                project={project}
+                setProject={setProject}
+                isActive={activeTab === "arrange"}
+              />
+            </TabErrorBoundary>
           </div>
         </Tabs>
       )}
