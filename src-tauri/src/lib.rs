@@ -36,6 +36,14 @@ pub struct ProjectClip {
     pub notes: Option<String>,
     #[serde(rename = "fetchedThumbnail", default)]
     pub fetched_thumbnail: Option<String>,
+    #[serde(rename = "editingNotes", default)]
+    pub editing_notes: Option<String>,
+    #[serde(rename = "creatorId", default)]
+    pub creator_id: Option<String>,
+    #[serde(rename = "clipMixLinks", default)]
+    pub clip_mix_links: Option<Vec<String>>,
+    #[serde(rename = "availableAskFirst", default)]
+    pub available_ask_first: Option<bool>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -64,6 +72,7 @@ pub struct DownloadProgress {
 // ── HubSpot API ─────────────────────────────────────────────────────────────
 
 const EXTERNAL_CLIPS_OBJECT_ID: &str = "2-192287471";
+const CREATORS_OBJECT_ID: &str = "2-191972671";
 const VIDEO_PROJECTS_OBJECT_ID: &str = "2-192286893";
 
 /// Shared clip properties requested from HubSpot
@@ -467,39 +476,61 @@ async fn fetch_video_project_clips(
     token: String,
     project_id: String,
 ) -> Result<serde_json::Value, String> {
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
 
-    // Step 1: Get associated External Clip IDs
-    let assoc_url = format!(
+    // Step 1: Get ALL associated External Clip IDs (paginated)
+    let base_assoc_url = format!(
         "https://api.hubapi.com/crm/v3/objects/{}/{}/associations/{}",
         VIDEO_PROJECTS_OBJECT_ID, project_id, EXTERNAL_CLIPS_OBJECT_ID
     );
 
-    let res = client
-        .get(&assoc_url)
-        .header("Authorization", format!("Bearer {}", token))
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {e}"))?;
+    let mut clip_ids: Vec<String> = Vec::new();
+    let mut after: Option<String> = None;
 
-    if !res.status().is_success() {
-        let status = res.status();
-        let text = res.text().await.unwrap_or_default();
-        return Err(format!("HubSpot associations error ({}): {}", status, text));
+    loop {
+        let mut url = base_assoc_url.clone();
+        if let Some(ref cursor) = after {
+            url = format!("{}?after={}", url, cursor);
+        }
+
+        let res = client
+            .get(&url)
+            .header("Authorization", format!("Bearer {}", token))
+            .send()
+            .await
+            .map_err(|e| format!("Request failed: {e}"))?;
+
+        if !res.status().is_success() {
+            let status = res.status();
+            let text = res.text().await.unwrap_or_default();
+            return Err(format!("HubSpot associations error ({}): {}", status, text));
+        }
+
+        let body: serde_json::Value = res.json().await
+            .map_err(|e| format!("Failed to parse associations: {e}"))?;
+
+        if let Some(results) = body.get("results").and_then(|r| r.as_array()) {
+            for item in results {
+                if let Some(id) = item.get("id").and_then(|id| id.as_str()) {
+                    clip_ids.push(id.to_string());
+                }
+            }
+        }
+
+        after = body
+            .get("paging")
+            .and_then(|p| p.get("next"))
+            .and_then(|n| n.get("after"))
+            .and_then(|a| a.as_str())
+            .map(String::from);
+
+        if after.is_none() {
+            break;
+        }
     }
-
-    let body: serde_json::Value = res.json().await
-        .map_err(|e| format!("Failed to parse associations: {e}"))?;
-
-    let clip_ids: Vec<String> = body
-        .get("results")
-        .and_then(|r| r.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|item| item.get("id").and_then(|id| id.as_str()).map(String::from))
-                .collect()
-        })
-        .unwrap_or_default();
 
     if clip_ids.is_empty() {
         return Ok(serde_json::json!({ "total": 0, "results": [] }));
@@ -639,6 +670,64 @@ async fn fetch_video_projects_by_ids(
     res.json::<serde_json::Value>()
         .await
         .map_err(|e| format!("Failed to parse response: {e}"))
+}
+
+/// Batch-read Creator records by IDs for CSV export
+#[tauri::command]
+async fn fetch_creators_batch(
+    token: String,
+    creator_ids: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    if creator_ids.is_empty() {
+        return Ok(serde_json::json!({ "results": [] }));
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let batch_url = format!(
+        "https://api.hubapi.com/crm/v3/objects/{}/batch/read",
+        CREATORS_OBJECT_ID
+    );
+    let props = vec![
+        "main_link", "main_account", "name",
+        "douyin_id", "kuaishou_id", "xiaohongshu_id",
+        "special_requests", "notes", "license_checked", "license_type",
+    ];
+
+    let mut all_results: Vec<serde_json::Value> = Vec::new();
+
+    for chunk in creator_ids.chunks(100) {
+        let batch_body = serde_json::json!({
+            "properties": props,
+            "inputs": chunk.iter().map(|id| serde_json::json!({ "id": id })).collect::<Vec<_>>()
+        });
+
+        let res = client
+            .post(&batch_url)
+            .header("Authorization", format!("Bearer {}", token))
+            .header("Content-Type", "application/json")
+            .json(&batch_body)
+            .send()
+            .await
+            .map_err(|e| format!("Creator batch read failed: {e}"))?;
+
+        if !res.status().is_success() {
+            let status = res.status();
+            let text = res.text().await.unwrap_or_default();
+            return Err(format!("Creator batch read error ({}): {}", status, text));
+        }
+
+        let batch_result: serde_json::Value = res.json().await
+            .map_err(|e| format!("Failed to parse creator batch: {e}"))?;
+
+        if let Some(results) = batch_result.get("results").and_then(|r| r.as_array()) {
+            all_results.extend(results.iter().cloned());
+        }
+    }
+
+    Ok(serde_json::json!({ "results": all_results }))
 }
 
 /// Create a Video Project in HubSpot and associate the given External Clip IDs.
@@ -837,7 +926,8 @@ fn find_file_by_id(dir: &PathBuf, id_prefix: &str) -> Option<PathBuf> {
     None
 }
 
-/// Generate a CSV file with clip order, creator, link, etc.
+/// Generate a CSV file matching the HubSpot workspace report format.
+/// The frontend passes pre-merged clip+creator data as JSON objects.
 /// Returns the absolute path to the CSV file.
 #[tauri::command]
 async fn generate_clips_csv(
@@ -848,35 +938,56 @@ async fn generate_clips_csv(
     let project_dir = PathBuf::from(&root_folder).join(&project_name);
     let csv_path = project_dir.join("clips.csv");
 
-    let mut csv_content = String::from("Order,Creator,Link,HubSpot Clip ID,Score,Duration\n");
+    let escape = |s: &str| -> String {
+        if s.contains(',') || s.contains('"') || s.contains('\n') {
+            format!("\"{}\"", s.replace('"', "\"\""))
+        } else {
+            s.to_string()
+        }
+    };
+
+    let get = |clip: &serde_json::Value, key: &str| -> String {
+        clip.get(key)
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string()
+    };
+
+    let mut csv_content = String::from(
+        "Order,Duration,Editing Notes,Link,Main Link,Main Account,Name,Douyin ID,Kuaishou ID,Xiaohongshu ID,Clip Mix Links,Special Requests,Notes,License Checked,License Type,Available Ask First,Score,External Clip ID,Creator ID,Video Project ID\n"
+    );
+
     for (i, clip) in clips.iter().enumerate() {
-        let creator = clip.get("creatorName").and_then(|v| v.as_str()).unwrap_or("");
-        let link = clip.get("link").and_then(|v| v.as_str()).unwrap_or("");
-        let clip_id = clip.get("hubspotId").and_then(|v| v.as_str()).unwrap_or("");
-        let score = clip.get("score").and_then(|v| v.as_str()).unwrap_or("");
-        let duration = clip.get("editedDuration")
+        let duration = clip.get("duration")
             .and_then(|v| v.as_f64())
             .map(|d| format!("{:.0}", d))
             .unwrap_or_default();
 
-        // Escape CSV fields that may contain commas or quotes
-        let escape = |s: &str| {
-            if s.contains(',') || s.contains('"') || s.contains('\n') {
-                format!("\"{}\"", s.replace('"', "\"\""))
-            } else {
-                s.to_string()
-            }
-        };
+        let fields = [
+            format!("{}", i + 1),
+            escape(&duration),
+            escape(&get(clip, "editingNotes")),
+            escape(&get(clip, "link")),
+            escape(&get(clip, "mainLink")),
+            escape(&get(clip, "mainAccount")),
+            escape(&get(clip, "name")),
+            escape(&get(clip, "douyinId")),
+            escape(&get(clip, "kuaishouId")),
+            escape(&get(clip, "xiaohongshuId")),
+            escape(&get(clip, "clipMixLinks")),
+            escape(&get(clip, "specialRequests")),
+            escape(&get(clip, "notes")),
+            escape(&get(clip, "licenseChecked")),
+            escape(&get(clip, "licenseType")),
+            escape(&get(clip, "availableAskFirst")),
+            escape(&get(clip, "score")),
+            escape(&get(clip, "externalClipId")),
+            escape(&get(clip, "creatorId")),
+            escape(&get(clip, "videoProjectId")),
+        ];
 
-        csv_content.push_str(&format!(
-            "{},{},{},{},{},{}\n",
-            i + 1,
-            escape(creator),
-            escape(link),
-            clip_id,
-            score,
-            duration,
-        ));
+        csv_content.push_str(&fields.join(","));
+        csv_content.push('\n');
     }
 
     fs::write(&csv_path, &csv_content)
@@ -1461,6 +1572,45 @@ async fn upload_clip_thumbnail(token: String, clip_id: String, thumbnail_url: St
     Ok(file_url)
 }
 
+/// Update a single property on an External Clip in HubSpot
+#[tauri::command]
+async fn update_clip_property(
+    token: String,
+    clip_id: String,
+    property_name: String,
+    property_value: String,
+) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let body = serde_json::json!({
+        "properties": {
+            property_name: property_value
+        }
+    });
+
+    let res = client
+        .patch(&format!(
+            "https://api.hubapi.com/crm/v3/objects/{}/{}",
+            EXTERNAL_CLIPS_OBJECT_ID, clip_id
+        ))
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to update clip: {}", e))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("HubSpot update failed ({}): {}", status, text));
+    }
+
+    Ok(())
+}
+
 /// Detect platform name from URL for user-friendly error messages
 fn detect_platform(url: &str) -> &str {
     if url.contains("instagram.com") { "Instagram" }
@@ -1795,6 +1945,8 @@ pub fn run() {
             import_clip_file,
             fetch_thumbnail,
             upload_clip_thumbnail,
+            update_clip_property,
+            fetch_creators_batch,
             create_project,
             load_project,
             save_project_data,

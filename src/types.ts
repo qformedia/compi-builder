@@ -45,6 +45,10 @@ export interface ProjectClip {
   licenseType?: string;
   notes?: string;
   fetchedThumbnail?: string;
+  editingNotes?: string;
+  creatorId?: string;
+  clipMixLinks?: string[];
+  availableAskFirst?: boolean;
 }
 
 /** Resolve a relative localFile path to an absolute path.

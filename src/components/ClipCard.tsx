@@ -18,6 +18,7 @@ import {
   Download,
   CheckCircle,
   FolderOpen,
+  StickyNote,
 } from "lucide-react";
 
 // ── Persistent thumbnail cache (survives app restarts & cookie issues) ───────
@@ -83,6 +84,7 @@ export interface ClipCardData {
   licenseType?: string;
   notes?: string;
   fetchedThumbnail?: string;
+  editingNotes?: string;
   // Project-specific fields (optional)
   downloadStatus?: "pending" | "downloading" | "complete" | "failed";
   downloadError?: string;
@@ -349,18 +351,30 @@ export function ClipCard({
           </div>
         )}
 
-        {/* Top-left: duration + link broken warning */}
-        {(clip.editedDuration != null || clip.linkNotWorking) && (
-          <div className="absolute left-1.5 top-1.5 flex items-center gap-1">
-            {clip.editedDuration != null && (
-              <span className="rounded bg-black/70 px-1.5 py-0.5 text-[13px] font-medium text-white">
-                {formatDuration(clip.editedDuration)}
-              </span>
-            )}
-            {clip.linkNotWorking && (
-              <span className="rounded-full bg-destructive p-1">
-                <AlertTriangle className="h-3 w-3 text-white" />
-              </span>
+        {/* Top-left: duration + link broken warning + editing notes icon */}
+        {(clip.editedDuration != null || clip.linkNotWorking || clip.editingNotes) && (
+          <div className="absolute left-1.5 top-1.5 flex flex-col items-start gap-1">
+            <div className="flex items-center gap-1">
+              {clip.editedDuration != null && (
+                <span className="rounded bg-black/70 px-1.5 py-0.5 text-[13px] font-medium text-white">
+                  {formatDuration(clip.editedDuration)}
+                </span>
+              )}
+              {clip.linkNotWorking && (
+                <span className="rounded-full bg-destructive p-1">
+                  <AlertTriangle className="h-3 w-3 text-white" />
+                </span>
+              )}
+            </div>
+            {clip.editingNotes && (
+              <div className="group/enotes relative">
+                <span className="flex items-center gap-0.5 rounded bg-amber-400/90 px-1 py-0.5 text-[10px] font-semibold text-amber-950">
+                  <StickyNote className="h-2.5 w-2.5" />
+                </span>
+                <div className="pointer-events-none absolute left-0 top-full mt-1 hidden group-hover/enotes:block z-20 w-40 rounded bg-black/90 px-2 py-1.5 text-[11px] leading-snug text-white shadow-lg whitespace-pre-wrap">
+                  {clip.editingNotes}
+                </div>
+              </div>
             )}
           </div>
         )}
@@ -622,8 +636,8 @@ export function ClipCard({
           </button>
         )}
 
-        {/* Download status + Retry + Browse for failed/pending clips */}
-        {ds === "failed" && onRetryDownload && (
+        {/* Download status + Retry + Browse for non-complete clips */}
+        {(ds === "failed" || ds === "downloading") && onRetryDownload && (
           <button
             onClick={onRetryDownload}
             className="flex items-center justify-center gap-1 px-2 py-1.5 text-xs font-medium text-orange-600 transition-colors hover:bg-muted cursor-pointer"
@@ -632,7 +646,7 @@ export function ClipCard({
             <Download className="h-3.5 w-3.5" /> Retry
           </button>
         )}
-        {(ds === "failed" || ds === "pending") && onImportFile && (
+        {(ds === "failed" || ds === "pending" || ds === "downloading") && onImportFile && (
           <button
             onClick={onImportFile}
             className="flex items-center justify-center gap-1 px-2 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:bg-muted cursor-pointer"
@@ -640,11 +654,6 @@ export function ClipCard({
           >
             <FolderOpen className="h-3.5 w-3.5" /> Browse
           </button>
-        )}
-        {ds === "downloading" && (
-          <span className="flex items-center gap-1 px-2 py-1.5 text-[10px] text-muted-foreground">
-            <Loader2 className="h-3 w-3 animate-spin" />
-          </span>
         )}
         {ds === "complete" && (
           <span className="flex items-center gap-1 px-2 py-1.5 text-[10px] text-green-600">

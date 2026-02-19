@@ -575,12 +575,12 @@ export function ProjectTab({ settings, project, setProject, removeClip }: Props)
                 cookiesFile={settings.cookiesFile}
                 onRemove={() => removeClip(clip.hubspotId)}
                 onRetryDownload={
-                  clip.downloadStatus === "pending" || clip.downloadStatus === "failed"
+                  clip.downloadStatus !== "complete"
                     ? () => downloadClip(clip)
                     : undefined
                 }
                 onImportFile={
-                  clip.downloadStatus === "pending" || clip.downloadStatus === "failed"
+                  clip.downloadStatus !== "complete"
                     ? () => importClipFile(clip)
                     : undefined
                 }

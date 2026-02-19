@@ -118,6 +118,9 @@ function App() {
           licenseType: c.licenseType,
           notes: c.notes,
           fetchedThumbnail: c.fetchedThumbnail,
+          creatorId: c.creatorId,
+          clipMixLinks: c.clipMixLinks,
+          availableAskFirst: c.availableAskFirst,
         }));
 
       // Build a lookup from HubSpot data to refresh metadata on existing clips
@@ -135,6 +138,9 @@ function App() {
             licenseType: hs.licenseType,
             notes: hs.notes,
             fetchedThumbnail: hs.fetchedThumbnail,
+            creatorId: hs.creatorId,
+            clipMixLinks: hs.clipMixLinks,
+            availableAskFirst: hs.availableAskFirst,
           };
         });
       const allClips = [...keptClips, ...newClips].map((c, i) => ({ ...c, order: i }));
@@ -180,6 +186,9 @@ function App() {
       licenseType: clip.licenseType,
       notes: clip.notes,
       fetchedThumbnail: clip.fetchedThumbnail,
+      creatorId: clip.creatorId,
+      clipMixLinks: clip.clipMixLinks,
+      availableAskFirst: clip.availableAskFirst,
     };
     const updated = { ...project, clips: [...project.clips, newClip] };
     setProject(updated);
@@ -279,16 +288,55 @@ function App() {
       }
     })();
 
-    // Step 2: Generate CSV
+    // Step 2: Generate CSV (fetch creator data from HubSpot, then merge)
     const step2 = (async () => {
       try {
-        const clipsData = completedClips.map((c) => ({
-          creatorName: c.creatorName,
-          link: c.link,
-          hubspotId: c.hubspotId,
-          score: c.score ?? null,
-          editedDuration: c.editedDuration ?? c.localDuration ?? null,
-        }));
+        // Collect unique creator IDs and fetch their properties
+        const creatorIds = [...new Set(
+          completedClips.map((c) => c.creatorId).filter((id): id is string => !!id)
+        )];
+
+        type CreatorRecord = { id: string; properties: Record<string, string | null> };
+        let creatorMap = new Map<string, Record<string, string | null>>();
+
+        if (creatorIds.length > 0) {
+          const creatorsResult = await invoke<{ results: CreatorRecord[] }>(
+            "fetch_creators_batch",
+            { token: settings.hubspotToken, creatorIds },
+          );
+          creatorMap = new Map(
+            creatorsResult.results.map((r) => [r.id, r.properties])
+          );
+        }
+
+        const vpId = project.hubspotVideoProjectId ?? "";
+
+        const clipsData = completedClips.map((c) => {
+          const cr = c.creatorId ? creatorMap.get(c.creatorId) : undefined;
+          const noVal = (v?: string | null) => v || "";
+          return {
+            duration: c.editedDuration ?? c.localDuration ?? null,
+            link: c.link,
+            mainLink: noVal(cr?.main_link),
+            mainAccount: noVal(cr?.main_account),
+            name: noVal(cr?.name),
+            douyinId: noVal(cr?.douyin_id),
+            kuaishouId: noVal(cr?.kuaishou_id),
+            xiaohongshuId: noVal(cr?.xiaohongshu_id),
+            clipMixLinks: (c.clipMixLinks ?? []).join(", "),
+            specialRequests: noVal(cr?.special_requests),
+            notes: noVal(cr?.notes),
+            licenseChecked: noVal(cr?.license_checked),
+            licenseType: noVal(cr?.license_type),
+            availableAskFirst: c.availableAskFirst ? "Yes" : "",
+            score: c.score ?? "",
+            externalClipId: c.hubspotId,
+            creatorId: c.creatorId ?? "",
+            videoProjectId: vpId,
+            editingNotes: c.editingNotes ?? "",
+          };
+        });
+
         const csvResult = await invoke<string>("generate_clips_csv", {
           rootFolder: settings.rootFolder,
           projectName: project.name,
@@ -586,9 +634,19 @@ function App() {
                           size="sm"
                           className="text-xs h-7 px-3 cursor-pointer"
                           onClick={() => {
-                            import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
-                              openUrl(actionUrl)
-                            );
+                            if (actionUrl.startsWith("http")) {
+                              import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
+                                openUrl(actionUrl)
+                              );
+                            } else if (i === 1) {
+                              import("@tauri-apps/plugin-opener").then(({ revealItemInDir }) =>
+                                revealItemInDir(actionUrl)
+                              );
+                            } else {
+                              import("@tauri-apps/plugin-opener").then(({ openPath }) =>
+                                openPath(actionUrl)
+                              );
+                            }
                           }}
                         >
                           {step.buttonLabel}
