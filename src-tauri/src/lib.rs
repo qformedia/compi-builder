@@ -1392,8 +1392,14 @@ async fn run_ytdlp(app: &AppHandle, args: &[String]) -> Result<YtDlpOutput, Stri
     }
 
     // Fallback: system-installed yt-dlp (works in dev mode)
-    let out = tokio::process::Command::new("yt-dlp")
-        .args(args)
+    let mut cmd = tokio::process::Command::new("yt-dlp");
+    cmd.args(args);
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    }
+    let out = cmd
         .output()
         .await
         .map_err(|e| {
@@ -1448,6 +1454,7 @@ async fn ytdlp_thumbnail_with(app: &AppHandle, url: &str, cookies_browser: &Opti
         if (stderr_lower.contains("could not find") && stderr_lower.contains("cookie"))
             || stderr_lower.contains("no suitable cookie")
             || stderr_lower.contains("failed to decrypt")
+            || stderr_lower.contains("could not copy")
         {
             let browser_name = cookies_browser.as_ref().map(|b| b.as_str()).unwrap_or("your browser");
             return Err(format!(
@@ -1721,6 +1728,14 @@ async fn download_clip(
         _ => result,
     };
 
+    // Last resort: retry without any cookies (works for YouTube, TikTok, etc.)
+    let result = match &result {
+        Ok((success, _)) if !success && (has_browser || has_file) => {
+            run_ytdlp_download(&app, &url, &output_template, &None, &None).await
+        }
+        _ => result,
+    };
+
     match result {
         Ok((true, _)) => {
             let local_file = find_downloaded_file(&clips_dir, &clip_id);
@@ -1828,6 +1843,12 @@ fn friendly_download_error(stderr: &str, url: &str, cookies_browser: &Option<Str
             browser, browser
         );
     }
+    if lower.contains("could not copy") && lower.contains("cookie") {
+        return format!(
+            "Could not copy {} cookie database. Close {} completely and retry.",
+            browser, browser
+        );
+    }
     if lower.contains("failed to decrypt") && lower.contains("cookie") {
         return format!(
             "Cannot decrypt {} cookies. Try closing {} completely and retry.",
@@ -1900,6 +1921,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .register_uri_scheme_protocol("localfile", |_ctx, request| {
             // Decode the path from the URL
             let uri = request.uri().to_string();

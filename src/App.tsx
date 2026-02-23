@@ -1,5 +1,6 @@
-import { useState, useMemo, Component, type ReactNode } from "react";
+import { useState, useEffect, useMemo, Component, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { check } from "@tauri-apps/plugin-updater";
 import { Clock, Film, CheckCircle, Loader2, Sparkles, RefreshCw } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { HubSpotIcon } from "@/components/ClipCard";
@@ -82,6 +83,26 @@ function App() {
   const [hubspotProjectId, setHubspotProjectId] = useState<string>();
   const [csvPath, setCsvPath] = useState<string>();
   const [clipsDir, setClipsDir] = useState<string>();
+
+  // Check for app updates on startup
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const update = await check();
+        if (cancelled || !update) return;
+        const yes = window.confirm(
+          `A new version (${update.version}) is available. Download and install?`
+        );
+        if (!yes) return;
+        await update.downloadAndInstall();
+        window.alert("Update installed! Restart the app to use the new version.");
+      } catch (e) {
+        console.error("Update check failed:", e);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   const saveSettings = (next: AppSettings) => {
     setSettings(next);
