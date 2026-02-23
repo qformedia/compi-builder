@@ -2001,14 +2001,18 @@ pub fn run() {
             use std::io::{Read, Seek, SeekFrom};
 
             let uri = request.uri().to_string();
+            // On macOS:  localfile://localhost/<path>
+            // On Windows: http://localfile.localhost/<path>
             let path = uri
                 .strip_prefix("localfile://localhost/")
+                .or_else(|| uri.strip_prefix("http://localfile.localhost/"))
+                .or_else(|| uri.strip_prefix("https://localfile.localhost/"))
                 .unwrap_or(&uri);
             let decoded = urlencoding::decode(path).unwrap_or_default();
             let decoded_ref = decoded.as_ref();
 
             // On Windows, URL path may have a leading slash before the drive letter
-            let clean = if cfg!(target_os = "windows") && decoded_ref.starts_with('/') {
+            let clean = if decoded_ref.starts_with('/') && decoded_ref.len() > 2 && decoded_ref.as_bytes()[2] == b':' {
                 &decoded_ref[1..]
             } else {
                 decoded_ref
@@ -2018,10 +2022,12 @@ pub fn run() {
 
             let mut file = match fs::File::open(&file_path) {
                 Ok(f) => f,
-                Err(_) => {
+                Err(e) => {
+                    let msg = format!("Cannot open file: {} ({})", file_path.display(), e);
                     return tauri::http::Response::builder()
                         .status(404)
-                        .body(b"Not found".to_vec())
+                        .header("Access-Control-Allow-Origin", "*")
+                        .body(msg.into_bytes())
                         .unwrap()
                 }
             };
@@ -2031,6 +2037,7 @@ pub fn run() {
                 return tauri::http::Response::builder()
                     .status(200)
                     .header("Content-Length", "0")
+                    .header("Access-Control-Allow-Origin", "*")
                     .body(Vec::new())
                     .unwrap();
             }
@@ -2043,7 +2050,6 @@ pub fn run() {
             };
 
             // Parse Range header -- required for WebView2 video playback on Windows.
-            // WebView2 sends Range requests and won't play video without 206 responses.
             let range_header = request
                 .headers()
                 .get("range")
@@ -2072,7 +2078,9 @@ pub fn run() {
             let mut response = tauri::http::Response::builder()
                 .header("Content-Type", mime)
                 .header("Accept-Ranges", "bytes")
-                .header("Content-Length", n.to_string());
+                .header("Content-Length", n.to_string())
+                .header("Access-Control-Allow-Origin", "*")
+                .header("Access-Control-Expose-Headers", "Content-Range, Content-Length, Accept-Ranges");
 
             if is_range {
                 response = response

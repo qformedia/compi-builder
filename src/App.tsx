@@ -1,7 +1,7 @@
-import { useState, useEffect, useMemo, Component, type ReactNode } from "react";
+import { useState, useEffect, useMemo, useCallback, Component, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { check } from "@tauri-apps/plugin-updater";
-import { Clock, Film, CheckCircle, Loader2, Sparkles, RefreshCw } from "lucide-react";
+import { check, type Update } from "@tauri-apps/plugin-updater";
+import { Clock, Film, CheckCircle, Loader2, Sparkles, RefreshCw, X } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { HubSpotIcon } from "@/components/ClipCard";
 import { fetchVideoProjectClips } from "@/lib/hubspot";
@@ -84,25 +84,45 @@ function App() {
   const [csvPath, setCsvPath] = useState<string>();
   const [clipsDir, setClipsDir] = useState<string>();
 
-  // Check for app updates on startup
+  // Update state
+  const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
+  const [updateStatus, setUpdateStatus] = useState<"idle" | "downloading" | "installed">("idle");
+  const [updateDismissed, setUpdateDismissed] = useState(false);
+
+  const checkForUpdates = useCallback(async (): Promise<"up-to-date" | "available" | "error"> => {
+    try {
+      const update = await check();
+      if (!update) return "up-to-date";
+      setPendingUpdate(update);
+      setUpdateDismissed(false);
+      setUpdateStatus("idle");
+      return "available";
+    } catch (e) {
+      console.error("Update check failed:", e);
+      return "error";
+    }
+  }, []);
+
+  const installUpdate = useCallback(async () => {
+    if (!pendingUpdate) return;
+    setUpdateStatus("downloading");
+    try {
+      await pendingUpdate.downloadAndInstall();
+      setUpdateStatus("installed");
+    } catch (e) {
+      console.error("Update install failed:", e);
+      setUpdateStatus("idle");
+    }
+  }, [pendingUpdate]);
+
+  // Auto-check on startup
   useEffect(() => {
     let cancelled = false;
-    (async () => {
-      try {
-        const update = await check();
-        if (cancelled || !update) return;
-        const yes = window.confirm(
-          `A new version (${update.version}) is available. Download and install?`
-        );
-        if (!yes) return;
-        await update.downloadAndInstall();
-        window.alert("Update installed! Restart the app to use the new version.");
-      } catch (e) {
-        console.error("Update check failed:", e);
-      }
-    })();
+    checkForUpdates().then((result) => {
+      if (cancelled || result !== "available") return;
+    });
     return () => { cancelled = true; };
-  }, []);
+  }, [checkForUpdates]);
 
   const saveSettings = (next: AppSettings) => {
     setSettings(next);
@@ -455,6 +475,35 @@ function App() {
         </div>
       </header>
 
+      {/* Update notification banner */}
+      {pendingUpdate && !updateDismissed && (
+        <div className="flex items-center justify-between gap-3 border-b bg-primary/5 px-4 py-1.5 text-sm">
+          {updateStatus === "installed" ? (
+            <span className="flex items-center gap-2">
+              <CheckCircle className="h-3.5 w-3.5 text-green-500" />
+              Update v{pendingUpdate.version} installed. Restart to apply.
+            </span>
+          ) : updateStatus === "downloading" ? (
+            <span className="flex items-center gap-2">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Installing v{pendingUpdate.version}...
+            </span>
+          ) : (
+            <span>Version {pendingUpdate.version} is available.</span>
+          )}
+          <div className="flex items-center gap-1.5">
+            {updateStatus === "idle" && (
+              <Button size="sm" variant="default" className="h-6 px-2 text-xs cursor-pointer" onClick={installUpdate}>
+                Install
+              </Button>
+            )}
+            <button onClick={() => setUpdateDismissed(true)} className="rounded p-0.5 text-muted-foreground hover:text-foreground cursor-pointer">
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* Main content */}
       {!isConfigured ? (
         <div className="flex flex-1 items-center justify-center">
@@ -585,6 +634,7 @@ function App() {
         onOpenChange={setSettingsOpen}
         settings={settings}
         onSave={saveSettings}
+        onCheckUpdate={checkForUpdates}
       />
 
       {/* Finish Video Dialog */}

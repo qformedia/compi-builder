@@ -17,7 +17,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { FolderOpen, FileText } from "lucide-react";
+import { FolderOpen, FileText, Loader2, CheckCircle } from "lucide-react";
 import type { AppSettings } from "@/types";
 
 const BROWSER_OPTIONS = [
@@ -35,10 +35,12 @@ interface Props {
   onOpenChange: (open: boolean) => void;
   settings: AppSettings;
   onSave: (settings: AppSettings) => void;
+  onCheckUpdate?: () => Promise<"up-to-date" | "available" | "error">;
 }
 
-export function SettingsDialog({ open, onOpenChange, settings, onSave }: Props) {
+export function SettingsDialog({ open, onOpenChange, settings, onSave, onCheckUpdate }: Props) {
   const [draft, setDraft] = useState(settings);
+  const [updateCheck, setUpdateCheck] = useState<"idle" | "checking" | "up-to-date" | "available" | "error">("idle");
 
   // Reset draft when dialog opens
   const handleOpenChange = (next: boolean) => {
@@ -183,8 +185,38 @@ export function SettingsDialog({ open, onOpenChange, settings, onSave }: Props) 
             </div>
           </details>
         </div>
-        <DialogFooter>
-          <Button onClick={handleSave}>Save</Button>
+        <DialogFooter className="flex-row items-center !justify-between">
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            <span>v{__APP_VERSION__}</span>
+            {onCheckUpdate && (
+              <>
+                <button
+                  className="underline hover:text-foreground cursor-pointer disabled:opacity-50 disabled:no-underline"
+                  disabled={updateCheck === "checking"}
+                  onClick={async () => {
+                    setUpdateCheck("checking");
+                    const result = await onCheckUpdate();
+                    setUpdateCheck(result);
+                    setTimeout(() => setUpdateCheck("idle"), 4000);
+                  }}
+                >
+                  {updateCheck === "checking" ? (
+                    <span className="flex items-center gap-1"><Loader2 className="h-3 w-3 animate-spin" />Checking...</span>
+                  ) : "Check for updates"}
+                </button>
+                {updateCheck === "up-to-date" && (
+                  <span className="flex items-center gap-1 text-green-600"><CheckCircle className="h-3 w-3" />Up to date</span>
+                )}
+                {updateCheck === "available" && (
+                  <span className="text-primary">Update available!</span>
+                )}
+                {updateCheck === "error" && (
+                  <span className="text-destructive">Check failed</span>
+                )}
+              </>
+            )}
+          </div>
+          <Button onClick={handleSave} className="cursor-pointer">Save</Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

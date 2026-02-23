@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { open as openFileDialog } from "@tauri-apps/plugin-dialog";
 import {
   DndContext,
@@ -52,6 +52,7 @@ function toCardData(clip: ProjectClip): ClipCardData {
 
 export function ArrangeTab({ settings, project, setProject, isActive }: Props) {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
+  const [playerError, setPlayerError] = useState<string | null>(null);
   const playerRef = useRef<MediaPlayerInstance>(null);
   const thumbCache = useRef(new Map<string, string | null>());
 
@@ -285,18 +286,34 @@ export function ArrangeTab({ settings, project, setProject, isActive }: Props) {
         {/* Video player */}
         <div className="relative min-h-0 flex-1 rounded-lg bg-black overflow-hidden">
           {selectedClip && isPlayable(selectedClip) ? (
-            <MediaPlayer
-              ref={playerRef}
-              key={selectedClip.localFile}
-              src={`localfile://localhost/${encodeURIComponent(resolveClipPath(settings.rootFolder, project.name, selectedClip.localFile!))}`}
-              autoPlay={isActive}
-              onEnded={handleNextClip}
-              keyTarget="document"
-              className="absolute inset-0 !w-full !h-full [&_video]:!absolute [&_video]:!inset-0 [&_video]:!w-full [&_video]:!h-full [&_video]:!object-contain"
-            >
-              <MediaProvider />
-              <DefaultVideoLayout icons={defaultLayoutIcons} seekStep={5} slots={{ pipButton: null, fullscreenButton: null }} />
-            </MediaPlayer>
+            <>
+              <MediaPlayer
+                ref={playerRef}
+                key={selectedClip.localFile}
+                src={convertFileSrc(resolveClipPath(settings.rootFolder, project.name, selectedClip.localFile!), "localfile")}
+                autoPlay={isActive}
+                onEnded={handleNextClip}
+                onError={(detail) => {
+                  const msg = detail instanceof Event
+                    ? (detail as any)?.detail?.message ?? "Unknown playback error"
+                    : String(detail);
+                  console.error("Player error:", msg, "URL:", convertFileSrc(resolveClipPath(settings.rootFolder, project.name, selectedClip.localFile!), "localfile"));
+                  setPlayerError(String(msg));
+                }}
+                onCanPlay={() => setPlayerError(null)}
+                keyTarget="document"
+                className="absolute inset-0 !w-full !h-full [&_video]:!absolute [&_video]:!inset-0 [&_video]:!w-full [&_video]:!h-full [&_video]:!object-contain"
+              >
+                <MediaProvider />
+                <DefaultVideoLayout icons={defaultLayoutIcons} seekStep={5} slots={{ pipButton: null, fullscreenButton: null }} />
+              </MediaPlayer>
+              {playerError && (
+                <div className="absolute bottom-12 left-2 right-2 rounded bg-destructive/90 px-3 py-2 text-xs text-white">
+                  <p className="font-medium">Playback error</p>
+                  <p className="mt-0.5 opacity-80 break-all">{playerError}</p>
+                </div>
+              )}
+            </>
           ) : selectedClip ? (
             <div className="flex h-full flex-col items-center justify-center gap-3">
               <p className="text-sm text-white/40">
