@@ -40,6 +40,8 @@ pub struct ProjectClip {
     pub editing_notes: Option<String>,
     #[serde(rename = "creatorId", default)]
     pub creator_id: Option<String>,
+    #[serde(rename = "creatorStatus", default)]
+    pub creator_status: Option<String>,
     #[serde(rename = "clipMixLinks", default)]
     pub clip_mix_links: Option<Vec<String>>,
     #[serde(rename = "availableAskFirst", default)]

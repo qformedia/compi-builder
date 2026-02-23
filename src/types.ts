@@ -47,6 +47,7 @@ export interface ProjectClip {
   fetchedThumbnail?: string;
   editingNotes?: string;
   creatorId?: string;
+  creatorStatus?: string;
   clipMixLinks?: string[];
   availableAskFirst?: boolean;
 }

@@ -337,11 +337,26 @@ export function ArrangeTab({ settings, project, setProject, isActive }: Props) {
               <span className="truncate text-sm font-semibold">{selectedClip.creatorName}</span>
             </div>
 
-            {selectedClip.licenseType && selectedClip.licenseType.toLowerCase() !== "recurrent" && (
-              <span className="self-start rounded bg-amber-500/90 px-1.5 py-0.5 text-[10px] font-semibold text-white">
-                {selectedClip.licenseType}
-              </span>
-            )}
+            <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+              {selectedClip.creatorStatus && (
+                <span className={`rounded px-1.5 py-0.5 font-semibold ${
+                  selectedClip.creatorStatus === "Granted"
+                    ? "bg-green-100 text-green-700"
+                    : "bg-muted text-muted-foreground"
+                }`}>
+                  {selectedClip.creatorStatus}
+                </span>
+              )}
+              {selectedClip.licenseType && (
+                <span className={`rounded px-1.5 py-0.5 font-semibold ${
+                  selectedClip.licenseType.toLowerCase() === "recurrent"
+                    ? "bg-blue-100 text-blue-700"
+                    : "bg-amber-100 text-amber-700"
+                }`}>
+                  {selectedClip.licenseType}
+                </span>
+              )}
+            </div>
 
             {selectedClip.notes && (
               <p className="text-[11px] text-muted-foreground italic leading-snug">

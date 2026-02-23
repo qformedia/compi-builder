@@ -119,6 +119,7 @@ function App() {
           notes: c.notes,
           fetchedThumbnail: c.fetchedThumbnail,
           creatorId: c.creatorId,
+          creatorStatus: c.creatorStatus,
           clipMixLinks: c.clipMixLinks,
           availableAskFirst: c.availableAskFirst,
         }));
@@ -139,6 +140,7 @@ function App() {
             notes: hs.notes,
             fetchedThumbnail: hs.fetchedThumbnail,
             creatorId: hs.creatorId,
+            creatorStatus: hs.creatorStatus,
             clipMixLinks: hs.clipMixLinks,
             availableAskFirst: hs.availableAskFirst,
           };
@@ -187,6 +189,7 @@ function App() {
       notes: clip.notes,
       fetchedThumbnail: clip.fetchedThumbnail,
       creatorId: clip.creatorId,
+      creatorStatus: clip.creatorStatus,
       clipMixLinks: clip.clipMixLinks,
       availableAskFirst: clip.availableAskFirst,
     };
