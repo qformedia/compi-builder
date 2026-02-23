@@ -1998,34 +1998,94 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .register_uri_scheme_protocol("localfile", |_ctx, request| {
-            // Decode the path from the URL
+            use std::io::{Read, Seek, SeekFrom};
+
             let uri = request.uri().to_string();
-            // URL format: localfile://localhost/<encoded_path>
             let path = uri
                 .strip_prefix("localfile://localhost/")
                 .unwrap_or(&uri);
             let decoded = urlencoding::decode(path).unwrap_or_default();
+            let decoded_ref = decoded.as_ref();
 
-            let file_path = std::path::PathBuf::from(decoded.as_ref());
-            match fs::read(&file_path) {
-                Ok(data) => {
-                    let mime = if file_path.extension().and_then(|e| e.to_str()) == Some("mp4") {
-                        "video/mp4"
-                    } else {
-                        "application/octet-stream"
-                    };
-                    tauri::http::Response::builder()
-                        .status(200)
-                        .header("Content-Type", mime)
-                        .header("Accept-Ranges", "bytes")
-                        .body(data)
+            // On Windows, URL path may have a leading slash before the drive letter
+            let clean = if cfg!(target_os = "windows") && decoded_ref.starts_with('/') {
+                &decoded_ref[1..]
+            } else {
+                decoded_ref
+            };
+
+            let file_path = PathBuf::from(clean);
+
+            let mut file = match fs::File::open(&file_path) {
+                Ok(f) => f,
+                Err(_) => {
+                    return tauri::http::Response::builder()
+                        .status(404)
+                        .body(b"Not found".to_vec())
                         .unwrap()
                 }
-                Err(_) => tauri::http::Response::builder()
-                    .status(404)
-                    .body(b"Not found".to_vec())
-                    .unwrap(),
+            };
+
+            let file_size = file.metadata().map(|m| m.len()).unwrap_or(0);
+            if file_size == 0 {
+                return tauri::http::Response::builder()
+                    .status(200)
+                    .header("Content-Length", "0")
+                    .body(Vec::new())
+                    .unwrap();
             }
+
+            let mime = match file_path.extension().and_then(|e| e.to_str()) {
+                Some("mp4") => "video/mp4",
+                Some("webm") => "video/webm",
+                Some("mkv") => "video/x-matroska",
+                _ => "application/octet-stream",
+            };
+
+            // Parse Range header -- required for WebView2 video playback on Windows.
+            // WebView2 sends Range requests and won't play video without 206 responses.
+            let range_header = request
+                .headers()
+                .get("range")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.strip_prefix("bytes="));
+
+            let (start, end, is_range) = if let Some(spec) = range_header {
+                let parts: Vec<&str> = spec.splitn(2, '-').collect();
+                let s = parts[0].parse::<u64>().unwrap_or(0).min(file_size - 1);
+                let e = if parts.len() > 1 && !parts[1].is_empty() {
+                    parts[1].parse::<u64>().unwrap_or(file_size - 1).min(file_size - 1)
+                } else {
+                    file_size - 1
+                };
+                (s, e, true)
+            } else {
+                (0, file_size - 1, false)
+            };
+
+            let length = (end - start + 1) as usize;
+            let _ = file.seek(SeekFrom::Start(start));
+            let mut buf = vec![0u8; length];
+            let n = file.read(&mut buf).unwrap_or(0);
+            buf.truncate(n);
+
+            let mut response = tauri::http::Response::builder()
+                .header("Content-Type", mime)
+                .header("Accept-Ranges", "bytes")
+                .header("Content-Length", n.to_string());
+
+            if is_range {
+                response = response
+                    .status(206)
+                    .header(
+                        "Content-Range",
+                        format!("bytes {}-{}/{}", start, start + n as u64 - 1, file_size),
+                    );
+            } else {
+                response = response.status(200);
+            }
+
+            response.body(buf).unwrap()
         })
         .invoke_handler(tauri::generate_handler![
             fetch_tag_options,
