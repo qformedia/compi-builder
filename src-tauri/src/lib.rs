@@ -1378,11 +1378,86 @@ struct YtDlpOutput {
     stderr: Vec<u8>,
 }
 
+/// On Windows, Chromium browsers lock the Cookies SQLite file while running.
+/// yt-dlp's Python shutil.copy2 can't read it, but Rust's File::open uses
+/// FILE_SHARE_READ|WRITE|DELETE so we CAN read it. Pre-copy the Cookies DB
+/// to a temp directory and redirect yt-dlp to use that copy.
+#[cfg(target_os = "windows")]
+fn apply_windows_cookie_workaround(args: &mut Vec<String>) {
+    use std::io::Read;
+
+    let browser_idx = match args.iter().position(|a| a == "--cookies-from-browser") {
+        Some(i) if i + 1 < args.len() => i,
+        _ => return,
+    };
+
+    let browser_arg = args[browser_idx + 1].clone();
+    let parts: Vec<&str> = browser_arg.splitn(3, ':').collect();
+    let browser_name = parts[0].to_lowercase();
+
+    if parts.len() > 1 && PathBuf::from(parts[1]).is_absolute() {
+        return;
+    }
+
+    let subpath = match browser_name.as_str() {
+        "chrome" => r"Google\Chrome\User Data",
+        "edge" => r"Microsoft\Edge\User Data",
+        "brave" => r"BraveSoftware\Brave-Browser\User Data",
+        "chromium" => r"Chromium\User Data",
+        _ => return,
+    };
+
+    let local_app_data = match std::env::var("LOCALAPPDATA") {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    let user_data = PathBuf::from(&local_app_data).join(subpath);
+    let profile = if parts.len() > 1 && !parts[1].is_empty() {
+        parts[1]
+    } else {
+        "Default"
+    };
+
+    let cookies_src = user_data.join(profile).join("Cookies");
+    if !cookies_src.exists() {
+        return;
+    }
+
+    let data = match (|| -> std::io::Result<Vec<u8>> {
+        let mut f = fs::File::open(&cookies_src)?;
+        let mut buf = Vec::new();
+        f.read_to_end(&mut buf)?;
+        Ok(buf)
+    })() {
+        Ok(d) => d,
+        Err(_) => return,
+    };
+
+    let temp_profile = std::env::temp_dir()
+        .join("compiflow_cookies")
+        .join(profile);
+    if fs::create_dir_all(&temp_profile).is_err() {
+        return;
+    }
+    if fs::write(temp_profile.join("Cookies"), &data).is_err() {
+        return;
+    }
+
+    args[browser_idx + 1] = format!("{}:{}", browser_name, temp_profile.display());
+}
+
 /// Run yt-dlp with args, trying bundled sidecar first then system PATH as fallback
 async fn run_ytdlp(app: &AppHandle, args: &[String]) -> Result<YtDlpOutput, String> {
+    #[allow(unused_mut)]
+    let mut args = args.to_vec();
+
+    #[cfg(target_os = "windows")]
+    apply_windows_cookie_workaround(&mut args);
+
     // Try bundled sidecar first
     if let Ok(cmd) = app.shell().sidecar("binaries/yt-dlp") {
-        if let Ok(out) = cmd.args(args).output().await {
+        if let Ok(out) = cmd.args(&args).output().await {
             return Ok(YtDlpOutput {
                 success: out.status.success(),
                 stdout: out.stdout,
@@ -1393,7 +1468,7 @@ async fn run_ytdlp(app: &AppHandle, args: &[String]) -> Result<YtDlpOutput, Stri
 
     // Fallback: system-installed yt-dlp (works in dev mode)
     let mut cmd = tokio::process::Command::new("yt-dlp");
-    cmd.args(args);
+    cmd.args(&args);
     #[cfg(target_os = "windows")]
     {
         use std::os::windows::process::CommandExt;
