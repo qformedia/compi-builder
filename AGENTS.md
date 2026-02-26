@@ -50,7 +50,7 @@ These are needed for Tauri on Linux and must be installed once:
 
 ### External dependencies
 
-- **HubSpot Private App token** is required at runtime (entered in the Settings dialog). Without it, the app launches but cannot load clips/projects.
+- **HubSpot Private App token** is required at runtime (entered in the Settings dialog). Without it, the app launches but cannot load clips/projects. The token is available as `HUBSPOT_PRIVATE_APP_TOKEN` env var when the secret is configured.
 - **yt-dlp** and **ffmpeg** are used for video downloading/processing.
 
 ### Rust version
