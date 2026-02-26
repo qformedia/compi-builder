@@ -7,8 +7,6 @@ on:
 
 jobs:
   build:
-    permissions:
-      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -16,12 +14,15 @@ jobs:
           - platform: macos-latest
             args: "--target aarch64-apple-darwin"
             rust_target: aarch64-apple-darwin
+            suffix: aarch64
           - platform: macos-latest
             args: "--target x86_64-apple-darwin"
             rust_target: x86_64-apple-darwin
+            suffix: x64
           - platform: windows-2022
             args: ""
             rust_target: x86_64-pc-windows-msvc
+            suffix: x64
 
     runs-on: ${{ matrix.platform }}
 
@@ -45,7 +46,7 @@ jobs:
         with:
           workspaces: "./src-tauri -> target"
 
-      - name: Install dependencies (npm)
+      - name: Install dependencies
         run: npm ci
 
       - name: Download yt-dlp sidecar (macOS)
@@ -69,78 +70,103 @@ jobs:
       - name: Build Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
-          GITHUB_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         with:
-          owner: qformedia
-          repo: compi-builder-releases
-          tagName: ${{ github.ref_name }}
-          releaseCommitish: main
-          releaseName: "CompiFlow ${{ github.ref_name }}"
-          releaseBody: "See the assets below to download and install this version."
-          releaseDraft: false
-          prerelease: false
           args: ${{ matrix.args }}
 
-      - name: Upload .sig files to release (macOS)
+      - name: Collect artifacts (macOS)
         if: runner.os == 'macOS'
-        env:
-          GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
-          SIG=$(find src-tauri/target -name "*.app.tar.gz.sig" -type f | head -1)
-          if [ -n "$SIG" ]; then
-            ARCH=$(echo "${{ matrix.rust_target }}" | grep -o "aarch64\|x86_64")
-            [ "$ARCH" = "aarch64" ] && NAME="CompiFlow_aarch64.app.tar.gz.sig"
-            [ "$ARCH" = "x86_64" ] && NAME="CompiFlow_x64.app.tar.gz.sig"
-            TAG="${{ github.ref_name }}"
-            RELEASE_ID=$(gh api repos/qformedia/compi-builder-releases/releases/tags/$TAG --jq '.id' 2>/dev/null || echo "")
-            if [ -n "$RELEASE_ID" ]; then
-              gh api repos/qformedia/compi-builder-releases/releases/$RELEASE_ID/assets \
-                --method POST \
-                -H "Content-Type: application/octet-stream" \
-                --input "$SIG" \
-                -f "name=$NAME" || true
-            fi
-          fi
+          mkdir -p artifacts
+          SUFFIX="${{ matrix.suffix }}"
 
-      - name: Upload .sig files to release (Windows)
+          BUNDLE=$(find src-tauri/target -name "*.app.tar.gz" -not -name "*.sig" -type f | head -1)
+          SIG=$(find src-tauri/target -name "*.app.tar.gz.sig" -type f | head -1)
+          DMG=$(find src-tauri/target -name "*.dmg" -type f | head -1)
+
+          [ -z "$BUNDLE" ] && { echo "ERROR: .app.tar.gz not found"; exit 1; }
+          [ -z "$SIG" ]    && { echo "ERROR: .app.tar.gz.sig not found"; exit 1; }
+          [ -z "$DMG" ]    && { echo "ERROR: .dmg not found"; exit 1; }
+
+          cp "$BUNDLE" "artifacts/CompiFlow_${SUFFIX}.app.tar.gz"
+          cp "$SIG"    "artifacts/CompiFlow_${SUFFIX}.app.tar.gz.sig"
+          cp "$DMG"    "artifacts/CompiFlow_${SUFFIX}.dmg"
+
+          echo "Collected:"
+          ls -la artifacts/
+
+      - name: Collect artifacts (Windows)
         if: runner.os == 'Windows'
         shell: bash
+        run: |
+          mkdir -p artifacts
+
+          SETUP_EXE=$(find src-tauri/target -name "*-setup.exe" -type f | head -1)
+          NSIS_ZIP=$(find src-tauri/target -name "*.nsis.zip" -not -name "*.sig" -type f | head -1)
+          NSIS_SIG=$(find src-tauri/target -name "*.nsis.zip.sig" -type f | head -1)
+
+          [ -z "$SETUP_EXE" ] && { echo "ERROR: setup.exe not found"; exit 1; }
+          [ -z "$NSIS_ZIP" ]  && { echo "ERROR: .nsis.zip not found"; exit 1; }
+          [ -z "$NSIS_SIG" ]  && { echo "ERROR: .nsis.zip.sig not found"; exit 1; }
+
+          cp "$SETUP_EXE" "artifacts/CompiFlow_x64-setup.exe"
+          cp "$NSIS_ZIP"   "artifacts/CompiFlow_x64-setup.nsis.zip"
+          cp "$NSIS_SIG"   "artifacts/CompiFlow_x64-setup.nsis.zip.sig"
+
+          echo "Collected:"
+          ls -la artifacts/
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.rust_target }}
+          path: artifacts/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: build-*
+          path: assets
+          merge-multiple: true
+
+      - name: Verify all required files
+        run: |
+          echo "=== All collected assets ==="
+          ls -la assets/
+
+          for f in \
+            CompiFlow_aarch64.app.tar.gz \
+            CompiFlow_aarch64.app.tar.gz.sig \
+            CompiFlow_x64.app.tar.gz \
+            CompiFlow_x64.app.tar.gz.sig \
+            CompiFlow_x64-setup.nsis.zip \
+            CompiFlow_x64-setup.nsis.zip.sig \
+          ; do
+            [ -f "assets/$f" ] || { echo "MISSING: $f"; exit 1; }
+          done
+
+          echo "All critical updater files present."
+
+      - name: Create release on public repo
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           TAG="${{ github.ref_name }}"
-          VERSION="${TAG#v}"
-          RELEASE_ID=$(gh api repos/qformedia/compi-builder-releases/releases/tags/$TAG --jq '.id' 2>/dev/null || echo "")
-          if [ -n "$RELEASE_ID" ]; then
-            # Upload nsis.zip.sig
-            SIG=$(find src-tauri/target -name "*.nsis.zip.sig" -type f | head -1)
-            if [ -n "$SIG" ]; then
-              gh api repos/qformedia/compi-builder-releases/releases/$RELEASE_ID/assets \
-                --method POST \
-                -H "Content-Type: application/octet-stream" \
-                --input "$SIG" \
-                -f "name=CompiFlow_${VERSION}_x64-setup.nsis.zip.sig" || true
-            fi
-            # Upload the nsis.zip bundle itself (needed for updater)
-            NSIS_ZIP=$(find src-tauri/target -name "*.nsis.zip" -not -name "*.sig" -type f | head -1)
-            if [ -n "$NSIS_ZIP" ]; then
-              gh api repos/qformedia/compi-builder-releases/releases/$RELEASE_ID/assets \
-                --method POST \
-                -H "Content-Type: application/octet-stream" \
-                --input "$NSIS_ZIP" \
-                -f "name=CompiFlow_${VERSION}_x64-setup.nsis.zip" || true
-            fi
-          fi
 
-  publish-updater:
-    needs: build
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
+          gh release delete "$TAG" \
+            --repo qformedia/compi-builder-releases --yes 2>/dev/null || true
+
+          gh release create "$TAG" assets/* \
+            --repo qformedia/compi-builder-releases \
+            --title "CompiFlow ${TAG}" \
+            --notes "See the assets below to download and install this version."
 
       - name: Generate and upload latest.json
         env:
@@ -148,63 +174,36 @@ jobs:
         run: |
           TAG="${{ github.ref_name }}"
           VERSION="${TAG#v}"
-          BASE_URL="https://github.com/qformedia/compi-builder-releases/releases/download/${TAG}"
-
-          RELEASE_ID=$(gh api repos/qformedia/compi-builder-releases/releases/tags/$TAG --jq '.id')
-
-          # Wait for all sig assets to be available (other jobs may still be uploading)
-          for i in $(seq 1 30); do
-            ASSETS=$(gh api repos/qformedia/compi-builder-releases/releases/$RELEASE_ID --jq '[.assets[].name] | join(" ")')
-            echo "Attempt $i — assets: $ASSETS"
-            if echo "$ASSETS" | grep -q "aarch64.app.tar.gz.sig" && \
-               echo "$ASSETS" | grep -q "x64.app.tar.gz.sig" && \
-               echo "$ASSETS" | grep -q "nsis.zip.sig"; then
-              echo "All sig files found."
-              break
-            fi
-            sleep 10
-          done
-
-          # Read signature contents
-          SIG_AARCH64=$(gh api repos/qformedia/compi-builder-releases/releases/$RELEASE_ID/assets --jq '.[] | select(.name | contains("aarch64.app.tar.gz.sig")) | .url' | xargs -I{} curl -sL -H "Accept: application/octet-stream" -H "Authorization: token $GH_TOKEN" "{}")
-          SIG_X64=$(gh api repos/qformedia/compi-builder-releases/releases/$RELEASE_ID/assets --jq '.[] | select(.name | contains("x64.app.tar.gz.sig")) | .url' | xargs -I{} curl -sL -H "Accept: application/octet-stream" -H "Authorization: token $GH_TOKEN" "{}")
-          SIG_NSIS=$(gh api repos/qformedia/compi-builder-releases/releases/$RELEASE_ID/assets --jq '.[] | select(.name | contains("nsis.zip.sig")) | .url' | xargs -I{} curl -sL -H "Accept: application/octet-stream" -H "Authorization: token $GH_TOKEN" "{}")
-
+          BASE="https://github.com/qformedia/compi-builder-releases/releases/download/${TAG}"
           PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-          cat > /tmp/latest.json << ENDJSON
-          {
-            "version": "${VERSION}",
-            "notes": "CompiFlow ${TAG}",
-            "pub_date": "${PUB_DATE}",
-            "platforms": {
-              "darwin-aarch64": {
-                "signature": "${SIG_AARCH64}",
-                "url": "${BASE_URL}/CompiFlow_aarch64.app.tar.gz"
-              },
-              "darwin-x86_64": {
-                "signature": "${SIG_X64}",
-                "url": "${BASE_URL}/CompiFlow_x64.app.tar.gz"
-              },
-              "windows-x86_64": {
-                "signature": "${SIG_NSIS}",
-                "url": "${BASE_URL}/CompiFlow_${VERSION}_x64-setup.nsis.zip"
+          SIG_AARCH64=$(cat assets/CompiFlow_aarch64.app.tar.gz.sig)
+          SIG_X64=$(cat assets/CompiFlow_x64.app.tar.gz.sig)
+          SIG_NSIS=$(cat assets/CompiFlow_x64-setup.nsis.zip.sig)
+
+          jq -n \
+            --arg version "$VERSION" \
+            --arg notes "CompiFlow ${TAG}" \
+            --arg pub_date "$PUB_DATE" \
+            --arg sig_aarch64 "$SIG_AARCH64" \
+            --arg url_aarch64 "${BASE}/CompiFlow_aarch64.app.tar.gz" \
+            --arg sig_x64 "$SIG_X64" \
+            --arg url_x64 "${BASE}/CompiFlow_x64.app.tar.gz" \
+            --arg sig_nsis "$SIG_NSIS" \
+            --arg url_nsis "${BASE}/CompiFlow_x64-setup.nsis.zip" \
+            '{
+              version: $version,
+              notes: $notes,
+              pub_date: $pub_date,
+              platforms: {
+                "darwin-aarch64": { signature: $sig_aarch64, url: $url_aarch64 },
+                "darwin-x86_64": { signature: $sig_x64, url: $url_x64 },
+                "windows-x86_64": { signature: $sig_nsis, url: $url_nsis }
               }
-            }
-          }
-          ENDJSON
+            }' > latest.json
 
           echo "Generated latest.json:"
-          cat /tmp/latest.json
+          cat latest.json
 
-          # Upload latest.json (delete old one first if exists)
-          OLD_ASSET_ID=$(gh api repos/qformedia/compi-builder-releases/releases/$RELEASE_ID/assets --jq '.[] | select(.name == "latest.json") | .id' 2>/dev/null || echo "")
-          if [ -n "$OLD_ASSET_ID" ]; then
-            gh api -X DELETE repos/qformedia/compi-builder-releases/releases/assets/$OLD_ASSET_ID || true
-          fi
-
-          gh api repos/qformedia/compi-builder-releases/releases/$RELEASE_ID/assets \
-            --method POST \
-            -H "Content-Type: application/json" \
-            --input /tmp/latest.json \
-            -f "name=latest.json"
+          gh release upload "$TAG" latest.json \
+            --repo qformedia/compi-builder-releases --clobber
