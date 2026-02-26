@@ -45,6 +45,7 @@ jobs:
         uses: swatinem/rust-cache@v2
         with:
           workspaces: "./src-tauri -> target"
+          cache-on-failure: true
 
       - name: Install dependencies
         run: npm ci
@@ -80,6 +81,7 @@ jobs:
         if: runner.os == 'macOS'
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: |
           TARGET="${{ matrix.rust_target }}"
           BUNDLE="src-tauri/target/${TARGET}/release/bundle/macos/CompiFlow.app.tar.gz"
@@ -92,10 +94,7 @@ jobs:
 
           [ -f "$BUNDLE" ] || { echo "ERROR: bundle not found: $BUNDLE"; exit 1; }
 
-          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > /tmp/signing.key
-          chmod 600 /tmp/signing.key
-          npx tauri signer sign -f /tmp/signing.key -p "" "$BUNDLE"
-          rm -f /tmp/signing.key
+          npx tauri signer sign "$BUNDLE"
 
           ls -la "${BUNDLE}.sig"
 
@@ -104,6 +103,7 @@ jobs:
         shell: bash
         env:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ""
         run: |
           NSIS_ZIP=$(find src-tauri/target/release/bundle -name "*.nsis.zip" -not -name "*.sig" -type f | head -1)
 
@@ -116,10 +116,7 @@ jobs:
           [ -z "$NSIS_ZIP" ] && { echo "ERROR: .nsis.zip not found"; exit 1; }
           echo "Signing: $NSIS_ZIP"
 
-          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > /tmp/signing.key
-          chmod 600 /tmp/signing.key
-          npx tauri signer sign -f /tmp/signing.key -p "" "$NSIS_ZIP"
-          rm -f /tmp/signing.key
+          npx tauri signer sign "$NSIS_ZIP"
 
           ls -la "${NSIS_ZIP}.sig"
 

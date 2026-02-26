@@ -41,8 +41,12 @@ else
   sed -i '' "s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" "$TAURI_CONF"
 fi
 
+# Update Cargo.toml
+CARGO_TOML="$ROOT/src-tauri/Cargo.toml"
+sed -i '' "s/^version = \"[^\"]*\"/version = \"$VERSION\"/" "$CARGO_TOML"
+
 echo "==> Committing and tagging v$VERSION"
-git add package.json package-lock.json src-tauri/tauri.conf.json
+git add package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml
 git commit -m "release v$VERSION"
 git tag "v$VERSION"
 
