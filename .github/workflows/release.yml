@@ -77,6 +77,6 @@ jobs:
           releaseCommitish: main
           releaseName: "CompiFlow ${{ github.ref_name }}"
           releaseBody: "See the assets below to download and install this version."
-          releaseDraft: true
+          releaseDraft: false
           prerelease: false
           args: ${{ matrix.args }}
