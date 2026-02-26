@@ -677,25 +677,32 @@ export function ClipCard({
           </button>
         )}
 
+        {/* Open in HubSpot */}
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            openUrl(`https://app-eu1.hubspot.com/contacts/146859718/record/2-192287471/${clip.id}`);
+          }}
+          className="flex items-center justify-center px-2 py-1.5 border-l cursor-pointer transition-colors hover:bg-muted"
+          title="Open in HubSpot"
+        >
+          <HubSpotIcon className="h-3.5 w-3.5" />
+        </button>
+
         {/* Open in browser */}
         <button
           onClick={(e) => {
             e.stopPropagation();
-            // Instagram: open as /p/ instead of /reel/ or /reels/ for better compatibility
             let url = clip.link;
             if (url.includes("instagram.com")) {
               url = url.replace(/\/reels?\//i, "/p/");
             }
             openUrl(url);
           }}
-          className={`flex flex-1 items-center justify-center gap-1 py-1.5 text-xs font-medium cursor-pointer transition-colors hover:bg-muted${
-            (hasProject && onToggleProject) || onRemove || (ds === "failed" && onRetryDownload)
-              ? " border-l"
-              : ""
-          }`}
+          className="flex items-center justify-center px-2 py-1.5 border-l cursor-pointer transition-colors hover:bg-muted"
           title="Open in browser"
         >
-          <ExternalLink className="h-3.5 w-3.5" /> Open
+          <ExternalLink className="h-3.5 w-3.5" />
         </button>
       </div>}
     </div>

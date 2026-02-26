@@ -16,12 +16,21 @@ import {
   arrayMove,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { GripHorizontal, CheckCircle, StickyNote, Download, FolderOpen, Loader2 } from "lucide-react";
+import { GripHorizontal, CheckCircle, StickyNote, Download, FolderOpen, Loader2, Trash2 } from "lucide-react";
 import { MediaPlayer, MediaProvider, type MediaPlayerInstance } from "@vidstack/react";
 import { defaultLayoutIcons, DefaultVideoLayout } from "@vidstack/react/player/layouts/default";
 import "@vidstack/react/player/styles/default/theme.css";
 import "@vidstack/react/player/styles/default/layouts/video.css";
 import { ClipCard, SCORE_COLORS } from "@/components/ClipCard";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Button } from "@/components/ui/button";
 import { resolveClipPath } from "@/types";
 import type { AppSettings, Project, ProjectClip } from "@/types";
 import type { ClipCardData } from "@/components/ClipCard";
@@ -31,6 +40,7 @@ interface Props {
   project: Project | null;
   setProject: (p: Project | null) => void;
   isActive: boolean;
+  removeClip?: (hubspotId: string) => void;
 }
 
 function toCardData(clip: ProjectClip): ClipCardData {
@@ -50,11 +60,15 @@ function toCardData(clip: ProjectClip): ClipCardData {
   };
 }
 
-export function ArrangeTab({ settings, project, setProject, isActive }: Props) {
+export function ArrangeTab({ settings, project, setProject, isActive, removeClip }: Props) {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [playerError, setPlayerError] = useState<string | null>(null);
   const playerRef = useRef<MediaPlayerInstance>(null);
   const thumbCache = useRef(new Map<string, string | null>());
+
+  // Remove clip confirmation
+  const [removeTarget, setRemoveTarget] = useState<string | null>(null);
+  const skipConfirmRef = useRef(false);
 
   // Retry failed thumbnails when window regains focus (cookies may have refreshed)
   const [thumbRetryKey, setThumbRetryKey] = useState(0);
@@ -465,6 +479,28 @@ export function ArrangeTab({ settings, project, setProject, isActive }: Props) {
                 </span>
               )}
             </div>
+
+            {/* Remove clip */}
+            {removeClip && (
+              <>
+                <div className="border-t" />
+                <button
+                  onClick={() => {
+                    if (skipConfirmRef.current) {
+                      removeClip(selectedClip.hubspotId);
+                      const next = allClips.find((c) => c.hubspotId !== selectedClip.hubspotId);
+                      setSelectedClipId(next?.hubspotId ?? null);
+                    } else {
+                      setRemoveTarget(selectedClip.hubspotId);
+                    }
+                  }}
+                  className="flex items-center gap-1.5 self-start rounded-md px-2 py-1.5 text-xs text-destructive hover:bg-destructive/10 cursor-pointer transition-colors"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                  Remove from project
+                </button>
+              </>
+            )}
           </div>
         )}
       </div>
@@ -499,6 +535,45 @@ export function ArrangeTab({ settings, project, setProject, isActive }: Props) {
           </SortableContext>
         </DndContext>
       </div>
+
+      {/* Remove clip confirmation dialog */}
+      <Dialog open={removeTarget !== null} onOpenChange={(open) => { if (!open) setRemoveTarget(null); }}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Remove clip?</DialogTitle>
+            <DialogDescription>
+              This will remove the clip from the project and disassociate it from the HubSpot Video Project.
+            </DialogDescription>
+          </DialogHeader>
+          <label className="flex items-center gap-2 text-sm cursor-pointer">
+            <input
+              type="checkbox"
+              className="rounded"
+              onChange={(e) => { skipConfirmRef.current = e.target.checked; }}
+            />
+            Don't ask me again this session
+          </label>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setRemoveTarget(null)} className="cursor-pointer">
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              className="cursor-pointer"
+              onClick={() => {
+                if (removeTarget && removeClip) {
+                  removeClip(removeTarget);
+                  const next = allClips.find((c) => c.hubspotId !== removeTarget);
+                  setSelectedClipId(next?.hubspotId ?? null);
+                }
+                setRemoveTarget(null);
+              }}
+            >
+              Remove
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

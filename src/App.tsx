@@ -623,6 +623,7 @@ function App() {
                 project={project}
                 setProject={setProject}
                 isActive={activeTab === "arrange"}
+                removeClip={removeClipFromProject}
               />
             </TabErrorBoundary>
           </div>

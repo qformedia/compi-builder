@@ -160,6 +160,12 @@ fn build_filter_groups(tags: &[String], scores: &[String], never_used: bool, tag
         "value": "Granted"
     }));
 
+    shared.push(serde_json::json!({
+        "propertyName": "link_not_working_anymore",
+        "operator": "NEQ",
+        "value": "true"
+    }));
+
     if tags.is_empty() {
         return vec![serde_json::json!({ "filters": shared })];
     }
@@ -1227,10 +1233,14 @@ async fn fetch_thumbnail(app: AppHandle, url: String, cookies_browser: Option<St
     // 3. Try without any cookies (works for many platforms)
     match ytdlp_thumbnail_with(&app, &url, &None, &None).await {
         Ok(Some(thumb)) => return Ok(Some(thumb)),
-        _ => {}
+        // No-cookies fallback ran but found nothing: the video itself is
+        // unavailable/removed, not a cookie problem. Don't blame cookies.
+        Ok(None) => return Ok(None),
+        Err(_) => {}
     }
 
-    // If we had a cookie error and all fallbacks failed, report it
+    // Only surface the cookie error if the no-cookies fallback also errored
+    // (meaning yt-dlp couldn't even run), not when the video simply doesn't exist.
     if let Some(err) = cookie_error {
         return Err(err);
     }
