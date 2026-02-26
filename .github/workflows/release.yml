@@ -32,6 +32,8 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: lts/*
+          cache: npm
+          cache-dependency-path: package-lock.json
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
