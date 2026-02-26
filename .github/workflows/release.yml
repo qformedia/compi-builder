@@ -76,6 +76,53 @@ jobs:
         with:
           args: ${{ matrix.args }}
 
+      - name: Sign updater bundle (macOS)
+        if: runner.os == 'macOS'
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          TARGET="${{ matrix.rust_target }}"
+          BUNDLE="src-tauri/target/${TARGET}/release/bundle/macos/CompiFlow.app.tar.gz"
+
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "ERROR: TAURI_SIGNING_PRIVATE_KEY secret is not set or empty"
+            exit 1
+          fi
+          echo "Signing key present (${#TAURI_SIGNING_PRIVATE_KEY} chars)"
+
+          [ -f "$BUNDLE" ] || { echo "ERROR: bundle not found: $BUNDLE"; exit 1; }
+
+          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > /tmp/signing.key
+          chmod 600 /tmp/signing.key
+          npx tauri signer sign -f /tmp/signing.key -p "" "$BUNDLE"
+          rm -f /tmp/signing.key
+
+          ls -la "${BUNDLE}.sig"
+
+      - name: Sign updater bundle (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          NSIS_ZIP=$(find src-tauri/target/x86_64-pc-windows-msvc/release/bundle -name "*.nsis.zip" -not -name "*.sig" -type f | head -1)
+
+          if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
+            echo "ERROR: TAURI_SIGNING_PRIVATE_KEY secret is not set or empty"
+            exit 1
+          fi
+          echo "Signing key present (${#TAURI_SIGNING_PRIVATE_KEY} chars)"
+
+          [ -z "$NSIS_ZIP" ] && { echo "ERROR: .nsis.zip not found"; exit 1; }
+          echo "Signing: $NSIS_ZIP"
+
+          printf '%s' "$TAURI_SIGNING_PRIVATE_KEY" > /tmp/signing.key
+          chmod 600 /tmp/signing.key
+          npx tauri signer sign -f /tmp/signing.key -p "" "$NSIS_ZIP"
+          rm -f /tmp/signing.key
+
+          ls -la "${NSIS_ZIP}.sig"
+
       - name: Collect artifacts (macOS)
         if: runner.os == 'macOS'
         run: |
