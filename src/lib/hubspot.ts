@@ -20,6 +20,7 @@ export async function searchClipsByTags(
   scores: string[] = [],
   neverUsed = false,
   tagMode = "AND",
+  creatorMainLink?: string,
   after?: string,
 ): Promise<{ clips: Clip[]; total: number; nextAfter?: string }> {
   const data = await invoke<HubSpotSearchResponse>("search_clips", {
@@ -28,6 +29,7 @@ export async function searchClipsByTags(
     scores,
     neverUsed,
     tagMode,
+    creatorMainLink: creatorMainLink ?? null,
     after: after ?? null,
   });
 
@@ -47,6 +49,7 @@ export async function searchCreatorClips(
   scores: string[],
   neverUsed: boolean,
   tagMode: string,
+  creatorMainLink: string | undefined,
   creatorName: string,
 ): Promise<Clip[]> {
   const data = await invoke<HubSpotSearchResponse>("search_creator_clips", {
@@ -55,10 +58,34 @@ export async function searchCreatorClips(
     scores,
     neverUsed,
     tagMode,
+    creatorMainLink: creatorMainLink ?? null,
     creatorName,
   });
 
   return data.results.map(parseClip);
+}
+
+/** A creator record returned from the Creators object */
+export interface CreatorOption {
+  id: string;
+  name: string;
+  mainLink: string;
+}
+
+/** Search Creators by name or main link */
+export async function searchCreators(
+  token: string,
+  query: string,
+): Promise<CreatorOption[]> {
+  const data = await invoke<{
+    results: Array<{ id: string; properties: Record<string, string | null> }>;
+  }>("search_creators", { token, query });
+
+  return data.results.map((r) => ({
+    id: r.id,
+    name: r.properties.name ?? "",
+    mainLink: r.properties.main_link ?? "",
+  }));
 }
 
 /** Search Video Projects by name */

@@ -3,8 +3,10 @@ import { Button } from "@/components/ui/button";
 import { Loader2, X, Cookie, ExternalLink } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { TagPicker } from "@/components/TagPicker";
+import { CreatorPicker } from "@/components/CreatorPicker";
 import { ClipCard, SCORE_COLORS } from "@/components/ClipCard";
 import { searchClipsByTags, searchCreatorClips } from "@/lib/hubspot";
+import type { CreatorOption } from "@/lib/hubspot";
 import { fetchTagOptions } from "@/lib/tags";
 import type { TagOption } from "@/lib/tags";
 import type { AppSettings, Clip, Project } from "@/types";
@@ -22,6 +24,7 @@ export function SearchTab({ settings, project, addClip, removeClip }: Props) {
   const [tagOptions, setTagOptions] = useState<TagOption[]>([]);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [tagMode, setTagMode] = useState<"AND" | "OR">("AND");
+  const [selectedCreator, setSelectedCreator] = useState<CreatorOption | null>(null);
 
   // Retry failed thumbnails when window regains focus (cookies may have refreshed)
   const [thumbRetryKey, setThumbRetryKey] = useState(0);
@@ -107,6 +110,7 @@ export function SearchTab({ settings, project, addClip, removeClip }: Props) {
         selectedScores,
         neverUsed,
         tagMode,
+        selectedCreator?.mainLink,
         loadMore ? nextAfter : undefined,
       );
 
@@ -156,6 +160,7 @@ export function SearchTab({ settings, project, addClip, removeClip }: Props) {
           selectedScores,
           neverUsed,
           tagMode,
+          selectedCreator?.mainLink,
           creatorName,
         );
         setCreatorClipsMap((prev) => new Map(prev).set(creatorName, clips));
@@ -164,7 +169,7 @@ export function SearchTab({ settings, project, addClip, removeClip }: Props) {
         setCreatorLoadState((prev) => new Map(prev).set(creatorName, "pending"));
       }
     },
-    [settings.hubspotToken, selectedTags, selectedScores, neverUsed, tagMode],
+    [settings.hubspotToken, selectedTags, selectedScores, neverUsed, tagMode, selectedCreator],
   );
 
   // Auto-search when filters change
@@ -174,7 +179,7 @@ export function SearchTab({ settings, project, addClip, removeClip }: Props) {
     if (selectedTags.length > 0) {
       searchRef.current(false);
     }
-  }, [selectedTags, selectedScores, neverUsed, tagMode]);
+  }, [selectedTags, selectedScores, neverUsed, tagMode, selectedCreator]);
 
   const isInProject = (clipId: string) =>
     project?.clips.some((c) => c.hubspotId === clipId) ?? false;
@@ -257,6 +262,14 @@ export function SearchTab({ settings, project, addClip, removeClip }: Props) {
           >
             Never used
           </button>
+
+          <span className="mx-2 text-muted-foreground/30">|</span>
+
+          <CreatorPicker
+            token={settings.hubspotToken}
+            value={selectedCreator}
+            onChange={setSelectedCreator}
+          />
         </div>
       </div>
 

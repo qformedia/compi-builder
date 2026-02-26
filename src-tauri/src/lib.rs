@@ -134,7 +134,14 @@ async fn fetch_tag_options(
 
 /// Build HubSpot filterGroups for External Clips search.
 /// `tag_mode` = "AND" → one group with all tag filters; "OR" → one group per tag.
-fn build_filter_groups(tags: &[String], scores: &[String], never_used: bool, tag_mode: &str) -> Vec<serde_json::Value> {
+/// When `creator_main_link` is provided, every group is narrowed to that creator.
+fn build_filter_groups(
+    tags: &[String],
+    scores: &[String],
+    never_used: bool,
+    tag_mode: &str,
+    creator_main_link: Option<&str>,
+) -> Vec<serde_json::Value> {
     // Shared filters (always applied)
     let mut shared: Vec<serde_json::Value> = Vec::new();
 
@@ -165,6 +172,14 @@ fn build_filter_groups(tags: &[String], scores: &[String], never_used: bool, tag
         "operator": "NEQ",
         "value": "true"
     }));
+
+    if let Some(link) = creator_main_link {
+        shared.push(serde_json::json!({
+            "propertyName": "creator_main_link",
+            "operator": "EQ",
+            "value": link
+        }));
+    }
 
     if tags.is_empty() {
         return vec![serde_json::json!({ "filters": shared })];
@@ -204,10 +219,11 @@ async fn search_clips(
     scores: Vec<String>,
     never_used: bool,
     tag_mode: String,
+    creator_main_link: Option<String>,
     after: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
-    let filter_groups = build_filter_groups(&tags, &scores, never_used, &tag_mode);
+    let filter_groups = build_filter_groups(&tags, &scores, never_used, &tag_mode, creator_main_link.as_deref());
 
     let props: Vec<serde_json::Value> = CLIP_PROPERTIES.iter().map(|p| serde_json::json!(p)).collect();
 
@@ -255,13 +271,14 @@ async fn search_creator_clips(
     scores: Vec<String>,
     never_used: bool,
     tag_mode: String,
+    creator_main_link: Option<String>,
     creator_name: String,
 ) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())?;
-    let mut filter_groups = build_filter_groups(&tags, &scores, never_used, &tag_mode);
+    let mut filter_groups = build_filter_groups(&tags, &scores, never_used, &tag_mode, creator_main_link.as_deref());
 
     // Add creator_name filter to every group
     let creator_filter = serde_json::json!({
@@ -335,6 +352,48 @@ async fn search_creator_clips(
         "total": all_results.len(),
         "results": all_results
     }))
+}
+
+/// Search Creator records by name or main_link (OR across both fields).
+#[tauri::command]
+async fn search_creators(
+    token: String,
+    query: String,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let url = format!(
+        "https://api.hubapi.com/crm/v3/objects/{}/search",
+        CREATORS_OBJECT_ID
+    );
+
+    let body = serde_json::json!({
+        "filterGroups": [
+            { "filters": [{ "propertyName": "name", "operator": "CONTAINS_TOKEN", "value": query }] },
+            { "filters": [{ "propertyName": "main_link", "operator": "CONTAINS_TOKEN", "value": query }] }
+        ],
+        "properties": ["name", "main_link"],
+        "sorts": [{ "propertyName": "name", "direction": "ASCENDING" }],
+        "limit": 20
+    });
+
+    let res = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("HubSpot API error ({}): {}", status, text));
+    }
+
+    res.json::<serde_json::Value>()
+        .await
+        .map_err(|e| format!("Failed to parse response: {e}"))
 }
 
 /// Fetch Video Projects associated with an External Clip, returning name + category
@@ -2109,6 +2168,7 @@ pub fn run() {
             fetch_tag_options,
             search_clips,
             search_creator_clips,
+            search_creators,
             fetch_clip_video_projects,
             search_video_projects,
             fetch_video_project_clips,
