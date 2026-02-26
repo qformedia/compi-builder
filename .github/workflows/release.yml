@@ -81,10 +81,16 @@ jobs:
         run: |
           mkdir -p artifacts
           SUFFIX="${{ matrix.suffix }}"
+          TARGET="${{ matrix.rust_target }}"
 
-          BUNDLE=$(find src-tauri/target -name "*.app.tar.gz" -not -name "*.sig" -type f | head -1)
-          SIG=$(find src-tauri/target -name "*.app.tar.gz.sig" -type f | head -1)
-          DMG=$(find src-tauri/target -name "*.dmg" -type f | head -1)
+          echo "=== Searching for bundle outputs under src-tauri/target/${TARGET}/release/bundle ==="
+          find "src-tauri/target/${TARGET}/release/bundle" -type f 2>/dev/null | sort || echo "(nothing found)"
+
+          BUNDLE=$(find "src-tauri/target/${TARGET}/release/bundle" -name "*.app.tar.gz" -not -name "*.sig" -type f | head -1)
+          SIG=$(find "src-tauri/target/${TARGET}/release/bundle" -name "*.app.tar.gz.sig" -type f | head -1)
+          DMG=$(find "src-tauri/target/${TARGET}/release/bundle" -name "*.dmg" -type f | head -1)
+
+          echo "BUNDLE=$BUNDLE  SIG=$SIG  DMG=$DMG"
 
           [ -z "$BUNDLE" ] && { echo "ERROR: .app.tar.gz not found"; exit 1; }
           [ -z "$SIG" ]    && { echo "ERROR: .app.tar.gz.sig not found"; exit 1; }
@@ -103,9 +109,14 @@ jobs:
         run: |
           mkdir -p artifacts
 
-          SETUP_EXE=$(find src-tauri/target -name "*-setup.exe" -type f | head -1)
-          NSIS_ZIP=$(find src-tauri/target -name "*.nsis.zip" -not -name "*.sig" -type f | head -1)
-          NSIS_SIG=$(find src-tauri/target -name "*.nsis.zip.sig" -type f | head -1)
+          echo "=== Searching for bundle outputs under src-tauri/target/x86_64-pc-windows-msvc/release/bundle ==="
+          find "src-tauri/target/x86_64-pc-windows-msvc/release/bundle" -type f 2>/dev/null | sort || echo "(nothing found)"
+
+          SETUP_EXE=$(find "src-tauri/target/x86_64-pc-windows-msvc/release/bundle" -name "*-setup.exe" -type f | head -1)
+          NSIS_ZIP=$(find "src-tauri/target/x86_64-pc-windows-msvc/release/bundle" -name "*.nsis.zip" -not -name "*.sig" -type f | head -1)
+          NSIS_SIG=$(find "src-tauri/target/x86_64-pc-windows-msvc/release/bundle" -name "*.nsis.zip.sig" -type f | head -1)
+
+          echo "SETUP_EXE=$SETUP_EXE  NSIS_ZIP=$NSIS_ZIP  NSIS_SIG=$NSIS_SIG"
 
           [ -z "$SETUP_EXE" ] && { echo "ERROR: setup.exe not found"; exit 1; }
           [ -z "$NSIS_ZIP" ]  && { echo "ERROR: .nsis.zip not found"; exit 1; }
