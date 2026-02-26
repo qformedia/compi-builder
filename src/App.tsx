@@ -89,7 +89,7 @@ function App() {
   const [updateStatus, setUpdateStatus] = useState<"idle" | "downloading" | "installed">("idle");
   const [updateDismissed, setUpdateDismissed] = useState(false);
 
-  const checkForUpdates = useCallback(async (): Promise<"up-to-date" | "available" | "error"> => {
+  const checkForUpdates = useCallback(async (): Promise<"up-to-date" | "available" | { error: string }> => {
     try {
       const update = await check();
       if (!update) return "up-to-date";
@@ -98,8 +98,9 @@ function App() {
       setUpdateStatus("idle");
       return "available";
     } catch (e) {
-      console.error("Update check failed:", e);
-      return "error";
+      const msg = e instanceof Error ? e.message : String(e);
+      console.error("Update check failed:", msg);
+      return { error: msg };
     }
   }, []);
 
@@ -123,6 +124,8 @@ function App() {
     });
     return () => { cancelled = true; };
   }, [checkForUpdates]);
+
+
 
   const saveSettings = (next: AppSettings) => {
     setSettings(next);

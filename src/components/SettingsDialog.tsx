@@ -20,6 +20,22 @@ import {
 import { FolderOpen, FileText, Loader2, CheckCircle } from "lucide-react";
 import type { AppSettings } from "@/types";
 
+/** Translate raw updater error messages into a short, user-friendly hint. */
+function summariseUpdateError(raw: string): string {
+  const s = raw.toLowerCase();
+  if (s.includes("404") || s.includes("not found") || s.includes("no release"))
+    return "no update file found on server";
+  if (s.includes("network") || s.includes("connect") || s.includes("dns") || s.includes("fetch"))
+    return "network error — check your internet connection";
+  if (s.includes("signature") || s.includes("invalid signature") || s.includes("verification"))
+    return "update signature is invalid";
+  if (s.includes("403") || s.includes("unauthorized") || s.includes("forbidden"))
+    return "server access denied";
+  if (s.includes("timeout"))
+    return "request timed out — check your internet connection";
+  return "unexpected error";
+}
+
 const BROWSER_OPTIONS = [
   { value: "chrome", label: "Google Chrome" },
   { value: "firefox", label: "Firefox" },
@@ -35,12 +51,12 @@ interface Props {
   onOpenChange: (open: boolean) => void;
   settings: AppSettings;
   onSave: (settings: AppSettings) => void;
-  onCheckUpdate?: () => Promise<"up-to-date" | "available" | "error">;
+  onCheckUpdate?: () => Promise<"up-to-date" | "available" | { error: string }>;
 }
 
 export function SettingsDialog({ open, onOpenChange, settings, onSave, onCheckUpdate }: Props) {
   const [draft, setDraft] = useState(settings);
-  const [updateCheck, setUpdateCheck] = useState<"idle" | "checking" | "up-to-date" | "available" | "error">("idle");
+  const [updateCheck, setUpdateCheck] = useState<"idle" | "checking" | "up-to-date" | "available" | { error: string }>("idle");
 
   // Reset draft when dialog opens
   const handleOpenChange = (next: boolean) => {
@@ -197,7 +213,9 @@ export function SettingsDialog({ open, onOpenChange, settings, onSave, onCheckUp
                     setUpdateCheck("checking");
                     const result = await onCheckUpdate();
                     setUpdateCheck(result);
-                    setTimeout(() => setUpdateCheck("idle"), 4000);
+                    if (result === "up-to-date" || result === "available") {
+                      setTimeout(() => setUpdateCheck("idle"), 4000);
+                    }
                   }}
                 >
                   {updateCheck === "checking" ? (
@@ -210,8 +228,10 @@ export function SettingsDialog({ open, onOpenChange, settings, onSave, onCheckUp
                 {updateCheck === "available" && (
                   <span className="text-primary">Update available!</span>
                 )}
-                {updateCheck === "error" && (
-                  <span className="text-destructive">Check failed</span>
+                {typeof updateCheck === "object" && "error" in updateCheck && (
+                  <span className="text-destructive" title={updateCheck.error}>
+                    Check failed — {summariseUpdateError(updateCheck.error)}
+                  </span>
                 )}
               </>
             )}
