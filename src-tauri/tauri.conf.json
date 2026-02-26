@@ -35,8 +35,8 @@
   "bundle": {
     "active": true,
     "targets": [
+      "app",
       "dmg",
-      "macos",
       "nsis"
     ],
     "icon": [
