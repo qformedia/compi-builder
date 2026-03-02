@@ -106,19 +106,16 @@ jobs:
           mkdir -p artifacts
 
           echo "=== Bundle outputs ==="
-          find src-tauri/target -name "*.nsis*" -o -name "*-setup.exe" 2>/dev/null | sort
+          find src-tauri/target -name "*-setup.exe" -o -name "*-setup.exe.sig" 2>/dev/null | sort
 
           SETUP_EXE=$(find src-tauri/target -name "*-setup.exe" -not -name "*.sig" -type f | head -1)
-          NSIS_ZIP=$(find src-tauri/target -name "*.nsis.zip" -not -name "*.sig" -type f | head -1)
-          NSIS_SIG=$(find src-tauri/target -name "*.nsis.zip.sig" -type f | head -1)
+          SETUP_SIG=$(find src-tauri/target -name "*-setup.exe.sig" -type f | head -1)
 
           [ -z "$SETUP_EXE" ] && { echo "ERROR: setup.exe not found"; exit 1; }
-          [ -z "$NSIS_ZIP" ]  && { echo "ERROR: .nsis.zip not found"; exit 1; }
-          [ -z "$NSIS_SIG" ]  && { echo "ERROR: .nsis.zip.sig not found"; exit 1; }
+          [ -z "$SETUP_SIG" ] && { echo "ERROR: setup.exe.sig not found"; exit 1; }
 
           cp "$SETUP_EXE" "artifacts/CompiFlow_x64-setup.exe"
-          cp "$NSIS_ZIP"   "artifacts/CompiFlow_x64-setup.nsis.zip"
-          cp "$NSIS_SIG"   "artifacts/CompiFlow_x64-setup.nsis.zip.sig"
+          cp "$SETUP_SIG" "artifacts/CompiFlow_x64-setup.exe.sig"
 
           ls -la artifacts/
 
@@ -150,8 +147,8 @@ jobs:
             CompiFlow_aarch64.app.tar.gz.sig \
             CompiFlow_x64.app.tar.gz \
             CompiFlow_x64.app.tar.gz.sig \
-            CompiFlow_x64-setup.nsis.zip \
-            CompiFlow_x64-setup.nsis.zip.sig \
+            CompiFlow_x64-setup.exe \
+            CompiFlow_x64-setup.exe.sig \
           ; do
             [ -f "assets/$f" ] || { echo "MISSING: $f"; exit 1; }
           done
@@ -183,7 +180,7 @@ jobs:
 
           SIG_AARCH64=$(cat assets/CompiFlow_aarch64.app.tar.gz.sig)
           SIG_X64=$(cat assets/CompiFlow_x64.app.tar.gz.sig)
-          SIG_NSIS=$(cat assets/CompiFlow_x64-setup.nsis.zip.sig)
+          SIG_WIN=$(cat assets/CompiFlow_x64-setup.exe.sig)
 
           jq -n \
             --arg version "$VERSION" \
@@ -193,8 +190,8 @@ jobs:
             --arg url_aarch64 "${BASE}/CompiFlow_aarch64.app.tar.gz" \
             --arg sig_x64 "$SIG_X64" \
             --arg url_x64 "${BASE}/CompiFlow_x64.app.tar.gz" \
-            --arg sig_nsis "$SIG_NSIS" \
-            --arg url_nsis "${BASE}/CompiFlow_x64-setup.nsis.zip" \
+            --arg sig_win "$SIG_WIN" \
+            --arg url_win "${BASE}/CompiFlow_x64-setup.exe" \
             '{
               version: $version,
               notes: $notes,
@@ -202,7 +199,7 @@ jobs:
               platforms: {
                 "darwin-aarch64": { signature: $sig_aarch64, url: $url_aarch64 },
                 "darwin-x86_64": { signature: $sig_x64, url: $url_x64 },
-                "windows-x86_64": { signature: $sig_nsis, url: $url_nsis }
+                "windows-x86_64": { signature: $sig_win, url: $url_win }
               }
             }' > latest.json
 
