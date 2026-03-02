@@ -29,7 +29,7 @@
       "endpoints": [
         "https://github.com/qformedia/compi-builder-releases/releases/latest/download/latest.json"
       ],
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDEzOTg0NjI5Nzc0QzE1MEEKUldRS0ZVeDNLVWFZRTRHMzljY3o4T1ExUWRmNDdDWUthUlM3ZUtEQTdqVXdnWTRhNDRBL2ZCRVAK"
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEVGM0REQjkzMzlFQ0VDNEIKUldSTDdPdzVrOXM5NzZkSWY1TzFwZGJNeXV0S2RtbXFXTy9XamhDVUZ5enBieXYwR2NNZCt1TXQK"
     }
   },
   "bundle": {
