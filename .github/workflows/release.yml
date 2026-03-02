@@ -105,7 +105,10 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
-          NSIS_ZIP=$(find src-tauri/target/release/bundle -name "*.nsis.zip" -not -name "*.sig" -type f | head -1)
+          echo "=== All .nsis.zip and .exe files anywhere in target ==="
+          find src-tauri/target -name "*.nsis.zip" -o -name "*-setup.exe" 2>/dev/null | sort || echo "(none)"
+
+          NSIS_ZIP=$(find src-tauri/target -name "*.nsis.zip" -not -name "*.sig" -type f | head -1)
 
           if [ -z "$TAURI_SIGNING_PRIVATE_KEY" ]; then
             echo "ERROR: TAURI_SIGNING_PRIVATE_KEY secret is not set or empty"
@@ -153,12 +156,9 @@ jobs:
         run: |
           mkdir -p artifacts
 
-          echo "=== Searching for bundle outputs under src-tauri/target/release/bundle ==="
-          find "src-tauri/target/release/bundle" -type f 2>/dev/null | sort || echo "(nothing found)"
-
-          SETUP_EXE=$(find "src-tauri/target/release/bundle" -name "*-setup.exe" -type f | head -1)
-          NSIS_ZIP=$(find "src-tauri/target/release/bundle" -name "*.nsis.zip" -not -name "*.sig" -type f | head -1)
-          NSIS_SIG=$(find "src-tauri/target/release/bundle" -name "*.nsis.zip.sig" -type f | head -1)
+          SETUP_EXE=$(find src-tauri/target -name "*-setup.exe" -type f | head -1)
+          NSIS_ZIP=$(find src-tauri/target -name "*.nsis.zip" -not -name "*.sig" -type f | head -1)
+          NSIS_SIG=$(find src-tauri/target -name "*.nsis.zip.sig" -type f | head -1)
 
           echo "SETUP_EXE=$SETUP_EXE  NSIS_ZIP=$NSIS_ZIP  NSIS_SIG=$NSIS_SIG"
 
