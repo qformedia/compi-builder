@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useCallback, Component, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { check, type Update } from "@tauri-apps/plugin-updater";
+import { relaunch } from "@tauri-apps/plugin-process";
 import { Clock, Film, CheckCircle, Loader2, Sparkles, RefreshCw, X } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { HubSpotIcon } from "@/components/ClipCard";
@@ -494,7 +495,7 @@ function App() {
           {updateStatus === "installed" ? (
             <span className="flex items-center gap-2">
               <CheckCircle className="h-3.5 w-3.5 text-green-500" />
-              Update v{pendingUpdate.version} installed. Restart to apply.
+              Update v{pendingUpdate.version} installed.
             </span>
           ) : updateStatus === "downloading" ? (
             <span className="flex items-center gap-2">
@@ -508,6 +509,11 @@ function App() {
             {updateStatus === "idle" && (
               <Button size="sm" variant="default" className="h-6 px-2 text-xs cursor-pointer" onClick={installUpdate}>
                 Install
+              </Button>
+            )}
+            {updateStatus === "installed" && (
+              <Button size="sm" variant="default" className="h-6 px-2 text-xs cursor-pointer" onClick={() => relaunch()}>
+                Restart Now
               </Button>
             )}
             <button onClick={() => setUpdateDismissed(true)} className="rounded p-0.5 text-muted-foreground hover:text-foreground cursor-pointer">
