@@ -116,6 +116,50 @@ npm run tauri build
 
 The built app will be in `src-tauri/target/release/bundle/`.
 
+## Feedback System Setup (Supabase)
+
+CompiFlow includes a built-in feedback dialog (Report a Problem / Suggest an Improvement) with optional screenshot uploads.
+
+### 1) Configure environment variables
+
+Copy `.env.example` to `.env` and fill values:
+
+```bash
+VITE_SUPABASE_URL=...
+VITE_SUPABASE_ANON_KEY=...
+VITE_SUPABASE_FEEDBACK_BUCKET=feedback-screenshots
+```
+
+### 2) Create database + storage
+
+Run SQL from:
+
+- `supabase/migrations/20260303120000_create_feedback_system.sql`
+
+This creates:
+
+- `public.feedback` table
+- RLS policies for insert-only app clients
+- `feedback-screenshots` storage bucket and upload/read policies
+
+### 3) Deploy Telegram notification function (optional but recommended)
+
+Function path:
+
+- `supabase/functions/notify-feedback/index.ts`
+
+Deployment and webhook instructions:
+
+- `supabase/functions/notify-feedback/README.md`
+
+## Feedback E2E Verification
+
+1. Launch app and click the new feedback icon near Settings.
+2. Submit one **Report a Problem** and one **Suggest an Improvement**.
+3. Verify two new rows in `public.feedback`.
+4. Verify screenshot URLs are present in `screenshots` when attachments are added.
+5. Verify Telegram receives notifications for each INSERT event.
+
 ## License
 
 Private - Quantastic / Miquel Tolosa

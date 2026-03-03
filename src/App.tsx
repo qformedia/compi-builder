@@ -15,8 +15,9 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Settings, Search, Download, ListOrdered, AlertTriangle } from "lucide-react";
+import { Settings, Search, Download, ListOrdered, AlertTriangle, MessageSquarePlus } from "lucide-react";
 import { SettingsDialog } from "@/components/SettingsDialog";
+import { FeedbackDialog } from "@/components/FeedbackDialog";
 import { SearchTab } from "@/components/SearchTab";
 import { ProjectTab } from "@/components/ProjectTab";
 import { ArrangeTab } from "@/components/ArrangeTab";
@@ -71,6 +72,7 @@ function App() {
     return saved ? JSON.parse(saved) : DEFAULT_SETTINGS;
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [project, setProject] = useState<Project | null>(null);
   const [activeTab, setActiveTab] = useState("project");
 
@@ -471,6 +473,14 @@ function App() {
           <Button
             variant="ghost"
             size="icon"
+            onClick={() => setFeedbackOpen(true)}
+            title="Share feedback"
+          >
+            <MessageSquarePlus className="h-5 w-5" />
+          </Button>
+          <Button
+            variant="ghost"
+            size="icon"
             onClick={() => setSettingsOpen(true)}
           >
             <Settings className="h-5 w-5" />
@@ -639,6 +649,10 @@ function App() {
         settings={settings}
         onSave={saveSettings}
         onCheckUpdate={checkForUpdates}
+      />
+      <FeedbackDialog
+        open={feedbackOpen}
+        onOpenChange={setFeedbackOpen}
       />
 
       {/* Finish Video Dialog */}

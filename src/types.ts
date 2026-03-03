@@ -66,3 +66,19 @@ export interface AppSettings {
   cookiesBrowser: string; // "chrome" | "firefox" | "safari" | "edge" | "brave" | "opera" | "chromium" | ""
   cookiesFile: string;    // manual cookies.txt fallback
 }
+
+export type FeedbackType = "bug" | "feature";
+export type FeedbackFrequency = "once" | "sometimes" | "always";
+export type FeedbackImportance = "nice_to_have" | "important" | "critical";
+
+export interface FeedbackPayload {
+  type: FeedbackType;
+  title: string;
+  description: string;
+  frequency?: FeedbackFrequency;
+  importance?: FeedbackImportance;
+  reporter_name?: string;
+  screenshots: string[];
+  app_version?: string;
+  os_info?: string;
+}
