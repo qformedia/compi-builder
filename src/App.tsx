@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useCallback, Component, type ReactNode } 
 import { invoke } from "@tauri-apps/api/core";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { Clock, Film, CheckCircle, Loader2, Sparkles, RefreshCw, X } from "lucide-react";
+import { Clock, Film, CheckCircle, Loader2, Sparkles, RefreshCw, X, RulerDimensionLine } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { HubSpotIcon } from "@/components/ClipCard";
 import { fetchVideoProjectClips } from "@/lib/hubspot";
@@ -76,6 +76,7 @@ function App() {
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [project, setProject] = useState<Project | null>(null);
   const [activeTab, setActiveTab] = useState("project");
+  const [thumbWidth, setThumbWidth] = useState(110);
 
   // Finish video flow
   type StepStatus = "pending" | "working" | "done" | "error";
@@ -560,6 +561,17 @@ function App() {
             {activeTab === "arrange" && arrangeStats && (
               <div className="flex items-center gap-2">
                 <div className="flex items-center gap-3 text-sm text-muted-foreground mr-2">
+                  <span className="flex items-center gap-1.5">
+                    <RulerDimensionLine className="h-3.5 w-3.5 flex-shrink-0" />
+                    <input
+                      type="range"
+                      min={60}
+                      max={200}
+                      value={thumbWidth}
+                      onChange={(e) => setThumbWidth(Number(e.target.value))}
+                      className="w-20 accent-primary cursor-pointer"
+                    />
+                  </span>
                   <span className="flex items-center gap-1">
                     <Film className="h-3.5 w-3.5" />
                     {arrangeStats.count} clip{arrangeStats.count !== 1 ? "s" : ""}
@@ -643,6 +655,7 @@ function App() {
                 setProject={setProject}
                 isActive={activeTab === "arrange"}
                 removeClip={removeClipFromProject}
+                thumbWidth={thumbWidth}
               />
             </TabErrorBoundary>
           </div>

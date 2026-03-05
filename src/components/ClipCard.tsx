@@ -290,7 +290,7 @@ export function ClipCard({
   return (
     <div
       ref={cardRef}
-      className={`group relative flex flex-shrink-0 snap-start flex-col overflow-hidden rounded-lg bg-card transition-shadow hover:shadow-md ${compact ? "w-28" : "w-52 border"}`}
+      className={`group relative flex snap-start flex-col overflow-hidden rounded-lg bg-card transition-shadow hover:shadow-md ${compact ? "w-full" : "w-52 flex-shrink-0 border"}`}
     >
       {/* Thumbnail / Preview area */}
       <div

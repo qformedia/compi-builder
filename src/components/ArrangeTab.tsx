@@ -11,12 +11,12 @@ import {
 } from "@dnd-kit/core";
 import {
   SortableContext,
-  horizontalListSortingStrategy,
+  rectSortingStrategy,
   useSortable,
   arrayMove,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { GripHorizontal, CheckCircle, StickyNote, Download, FolderOpen, Loader2, Trash2 } from "lucide-react";
+import { GripVertical, CheckCircle, StickyNote, Download, FolderOpen, Loader2, Trash2, Maximize2, Minimize2 } from "lucide-react";
 import { MediaPlayer, MediaProvider, type MediaPlayerInstance } from "@vidstack/react";
 import { defaultLayoutIcons, DefaultVideoLayout } from "@vidstack/react/player/layouts/default";
 import "@vidstack/react/player/styles/default/theme.css";
@@ -41,6 +41,7 @@ interface Props {
   setProject: (p: Project | null) => void;
   isActive: boolean;
   removeClip?: (hubspotId: string) => void;
+  thumbWidth?: number;
 }
 
 function toCardData(clip: ProjectClip): ClipCardData {
@@ -60,11 +61,48 @@ function toCardData(clip: ProjectClip): ClipCardData {
   };
 }
 
-export function ArrangeTab({ settings, project, setProject, isActive, removeClip }: Props) {
+const THUMB_DEFAULT = 110;
+
+function getClipDuration(clip: ProjectClip): number {
+  return clip.editedDuration ?? clip.localDuration ?? 0;
+}
+
+const LEFT_MIN = 180;
+const LEFT_MAX = 560;
+const LEFT_DEFAULT = 288;
+
+export function ArrangeTab({ settings, project, setProject, isActive, removeClip, thumbWidth = THUMB_DEFAULT }: Props) {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [playerError, setPlayerError] = useState<string | null>(null);
   const playerRef = useRef<MediaPlayerInstance>(null);
   const thumbCache = useRef(new Map<string, string | null>());
+  const [cinemaMode, setCinemaMode] = useState(false);
+  const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT);
+  const isDraggingDivider = useRef(false);
+  const dragStartX = useRef(0);
+  const dragStartWidth = useRef(LEFT_DEFAULT);
+
+  const onDividerMouseDown = useCallback((e: React.MouseEvent) => {
+    isDraggingDivider.current = true;
+    dragStartX.current = e.clientX;
+    dragStartWidth.current = leftWidth;
+    e.preventDefault();
+  }, [leftWidth]);
+
+  useEffect(() => {
+    const onMouseMove = (e: MouseEvent) => {
+      if (!isDraggingDivider.current) return;
+      const delta = e.clientX - dragStartX.current;
+      setLeftWidth(Math.min(LEFT_MAX, Math.max(LEFT_MIN, dragStartWidth.current + delta)));
+    };
+    const onMouseUp = () => { isDraggingDivider.current = false; };
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+  }, []);
 
   // Remove clip confirmation
   const [removeTarget, setRemoveTarget] = useState<string | null>(null);
@@ -293,75 +331,120 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
     return `${m}:${sec.toString().padStart(2, "0")}`;
   };
 
+  // Pre-compute cumulative durations for minute markers
+  const cumulativeDurations: number[] = [];
+  {
+    let acc = 0;
+    for (const clip of allClips) {
+      acc += getClipDuration(clip);
+      cumulativeDurations.push(acc);
+    }
+  }
+
+  const getMinuteMarker = (index: number): number | null => {
+    const prevEnd = index > 0 ? cumulativeDurations[index - 1] : 0;
+    const curEnd = cumulativeDurations[index];
+    const prevMinute = Math.floor(prevEnd / 60);
+    const curMinute = Math.floor(curEnd / 60);
+    if (curMinute > prevMinute && curEnd > 0) return curMinute;
+    return null;
+  };
+
+  const handleMoveToPosition = (clipId: string, targetPos: number) => {
+    const currentIndex = allClips.findIndex((c) => c.hubspotId === clipId);
+    if (currentIndex < 0) return;
+    const clampedTarget = Math.max(0, Math.min(allClips.length - 1, targetPos - 1));
+    if (clampedTarget === currentIndex) return;
+    const reordered = arrayMove(allClips, currentIndex, clampedTarget)
+      .map((c, i) => ({ ...c, order: i }));
+    const updated = { ...project, clips: reordered };
+    setProject(updated);
+    invoke("save_project_data", {
+      rootFolder: settings.rootFolder,
+      project: updated,
+    }).catch(() => {});
+  };
+
+  // Player content (shared between normal and cinema mode)
+  const playerContent = selectedClip && isPlayable(selectedClip) ? (
+    <>
+      <MediaPlayer
+        ref={playerRef}
+        key={selectedClip.localFile}
+        src={convertFileSrc(resolveClipPath(settings.rootFolder, project.name, selectedClip.localFile!), "localfile")}
+        autoPlay={isActive}
+        onEnded={handleNextClip}
+        onError={(detail) => {
+          const msg = detail instanceof Event
+            ? (detail as any)?.detail?.message ?? "Unknown playback error"
+            : String(detail);
+          console.error("Player error:", msg);
+          setPlayerError(String(msg));
+        }}
+        onCanPlay={() => setPlayerError(null)}
+        keyTarget="document"
+        className="absolute inset-0 !w-full !h-full [&_video]:!absolute [&_video]:!inset-0 [&_video]:!w-full [&_video]:!h-full [&_video]:!object-contain"
+      >
+        <MediaProvider />
+        <DefaultVideoLayout icons={defaultLayoutIcons} seekStep={5} slots={{ pipButton: null, fullscreenButton: null }} />
+      </MediaPlayer>
+      {playerError && (
+        <div className="absolute bottom-12 left-2 right-2 rounded bg-destructive/90 px-3 py-2 text-xs text-white">
+          <p className="font-medium">Playback error</p>
+          <p className="mt-0.5 opacity-80 break-all">{playerError}</p>
+        </div>
+      )}
+    </>
+  ) : selectedClip ? (
+    <div className="flex h-full flex-col items-center justify-center gap-3">
+      <p className="text-sm text-white/40">
+        {selectedClip.downloadStatus === "downloading" ? "Downloading..." : "Clip not downloaded yet"}
+      </p>
+      {selectedClip.downloadStatus === "downloading" && (
+        <Loader2 className="h-6 w-6 animate-spin text-white/40" />
+      )}
+      <div className="flex gap-2">
+        <button
+          onClick={() => downloadClip(selectedClip)}
+          className="flex items-center gap-1.5 rounded-md bg-white/10 px-3 py-1.5 text-xs text-white hover:bg-white/20 cursor-pointer"
+        >
+          <Download className="h-3.5 w-3.5" />
+          {selectedClip.downloadStatus === "downloading" ? "Retry" : "Download"}
+        </button>
+        <button
+          onClick={() => importClipFile(selectedClip)}
+          className="flex items-center gap-1.5 rounded-md bg-white/10 px-3 py-1.5 text-xs text-white hover:bg-white/20 cursor-pointer"
+        >
+          <FolderOpen className="h-3.5 w-3.5" /> Browse
+        </button>
+      </div>
+    </div>
+  ) : (
+    <div className="flex h-full items-center justify-center">
+      <p className="text-sm text-white/40">Select a clip to preview</p>
+    </div>
+  );
+
   return (
-    <div className="flex h-full flex-col overflow-hidden">
-      {/* Player + side panel row */}
-      <div className="flex min-h-0 flex-1 gap-2">
+    <div className="flex h-full overflow-hidden">
+      {/* ── Left column: Player + Metadata ── */}
+      <div className="flex flex-shrink-0 flex-col pr-2" style={{ width: leftWidth }}>
         {/* Video player */}
-        <div className="relative min-h-0 flex-1 rounded-lg bg-black overflow-hidden">
-          {selectedClip && isPlayable(selectedClip) ? (
-            <>
-              <MediaPlayer
-                ref={playerRef}
-                key={selectedClip.localFile}
-                src={convertFileSrc(resolveClipPath(settings.rootFolder, project.name, selectedClip.localFile!), "localfile")}
-                autoPlay={isActive}
-                onEnded={handleNextClip}
-                onError={(detail) => {
-                  const msg = detail instanceof Event
-                    ? (detail as any)?.detail?.message ?? "Unknown playback error"
-                    : String(detail);
-                  console.error("Player error:", msg, "URL:", convertFileSrc(resolveClipPath(settings.rootFolder, project.name, selectedClip.localFile!), "localfile"));
-                  setPlayerError(String(msg));
-                }}
-                onCanPlay={() => setPlayerError(null)}
-                keyTarget="document"
-                className="absolute inset-0 !w-full !h-full [&_video]:!absolute [&_video]:!inset-0 [&_video]:!w-full [&_video]:!h-full [&_video]:!object-contain"
-              >
-                <MediaProvider />
-                <DefaultVideoLayout icons={defaultLayoutIcons} seekStep={5} slots={{ pipButton: null, fullscreenButton: null }} />
-              </MediaPlayer>
-              {playerError && (
-                <div className="absolute bottom-12 left-2 right-2 rounded bg-destructive/90 px-3 py-2 text-xs text-white">
-                  <p className="font-medium">Playback error</p>
-                  <p className="mt-0.5 opacity-80 break-all">{playerError}</p>
-                </div>
-              )}
-            </>
-          ) : selectedClip ? (
-            <div className="flex h-full flex-col items-center justify-center gap-3">
-              <p className="text-sm text-white/40">
-                {selectedClip.downloadStatus === "downloading" ? "Downloading..." : "Clip not downloaded yet"}
-              </p>
-              {selectedClip.downloadStatus === "downloading" && (
-                <Loader2 className="h-6 w-6 animate-spin text-white/40" />
-              )}
-              <div className="flex gap-2">
-                <button
-                  onClick={() => downloadClip(selectedClip)}
-                  className="flex items-center gap-1.5 rounded-md bg-white/10 px-3 py-1.5 text-xs text-white hover:bg-white/20 cursor-pointer"
-                >
-                  <Download className="h-3.5 w-3.5" />
-                  {selectedClip.downloadStatus === "downloading" ? "Retry" : "Download"}
-                </button>
-                <button
-                  onClick={() => importClipFile(selectedClip)}
-                  className="flex items-center gap-1.5 rounded-md bg-white/10 px-3 py-1.5 text-xs text-white hover:bg-white/20 cursor-pointer"
-                >
-                  <FolderOpen className="h-3.5 w-3.5" /> Browse
-                </button>
-              </div>
-            </div>
-          ) : (
-            <div className="flex h-full items-center justify-center">
-              <p className="text-sm text-white/40">Select a clip to preview</p>
-            </div>
-          )}
+        <div className="relative aspect-[9/16] w-full rounded-lg bg-black overflow-hidden flex-shrink-0">
+          {playerContent}
+          {/* Cinema mode toggle */}
+          <button
+            onClick={() => setCinemaMode(!cinemaMode)}
+            className="absolute top-1.5 right-1.5 z-10 rounded-full bg-black/60 p-1 text-white hover:bg-black/80 cursor-pointer transition-colors"
+            title={cinemaMode ? "Exit cinema mode" : "Cinema mode (16:9)"}
+          >
+            <Maximize2 className="h-3.5 w-3.5" />
+          </button>
         </div>
 
-        {/* Side panel: clip info + editable fields + editing notes */}
+        {/* Metadata panel below player */}
         {selectedClip && (
-          <div className="flex w-64 flex-shrink-0 flex-col gap-2.5 overflow-y-auto rounded-lg border bg-card p-3">
+          <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto p-3">
             {/* Clip header */}
             <div className="flex items-center gap-2">
               <span className="text-xs font-bold text-muted-foreground">#{selectedIndex + 1}</span>
@@ -395,65 +478,82 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
               </p>
             )}
 
-            <div className="border-t" />
-
-            {/* Editable: Score */}
-            <div className="flex flex-col gap-1">
-              <label className="text-[11px] font-semibold text-muted-foreground">Score</label>
-              <div className="flex flex-wrap gap-1">
-                {(["XL", "L", "M", "S", "XS"] as const).map((s) => {
-                  const active = selectedClip.score === s;
-                  return (
-                    <button
-                      key={s}
-                      onClick={() => {
-                        updateHubSpotField(selectedClip.hubspotId, "score", s, { score: s });
-                      }}
-                      className={`rounded px-2 py-0.5 text-[11px] font-bold uppercase leading-none cursor-pointer transition-all ${
-                        active
-                          ? SCORE_COLORS[s]
-                          : "bg-muted text-muted-foreground hover:bg-muted/80"
-                      }`}
-                    >
-                      {s}
-                    </button>
-                  );
-                })}
-              </div>
+            {/* Score — label + buttons on same row */}
+            <div className="flex flex-wrap items-center gap-1.5">
+              <span className="text-[11px] font-semibold text-muted-foreground flex-shrink-0">Score</span>
+              {(["XL", "L", "M", "S", "XS"] as const).map((s) => {
+                const active = selectedClip.score === s;
+                return (
+                  <button
+                    key={s}
+                    onClick={() => {
+                      updateHubSpotField(selectedClip.hubspotId, "score", s, { score: s });
+                    }}
+                    className={`rounded px-2 py-0.5 text-[11px] font-bold uppercase leading-none cursor-pointer transition-all ${
+                      active
+                        ? SCORE_COLORS[s]
+                        : "bg-muted text-muted-foreground hover:bg-muted/80"
+                    }`}
+                  >
+                    {s}
+                  </button>
+                );
+              })}
             </div>
 
-            {/* Editable: Edited Duration */}
-            <div className="flex flex-col gap-1">
-              <label className="text-[11px] font-semibold text-muted-foreground">
-                Edited Duration (s)
-              </label>
-              <div className="flex items-center gap-2">
-                <input
-                  type="number"
-                  min={0}
-                  step={1}
-                  value={selectedClip.editedDuration ?? ""}
-                  placeholder={selectedClip.localDuration != null ? `${Math.round(selectedClip.localDuration)}` : "—"}
-                  onChange={(e) => {
-                    const val = e.target.value;
-                    const num = val === "" ? undefined : Number(val);
-                    updateClipField(selectedClip.hubspotId, { editedDuration: num });
-                  }}
-                  onBlur={(e) => {
-                    const val = e.target.value;
-                    const num = val === "" ? 0 : Number(val);
-                    updateHubSpotField(
-                      selectedClip.hubspotId,
-                      "edited_duration",
-                      String(num),
-                      { editedDuration: num || undefined },
-                    );
-                  }}
-                  className="w-20 rounded-md border bg-background px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
-                />
-                <span className="text-[11px] text-muted-foreground">
-                  total: {formatDuration(selectedClip.localDuration)}
-                </span>
+            {/* Duration + Position — same row */}
+            <div className="flex items-end gap-3">
+              <div className="flex flex-col gap-0.5">
+                <label className="text-[11px] font-semibold text-muted-foreground whitespace-nowrap">
+                  Duration (s)
+                </label>
+                <div className="flex items-center gap-1">
+                  <input
+                    type="number"
+                    min={0}
+                    step={1}
+                    value={selectedClip.editedDuration ?? ""}
+                    placeholder={selectedClip.localDuration != null ? `${Math.round(selectedClip.localDuration)}` : "—"}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      const num = val === "" ? undefined : Number(val);
+                      updateClipField(selectedClip.hubspotId, { editedDuration: num });
+                    }}
+                    onBlur={(e) => {
+                      const val = e.target.value;
+                      const num = val === "" ? 0 : Number(val);
+                      updateHubSpotField(
+                        selectedClip.hubspotId,
+                        "edited_duration",
+                        String(num),
+                        { editedDuration: num || undefined },
+                      );
+                    }}
+                    className="w-16 rounded-md border bg-background px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                  <span className="text-[10px] text-muted-foreground whitespace-nowrap">
+                    /{formatDuration(selectedClip.localDuration)}
+                  </span>
+                </div>
+              </div>
+              <div className="flex flex-col gap-0.5">
+                <label className="text-[11px] font-semibold text-muted-foreground">Pos.</label>
+                <div className="flex items-center gap-1">
+                  <input
+                    type="number"
+                    min={1}
+                    max={allClips.length}
+                    value={selectedIndex + 1}
+                    onChange={(e) => {
+                      const val = Number(e.target.value);
+                      if (val >= 1 && val <= allClips.length) {
+                        handleMoveToPosition(selectedClip.hubspotId, val);
+                      }
+                    }}
+                    className="w-14 rounded-md border bg-background px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                  />
+                  <span className="text-[10px] text-muted-foreground">/{allClips.length}</span>
+                </div>
               </div>
             </div>
 
@@ -505,36 +605,75 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
         )}
       </div>
 
-      {/* Sortable cards row — fixed at bottom */}
-      <div className="flex-shrink-0 border-t bg-background pt-1 pb-1 px-1">
-        <DndContext
-          sensors={sensors}
-          collisionDetection={closestCenter}
-          onDragEnd={handleDragEnd}
-        >
-          <SortableContext
-            items={allClips.map((c) => c.hubspotId)}
-            strategy={horizontalListSortingStrategy}
+      {/* ── Resizable divider ── */}
+      <div
+        onMouseDown={onDividerMouseDown}
+        className="w-1 flex-shrink-0 cursor-col-resize bg-border hover:bg-primary/40 active:bg-primary/60 transition-colors"
+        title="Drag to resize"
+      />
+
+      {/* ── Right column: Clip grid ── */}
+      <div className="flex min-w-0 flex-1 flex-col">
+        {/* Sortable clip grid */}
+        <div className="flex-1 overflow-y-auto p-2">
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragEnd={handleDragEnd}
           >
-            <div className="flex gap-2 overflow-x-auto pb-1 scroll-smooth">
-              {allClips.map((clip, index) => (
-                <SortableCard
-                  key={clip.hubspotId}
-                  clip={clip}
-                  index={index}
-                  isSelected={clip.hubspotId === selectedClip?.hubspotId}
-                  onSelect={() => setSelectedClipId(clip.hubspotId)}
-                  thumbCache={thumbCache}
-                  cookiesBrowser={settings.cookiesBrowser}
-                  cookiesFile={settings.cookiesFile}
-                  thumbRetryKey={thumbRetryKey}
-                  hubspotToken={settings.hubspotToken}
-                />
-              ))}
-            </div>
-          </SortableContext>
-        </DndContext>
+            <SortableContext
+              items={allClips.map((c) => c.hubspotId)}
+              strategy={rectSortingStrategy}
+            >
+              <div
+                className="grid gap-2"
+                style={{ gridTemplateColumns: `repeat(auto-fill, minmax(${thumbWidth}px, 1fr))` }}
+              >
+                {allClips.map((clip, index) => {
+                  const minuteMarker = getMinuteMarker(index);
+                  return (
+                    <SortableCard
+                      key={clip.hubspotId}
+                      clip={clip}
+                      index={index}
+                      isSelected={clip.hubspotId === selectedClip?.hubspotId}
+                      onSelect={() => setSelectedClipId(clip.hubspotId)}
+                      thumbCache={thumbCache}
+                      cookiesBrowser={settings.cookiesBrowser}
+                      cookiesFile={settings.cookiesFile}
+                      thumbRetryKey={thumbRetryKey}
+                      hubspotToken={settings.hubspotToken}
+                      minuteMarker={minuteMarker}
+                    />
+                  );
+                })}
+              </div>
+            </SortableContext>
+          </DndContext>
+        </div>
       </div>
+
+      {/* Cinema mode overlay */}
+      {cinemaMode && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/90"
+          onClick={() => setCinemaMode(false)}
+        >
+          <div
+            className="relative w-[90vw] max-w-[1280px] aspect-video rounded-lg bg-black overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {playerContent}
+            <button
+              onClick={() => setCinemaMode(false)}
+              className="absolute top-3 right-3 z-10 rounded-full bg-black/60 p-1.5 text-white hover:bg-black/80 cursor-pointer transition-colors"
+              title="Exit cinema mode"
+            >
+              <Minimize2 className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Remove clip confirmation dialog */}
       <Dialog open={removeTarget !== null} onOpenChange={(open) => { if (!open) setRemoveTarget(null); }}>
@@ -592,6 +731,7 @@ function SortableCard({
   cookiesFile,
   thumbRetryKey,
   hubspotToken,
+  minuteMarker,
 }: {
   clip: ProjectClip;
   index: number;
@@ -602,6 +742,7 @@ function SortableCard({
   cookiesFile: string;
   thumbRetryKey?: number;
   hubspotToken?: string;
+  minuteMarker?: number | null;
 }) {
   const {
     attributes,
@@ -618,19 +759,35 @@ function SortableCard({
     opacity: isDragging ? 0.5 : 1,
   };
 
+  const hasMarker = minuteMarker != null;
+
   return (
     <div
       ref={setNodeRef}
       style={style}
-      className={`flex-shrink-0 rounded-lg overflow-hidden cursor-grab touch-none [&_*]:!cursor-grab ${isSelected ? "border-2 border-green-500" : "border border-border"}`}
+      className={`overflow-hidden cursor-grab touch-none [&_*]:!cursor-grab
+        ${hasMarker ? "rounded-r-lg" : "rounded-lg"}
+        ${isSelected
+          ? "border-2 border-green-500"
+          : hasMarker
+            ? "border border-border border-l-[3px] border-l-[#00a8ff]"
+            : "border border-border"
+        }`}
       onClick={onSelect}
       {...attributes}
       {...listeners}
     >
-      {/* Top bar: order number + drag icon */}
-      <div className="flex items-center justify-between border-b bg-muted/50 px-2 py-1">
-        <span className="text-[11px] font-bold text-muted-foreground">#{index + 1}</span>
-        <GripHorizontal className="h-3.5 w-3.5 text-muted-foreground" />
+      {/* Top bar: order number + optional minute badge + drag icon */}
+      <div className="flex items-center justify-between border-b bg-muted/50 px-1.5 py-0.5">
+        <div className="flex items-center gap-1 min-w-0">
+          <span className="text-[10px] font-bold text-muted-foreground flex-shrink-0">#{index + 1}</span>
+          {hasMarker && (
+            <span className="rounded px-1 py-px text-[9px] font-bold leading-tight text-white flex-shrink-0" style={{ backgroundColor: "#00a8ff" }}>
+              {minuteMarker}:00
+            </span>
+          )}
+        </div>
+        <GripVertical className="h-3 w-3 text-muted-foreground flex-shrink-0" />
       </div>
 
       <ClipCard
