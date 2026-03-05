@@ -116,6 +116,14 @@ npm run tauri build
 
 The built app will be in `src-tauri/target/release/bundle/`.
 
+## Releasing a New Version
+
+```bash
+npm run release -- 0.1.17
+```
+
+This bumps the version in `package.json`, `tauri.conf.json`, and `Cargo.toml`, commits, creates a git tag, and pushes. GitHub Actions will then build the release artifacts.
+
 ## Feedback System Setup (Supabase)
 
 CompiFlow includes a built-in feedback dialog (Report a Problem / Suggest an Improvement) with optional screenshot uploads.

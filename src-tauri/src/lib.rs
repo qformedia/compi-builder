@@ -882,7 +882,7 @@ async fn disassociate_clip_from_project(
         .iter()
         .map(|clip_id| serde_json::json!({
             "from": { "id": clip_id },
-            "to": { "id": project_id }
+            "to": [{ "id": project_id }]
         }))
         .collect();
 
