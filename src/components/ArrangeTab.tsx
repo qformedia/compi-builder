@@ -16,12 +16,13 @@ import {
   arrayMove,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { GripVertical, CheckCircle, StickyNote, Download, FolderOpen, Loader2, Trash2, Maximize2, Minimize2 } from "lucide-react";
+import { GripVertical, CheckCircle, StickyNote, Download, FolderOpen, Loader2, Trash2, Maximize2, Minimize2, ImageIcon } from "lucide-react";
 import { MediaPlayer, MediaProvider, type MediaPlayerInstance } from "@vidstack/react";
 import { defaultLayoutIcons, DefaultVideoLayout } from "@vidstack/react/player/layouts/default";
 import "@vidstack/react/player/styles/default/theme.css";
 import "@vidstack/react/player/styles/default/layouts/video.css";
-import { ClipCard, SCORE_COLORS } from "@/components/ClipCard";
+import { ClipCard, SCORE_COLORS, getPlatform } from "@/components/ClipCard";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Dialog,
   DialogContent,
@@ -123,6 +124,8 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
     return () => window.removeEventListener("focus", onFocus);
   }, []);
 
+  const [thumbModalOpen, setThumbModalOpen] = useState(false);
+
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
   );
@@ -171,6 +174,7 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
   useEffect(() => {
     setNotesText(selectedClip?.editingNotes ?? "");
     setNotesSaved(false);
+    setThumbModalOpen(false);
   }, [selectedClip?.hubspotId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const saveNotes = useCallback((clipId: string, text: string) => {
@@ -216,6 +220,42 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
       project: updated,
     }).catch(() => {});
   }, [project, setProject, settings.rootFolder]);
+
+  const applyThumbnail = useCallback(async (clipId: string, imageUrl: string) => {
+    updateClipField(clipId, { fetchedThumbnail: imageUrl });
+    setThumbModalOpen(false);
+    if (!settings.hubspotToken) return;
+
+    try {
+      let hubspotUrl: string;
+
+      if (imageUrl.startsWith("data:")) {
+        const match = imageUrl.match(/^data:(image\/[^;]+);base64,(.+)$/);
+        if (!match) return;
+        hubspotUrl = await invoke<string>("upload_clip_thumbnail_base64", {
+          token: settings.hubspotToken,
+          clipId,
+          base64Data: match[2],
+          mimeType: match[1],
+        });
+      } else if (imageUrl.startsWith("http://") || imageUrl.startsWith("https://")) {
+        if (imageUrl.includes("asset.localhost") || imageUrl.includes("localhost")) {
+          return;
+        }
+        hubspotUrl = await invoke<string>("upload_clip_thumbnail", {
+          token: settings.hubspotToken,
+          clipId,
+          thumbnailUrl: imageUrl,
+        });
+      } else {
+        return;
+      }
+
+      updateClipField(clipId, { fetchedThumbnail: hubspotUrl });
+    } catch (e) {
+      console.warn("HubSpot thumbnail upload failed:", e);
+    }
+  }, [updateClipField, settings.hubspotToken]);
 
   // Update a HubSpot property and local state in one call
   const updateHubSpotField = useCallback((
@@ -290,7 +330,7 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
   if (!project) {
     return (
       <div className="flex h-full items-center justify-center text-muted-foreground">
-        <p>Open a project in the Project tab first.</p>
+        <p>Open a project in the Search tab first.</p>
       </div>
     );
   }
@@ -298,7 +338,7 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
   if (allClips.length === 0) {
     return (
       <div className="flex h-full items-center justify-center text-muted-foreground">
-        <p>No downloaded clips yet. Download clips in the Project tab.</p>
+        <p>No clips yet. Add clips in the Search tab.</p>
       </div>
     );
   }
@@ -580,27 +620,118 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
               )}
             </div>
 
-            {/* Remove clip */}
-            {removeClip && (
-              <>
-                <div className="border-t" />
+            {/* Download status + actions — compact */}
+            <div className="border-t" />
+            <div className="flex flex-col gap-1">
+              {/* Error message (failed only, above the row) */}
+              {selectedClip.downloadStatus === "failed" && (() => {
+                const platform = getPlatform(selectedClip.link);
+                const isXiaohongshu = platform === "Xiaohongshu";
+                return (
+                  <p className="text-[10px] text-destructive leading-snug">
+                    {isXiaohongshu
+                      ? "Xiaohongshu videos can't be auto-downloaded — import manually"
+                      : (selectedClip.downloadError ?? "Download failed")}
+                  </p>
+                );
+              })()}
+
+              {/* Single action row: status | thumbnail | remove */}
+              <div className="flex items-center gap-0.5 flex-wrap">
+                {/* Status / primary action */}
+                {(() => {
+                  const ds = selectedClip.downloadStatus;
+                  const platform = getPlatform(selectedClip.link);
+                  const isXiaohongshu = platform === "Xiaohongshu";
+                  const isChinese = ["Douyin", "Bilibili", "Xiaohongshu"].includes(platform);
+
+                  if (ds === "downloading") return (
+                    <span className="flex items-center gap-1 px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                      Downloading…
+                    </span>
+                  );
+                  if (ds === "pending") return (
+                    <span className="flex items-center gap-1 px-1.5 py-0.5 text-[11px] text-muted-foreground">
+                      <Download className="h-3 w-3" />
+                      Queued
+                    </span>
+                  );
+                  if (ds === "complete" && selectedClip.localFile) return (
+                    <button
+                      onClick={() => {
+                        const fullPath = resolveClipPath(settings.rootFolder, project.name, selectedClip.localFile!);
+                        import("@tauri-apps/plugin-opener").then(({ revealItemInDir }) =>
+                          revealItemInDir(fullPath)
+                        ).catch(() => {});
+                      }}
+                      className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-green-600 hover:bg-green-50 cursor-pointer transition-colors"
+                    >
+                      <CheckCircle className="h-3 w-3" />
+                      Downloaded
+                    </button>
+                  );
+                  if (ds === "failed") return (
+                    <>
+                      {!isXiaohongshu && (
+                        <button
+                          onClick={() => downloadClip(selectedClip)}
+                          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-orange-600 hover:bg-orange-50 cursor-pointer transition-colors"
+                        >
+                          <Download className="h-3 w-3" />
+                          Retry
+                        </button>
+                      )}
+                      <button
+                        onClick={() => importClipFile(selectedClip)}
+                        className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-muted cursor-pointer transition-colors"
+                      >
+                        <FolderOpen className="h-3 w-3" />
+                        Import
+                      </button>
+                      {isChinese && (
+                        <button
+                          onClick={() => openUrl("https://dy.kukutool.com/en")}
+                          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-blue-600 hover:bg-blue-50 cursor-pointer transition-colors"
+                        >
+                          KuKuTool ↗
+                        </button>
+                      )}
+                    </>
+                  );
+                  return null;
+                })()}
+
+                {/* Change thumbnail */}
                 <button
-                  onClick={() => {
-                    if (skipConfirmRef.current) {
-                      removeClip(selectedClip.hubspotId);
-                      const next = allClips.find((c) => c.hubspotId !== selectedClip.hubspotId);
-                      setSelectedClipId(next?.hubspotId ?? null);
-                    } else {
-                      setRemoveTarget(selectedClip.hubspotId);
-                    }
-                  }}
-                  className="flex items-center gap-1.5 self-start rounded-md px-2 py-1.5 text-xs text-destructive hover:bg-destructive/10 cursor-pointer transition-colors"
+                  onClick={() => setThumbModalOpen(true)}
+                  className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-muted cursor-pointer transition-colors"
+                  title="Change thumbnail"
                 >
-                  <Trash2 className="h-3.5 w-3.5" />
-                  Remove from project
+                  <ImageIcon className="h-3 w-3" />
+                  Thumb
                 </button>
-              </>
-            )}
+
+                {/* Remove */}
+                {removeClip && (
+                  <button
+                    onClick={() => {
+                      if (skipConfirmRef.current) {
+                        removeClip(selectedClip.hubspotId);
+                        const next = allClips.find((c) => c.hubspotId !== selectedClip.hubspotId);
+                        setSelectedClipId(next?.hubspotId ?? null);
+                      } else {
+                        setRemoveTarget(selectedClip.hubspotId);
+                      }
+                    }}
+                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-destructive hover:bg-destructive/10 cursor-pointer transition-colors"
+                  >
+                    <Trash2 className="h-3 w-3" />
+                    Remove
+                  </button>
+                )}
+              </div>
+            </div>
           </div>
         )}
       </div>
@@ -674,6 +805,33 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
           </div>
         </div>
       )}
+
+      {/* Change thumbnail modal */}
+      <Dialog open={thumbModalOpen} onOpenChange={setThumbModalOpen}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Change thumbnail</DialogTitle>
+            <DialogDescription>
+              Paste an image (Ctrl+V / Cmd+V) or pick a file.
+            </DialogDescription>
+          </DialogHeader>
+          <ThumbDropZone
+            onImage={(dataUrl) => {
+              if (selectedClip) applyThumbnail(selectedClip.hubspotId, dataUrl);
+            }}
+            onPickFile={async () => {
+              const path = await openFileDialog({
+                title: "Select thumbnail image",
+                filters: [{ name: "Image", extensions: ["jpg", "jpeg", "png", "webp", "gif"] }],
+              });
+              if (!path || !selectedClip) return;
+              const [b64, mime] = await invoke<[string, string]>("read_file_base64", { path });
+              const dataUrl = `data:${mime};base64,${b64}`;
+              applyThumbnail(selectedClip.hubspotId, dataUrl);
+            }}
+          />
+        </DialogContent>
+      </Dialog>
 
       {/* Remove clip confirmation dialog */}
       <Dialog open={removeTarget !== null} onOpenChange={(open) => { if (!open) setRemoveTarget(null); }}>
@@ -799,6 +957,78 @@ function SortableCard({
         thumbRetryKey={thumbRetryKey}
         hubspotToken={hubspotToken}
       />
+    </div>
+  );
+}
+
+// ── Thumbnail paste/drop zone for the modal ──────────────────────────────
+
+function ThumbDropZone({
+  onImage,
+  onPickFile,
+}: {
+  onImage: (dataUrl: string) => void;
+  onPickFile: () => void;
+}) {
+  const zoneRef = useRef<HTMLDivElement>(null);
+  const [preview, setPreview] = useState<string | null>(null);
+  const [dragging, setDragging] = useState(false);
+
+  const processFile = useCallback((file: File) => {
+    if (!file.type.startsWith("image/")) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const dataUrl = reader.result as string;
+      setPreview(dataUrl);
+      onImage(dataUrl);
+    };
+    reader.readAsDataURL(file);
+  }, [onImage]);
+
+  useEffect(() => {
+    const el = zoneRef.current;
+    if (!el) return;
+
+    const onPaste = (e: ClipboardEvent) => {
+      const items = e.clipboardData?.items;
+      if (!items) return;
+      for (const item of Array.from(items)) {
+        if (!item.type.startsWith("image/")) continue;
+        const file = item.getAsFile();
+        if (file) { processFile(file); e.preventDefault(); break; }
+      }
+    };
+
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, [processFile]);
+
+  return (
+    <div
+      ref={zoneRef}
+      onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
+      onDragLeave={() => setDragging(false)}
+      onDrop={(e) => {
+        e.preventDefault();
+        setDragging(false);
+        const file = e.dataTransfer.files[0];
+        if (file) processFile(file);
+      }}
+      className={`flex flex-col items-center justify-center gap-3 rounded-lg border-2 border-dashed p-6 transition-colors ${
+        dragging ? "border-primary bg-primary/5" : "border-muted-foreground/25"
+      }`}
+    >
+      {preview ? (
+        <img src={preview} alt="" className="max-h-32 rounded object-contain" />
+      ) : (
+        <p className="text-sm text-muted-foreground text-center">
+          Paste an image here or drag &amp; drop
+        </p>
+      )}
+      <Button variant="outline" size="sm" onClick={onPickFile} className="cursor-pointer">
+        <FolderOpen className="mr-1.5 h-3.5 w-3.5" />
+        Pick file
+      </Button>
     </div>
   );
 }

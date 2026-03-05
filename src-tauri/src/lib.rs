@@ -1620,45 +1620,27 @@ async fn ytdlp_thumbnail_with(app: &AppHandle, url: &str, cookies_browser: &Opti
 
 /// Download a thumbnail image, upload to HubSpot File Manager, and set it on the clip
 #[tauri::command]
-async fn upload_clip_thumbnail(token: String, clip_id: String, thumbnail_url: String) -> Result<String, String> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    // 1. Download the thumbnail image
-    let img_response = client
-        .get(&thumbnail_url)
-        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
-        .send()
-        .await
-        .map_err(|e| format!("Failed to download thumbnail: {}", e))?;
-
-    let content_type = img_response
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("image/jpeg")
-        .to_string();
+/// Shared: upload image bytes to HubSpot File Manager and update the clip's thumbnail property
+async fn upload_thumb_bytes_to_hubspot(
+    client: &reqwest::Client,
+    token: &str,
+    clip_id: &str,
+    img_bytes: Vec<u8>,
+    content_type: &str,
+) -> Result<String, String> {
+    if img_bytes.is_empty() {
+        return Err("Image data is empty".into());
+    }
 
     let ext = if content_type.contains("png") { "png" }
         else if content_type.contains("webp") { "webp" }
+        else if content_type.contains("gif") { "gif" }
         else { "jpg" };
 
-    let img_bytes = img_response
-        .bytes()
-        .await
-        .map_err(|e| format!("Failed to read thumbnail bytes: {}", e))?;
-
-    if img_bytes.is_empty() {
-        return Err("Downloaded thumbnail is empty".into());
-    }
-
-    // 2. Upload to HubSpot File Manager
     let filename = format!("thumb_{}.{}", clip_id, ext);
-    let file_part = reqwest::multipart::Part::bytes(img_bytes.to_vec())
+    let file_part = reqwest::multipart::Part::bytes(img_bytes)
         .file_name(filename.clone())
-        .mime_str(&content_type)
+        .mime_str(content_type)
         .map_err(|e| e.to_string())?;
 
     let options = serde_json::json!({
@@ -1676,7 +1658,7 @@ async fn upload_clip_thumbnail(token: String, clip_id: String, thumbnail_url: St
 
     let upload_res = client
         .post("https://api.hubapi.com/files/v3/files")
-        .bearer_auth(&token)
+        .bearer_auth(token)
         .multipart(form)
         .send()
         .await
@@ -1699,7 +1681,6 @@ async fn upload_clip_thumbnail(token: String, clip_id: String, thumbnail_url: St
         .ok_or("No URL in upload response")?
         .to_string();
 
-    // 3. Update the clip's fetched_social_thumbnail property
     let update_body = serde_json::json!({
         "properties": {
             "fetched_social_thumbnail": file_url
@@ -1711,7 +1692,7 @@ async fn upload_clip_thumbnail(token: String, clip_id: String, thumbnail_url: St
             "https://api.hubapi.com/crm/v3/objects/{}/{}",
             EXTERNAL_CLIPS_OBJECT_ID, clip_id
         ))
-        .bearer_auth(&token)
+        .bearer_auth(token)
         .json(&update_body)
         .send()
         .await
@@ -1724,6 +1705,76 @@ async fn upload_clip_thumbnail(token: String, clip_id: String, thumbnail_url: St
     }
 
     Ok(file_url)
+}
+
+#[tauri::command]
+async fn upload_clip_thumbnail(token: String, clip_id: String, thumbnail_url: String) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let img_response = client
+        .get(&thumbnail_url)
+        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        .send()
+        .await
+        .map_err(|e| format!("Failed to download thumbnail: {}", e))?;
+
+    let content_type = img_response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("image/jpeg")
+        .to_string();
+
+    let img_bytes = img_response
+        .bytes()
+        .await
+        .map_err(|e| format!("Failed to read thumbnail bytes: {}", e))?;
+
+    upload_thumb_bytes_to_hubspot(&client, &token, &clip_id, img_bytes.to_vec(), &content_type).await
+}
+
+#[tauri::command]
+async fn upload_clip_thumbnail_base64(
+    token: String,
+    clip_id: String,
+    base64_data: String,
+    mime_type: String,
+) -> Result<String, String> {
+    use base64::Engine;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let img_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&base64_data)
+        .map_err(|e| format!("Invalid base64: {}", e))?;
+
+    upload_thumb_bytes_to_hubspot(&client, &token, &clip_id, img_bytes, &mime_type).await
+}
+
+/// Read a local file and return its contents as base64
+#[tauri::command]
+async fn read_file_base64(path: String) -> Result<(String, String), String> {
+    use base64::Engine;
+    let bytes = std::fs::read(&path).map_err(|e| format!("Failed to read file: {}", e))?;
+    let ext = std::path::Path::new(&path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("jpg")
+        .to_lowercase();
+    let mime = match ext.as_str() {
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        _ => "image/jpeg",
+    };
+    let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Ok((b64, mime.to_string()))
 }
 
 /// Update a single property on an External Clip in HubSpot
@@ -2184,6 +2235,8 @@ pub fn run() {
             import_clip_file,
             fetch_thumbnail,
             upload_clip_thumbnail,
+            upload_clip_thumbnail_base64,
+            read_file_base64,
             update_clip_property,
             fetch_creators_batch,
             create_project,

@@ -1,32 +1,165 @@
 import { useState, useMemo, useRef, useEffect, useCallback } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
-import { Loader2, X, Cookie, ExternalLink } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import { Loader2, X, Cookie, ExternalLink, Search as SearchIcon, Plus, Globe, FolderOpen } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { TagPicker } from "@/components/TagPicker";
 import { CreatorPicker } from "@/components/CreatorPicker";
 import { ClipCard, SCORE_COLORS } from "@/components/ClipCard";
-import { searchClipsByTags, searchCreatorClips } from "@/lib/hubspot";
-import type { CreatorOption } from "@/lib/hubspot";
+import { searchClipsByTags, searchCreatorClips, searchVideoProjects, fetchVideoProjectClips } from "@/lib/hubspot";
+import type { CreatorOption, VideoProjectSummary } from "@/lib/hubspot";
 import { fetchTagOptions } from "@/lib/tags";
 import type { TagOption } from "@/lib/tags";
-import type { AppSettings, Clip, Project } from "@/types";
+import type { AppSettings, Clip, Project, ProjectClip } from "@/types";
 
 const SCORE_OPTIONS = ["XL", "L", "M", "S", "XS"] as const;
 
 interface Props {
   settings: AppSettings;
   project: Project | null;
+  setProject: (p: Project | null) => void;
   addClip: (clip: Clip) => void;
   removeClip: (hubspotId: string) => void;
 }
 
-export function SearchTab({ settings, project, addClip, removeClip }: Props) {
+export function SearchTab({ settings, project, setProject, addClip, removeClip }: Props) {
+  // ── Project lifecycle state ────────────────────────────────────────────
+  const [newName, setNewName] = useState("");
+  const [existingProjects, setExistingProjects] = useState<string[]>([]);
+  const [creating, setCreating] = useState(false);
+  const [projectError, setProjectError] = useState<string>();
+  const [hsQuery, setHsQuery] = useState("");
+  const [hsResults, setHsResults] = useState<VideoProjectSummary[]>([]);
+  const [hsSearching, setHsSearching] = useState(false);
+  const [hsOpening, setHsOpening] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!settings.rootFolder) return;
+    invoke<string[]>("list_projects", { rootFolder: settings.rootFolder })
+      .then(async (names) => {
+        const candidates: { name: string; vpId: string }[] = [];
+        for (const name of names) {
+          try {
+            const p = await invoke<Project>("load_project", { rootFolder: settings.rootFolder, name });
+            if (p.hubspotVideoProjectId) candidates.push({ name, vpId: p.hubspotVideoProjectId });
+          } catch { /* skip broken projects */ }
+        }
+        if (candidates.length === 0) { setExistingProjects([]); return; }
+        try {
+          const res = await invoke<{ results?: Array<{ id: string }> }>("fetch_video_projects_by_ids", {
+            token: settings.hubspotToken,
+            projectIds: candidates.map((c) => c.vpId),
+          });
+          const validIds = new Set((res.results ?? []).map((r) => r.id));
+          setExistingProjects(candidates.filter((c) => validIds.has(c.vpId)).map((c) => c.name));
+        } catch {
+          setExistingProjects(candidates.map((c) => c.name));
+        }
+      })
+      .catch(() => {});
+  }, [settings.rootFolder, project]);
+
+  const createProjectInHubSpot = async () => {
+    if (!newName.trim()) return;
+    setCreating(true);
+    setProjectError(undefined);
+    try {
+      const result = await invoke<{ id: string; name: string }>(
+        "create_video_project",
+        { token: settings.hubspotToken, name: newName.trim(), clipIds: [] },
+      );
+      await invoke("create_project", {
+        rootFolder: settings.rootFolder,
+        name: result.name,
+      }).catch(() => {});
+      const newProject: Project = {
+        name: result.name,
+        createdAt: new Date().toISOString(),
+        clips: [],
+        hubspotVideoProjectId: result.id,
+      };
+      await invoke("save_project_data", {
+        rootFolder: settings.rootFolder,
+        project: newProject,
+      });
+      setProject(newProject);
+      setNewName("");
+    } catch (e) {
+      setProjectError(String(e));
+    } finally {
+      setCreating(false);
+    }
+  };
+
+  const openProject = async (name: string) => {
+    try {
+      const p = await invoke<Project>("load_project", {
+        rootFolder: settings.rootFolder,
+        name,
+      });
+      setProject(p);
+    } catch (e) {
+      setProjectError(String(e));
+    }
+  };
+
+  const searchHubSpotProjects = async () => {
+    if (!hsQuery.trim()) return;
+    setHsSearching(true);
+    try {
+      const results = await searchVideoProjects(settings.hubspotToken, hsQuery.trim());
+      setHsResults(results.filter((vp) => vp.status !== "Published"));
+    } catch (e) {
+      setProjectError(String(e));
+    } finally {
+      setHsSearching(false);
+    }
+  };
+
+  const openFromHubSpot = async (vp: VideoProjectSummary) => {
+    setHsOpening(vp.id);
+    setProjectError(undefined);
+    try {
+      const clips = await fetchVideoProjectClips(settings.hubspotToken, vp.id);
+      await invoke("create_project", {
+        rootFolder: settings.rootFolder,
+        name: vp.name,
+      }).catch(() => {});
+      const projectClips: ProjectClip[] = clips.map((clip, i) => ({
+        hubspotId: clip.id,
+        link: clip.link,
+        creatorName: clip.creatorName,
+        tags: clip.tags,
+        score: clip.score,
+        editedDuration: clip.editedDuration,
+        downloadStatus: "pending" as const,
+        order: i,
+      }));
+      const proj: Project = {
+        name: vp.name,
+        createdAt: new Date().toISOString(),
+        clips: projectClips,
+        hubspotVideoProjectId: vp.id,
+      };
+      await invoke("save_project_data", {
+        rootFolder: settings.rootFolder,
+        project: proj,
+      });
+      setProject(proj);
+    } catch (e) {
+      setProjectError(String(e));
+    } finally {
+      setHsOpening(null);
+    }
+  };
+
+  // ── Search state ───────────────────────────────────────────────────────
   const [tagOptions, setTagOptions] = useState<TagOption[]>([]);
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [tagMode, setTagMode] = useState<"AND" | "OR">("AND");
   const [selectedCreator, setSelectedCreator] = useState<CreatorOption | null>(null);
 
-  // Retry failed thumbnails when window regains focus (cookies may have refreshed)
   const [thumbRetryKey, setThumbRetryKey] = useState(0);
   useEffect(() => {
     let lastRetry = 0;
@@ -184,8 +317,134 @@ export function SearchTab({ settings, project, addClip, removeClip }: Props) {
   const isInProject = (clipId: string) =>
     project?.clips.some((c) => c.hubspotId === clipId) ?? false;
 
+  // ── No project: show project lifecycle UI ────────────────────────────
+  if (!project) {
+    return (
+      <div className="flex h-full flex-col gap-6 py-4">
+        {projectError && <p className="text-sm text-destructive">{projectError}</p>}
+
+        <div className="flex flex-col gap-2">
+          <h2 className="text-sm font-medium flex items-center gap-1.5">
+            <SearchIcon className="h-4 w-4" />
+            Open Video Project from HubSpot
+          </h2>
+          <div className="flex gap-2">
+            <Input
+              placeholder="Search by name..."
+              value={hsQuery}
+              onChange={(e) => setHsQuery(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && searchHubSpotProjects()}
+            />
+            <Button onClick={searchHubSpotProjects} disabled={!hsQuery.trim() || hsSearching} variant="outline">
+              {hsSearching ? <Loader2 className="h-4 w-4 animate-spin" /> : <SearchIcon className="h-4 w-4" />}
+            </Button>
+          </div>
+          {hsResults.length > 0 && (
+            <div className="flex flex-col gap-1 max-h-48 overflow-y-auto rounded-md border">
+              {hsResults.map((vp) => (
+                <button
+                  key={vp.id}
+                  className="flex items-center gap-2 px-3 py-2 text-left hover:bg-muted transition-colors cursor-pointer border-b last:border-b-0"
+                  disabled={hsOpening === vp.id}
+                  onClick={() => openFromHubSpot(vp)}
+                >
+                  {hsOpening === vp.id ? (
+                    <Loader2 className="h-4 w-4 animate-spin flex-shrink-0 text-muted-foreground" />
+                  ) : (
+                    <Globe className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
+                  )}
+                  <div className="min-w-0 flex-1">
+                    <span className="block truncate text-sm font-medium">{vp.name}</span>
+                    <span className="block truncate text-[10px] text-muted-foreground">
+                      {vp.status}{vp.tag ? ` · ${vp.tag}` : ""}{vp.pubDate ? ` · ${vp.pubDate}` : ""}
+                    </span>
+                  </div>
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center gap-3">
+          <div className="flex-1 border-t" />
+          <span className="text-xs text-muted-foreground">or</span>
+          <div className="flex-1 border-t" />
+        </div>
+
+        <div className="flex flex-col gap-2">
+          <h2 className="text-sm font-medium flex items-center gap-1.5">
+            <Plus className="h-4 w-4" />
+            Create new Video Project
+          </h2>
+          <div className="flex gap-2">
+            <Input
+              placeholder="Project name (e.g. 260212 Minecraft)"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && createProjectInHubSpot()}
+            />
+            <Button onClick={createProjectInHubSpot} disabled={!newName.trim() || creating}>
+              {creating ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Globe className="mr-2 h-4 w-4" />
+              )}
+              Create in HubSpot
+            </Button>
+          </div>
+        </div>
+
+        {existingProjects.length > 0 && (
+          <>
+            <div className="flex items-center gap-3">
+              <div className="flex-1 border-t" />
+              <span className="text-xs text-muted-foreground">recent</span>
+              <div className="flex-1 border-t" />
+            </div>
+            <div className="flex flex-col gap-2">
+              <h2 className="text-sm font-medium flex items-center gap-1.5">
+                <FolderOpen className="h-4 w-4" />
+                Recent projects
+              </h2>
+              <div className="flex flex-col gap-1">
+                {existingProjects.map((name) => (
+                  <Button
+                    key={name}
+                    variant="ghost"
+                    className="justify-start"
+                    onClick={() => openProject(name)}
+                  >
+                    <FolderOpen className="mr-2 h-4 w-4" />
+                    {name}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          </>
+        )}
+      </div>
+    );
+  }
+
+  // ── Project is open: show search interface ─────────────────────────────
   return (
     <div className="flex h-full flex-col gap-3 py-4">
+      {/* Project header */}
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-medium text-muted-foreground">
+          Project: <span className="text-foreground">{project.name}</span>
+        </span>
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={() => setProject(null)}
+          className="cursor-pointer text-xs h-7"
+        >
+          <X className="mr-1 h-3 w-3" />
+          Close project
+        </Button>
+      </div>
+
       {/* Search controls */}
       <div className="flex flex-col gap-2">
         <div className="flex gap-2">
@@ -289,12 +548,6 @@ export function SearchTab({ settings, project, addClip, removeClip }: Props) {
             <X className="h-3.5 w-3.5" />
           </button>
         </div>
-      )}
-
-      {!project && initialClips.length === 0 && (
-        <p className="text-sm text-orange-500">
-          Create a project in the Project tab first to add clips.
-        </p>
       )}
 
       {initialClips.length > 0 && (

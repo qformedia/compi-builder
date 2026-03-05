@@ -1,5 +1,6 @@
-import { useState, useEffect, useMemo, useCallback, Component, type ReactNode } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef, Component, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
 import { Clock, Film, CheckCircle, Loader2, Sparkles, RefreshCw, X, RulerDimensionLine } from "lucide-react";
@@ -16,11 +17,10 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { Settings, Search, Download, ListOrdered, AlertTriangle, MessageSquarePlus } from "lucide-react";
+import { Settings, Search, ListOrdered, AlertTriangle, MessageSquarePlus } from "lucide-react";
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { FeedbackDialog } from "@/components/FeedbackDialog";
 import { SearchTab } from "@/components/SearchTab";
-import { ProjectTab } from "@/components/ProjectTab";
 import { ArrangeTab } from "@/components/ArrangeTab";
 import type { AppSettings, Clip, Project, ProjectClip } from "@/types";
 import logo from "@/assets/logotipo-quantastic.png";
@@ -75,7 +75,7 @@ function App() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [project, setProject] = useState<Project | null>(null);
-  const [activeTab, setActiveTab] = useState("project");
+  const [activeTab, setActiveTab] = useState("search");
   const [thumbWidth, setThumbWidth] = useState(110);
 
   // Finish video flow
@@ -130,6 +130,77 @@ function App() {
   }, [checkForUpdates]);
 
 
+
+  // ── Download-progress listener (moved from ProjectTab) ──────────────────
+  interface DownloadProgress {
+    clipId: string;
+    status: string;
+    progress: number | null;
+    localFile: string | null;
+    localDuration: number | null;
+    error: string | null;
+  }
+
+  const projectRef = useRef(project);
+  projectRef.current = project;
+
+  useEffect(() => {
+    const unlisten = listen<DownloadProgress>("download-progress", (event) => {
+      const dp = event.payload;
+      const prev = projectRef.current;
+      if (!prev) return;
+      const clips = prev.clips.map((c) => {
+        if (c.hubspotId !== dp.clipId) return c;
+        return {
+          ...c,
+          downloadStatus: dp.status as ProjectClip["downloadStatus"],
+          localFile: dp.localFile ?? c.localFile,
+          localDuration: dp.localDuration ?? c.localDuration,
+          downloadError: dp.error ?? undefined,
+        };
+      });
+      const updated = { ...prev, clips };
+      setProject(updated);
+      invoke("save_project_data", {
+        rootFolder: settings.rootFolder,
+        project: updated,
+      }).catch(() => {});
+    });
+    return () => { unlisten.then((fn) => fn()); };
+  }, [settings.rootFolder]);
+
+  // ── Staggered auto-download on project open ────────────────────────────
+  const downloadQueueRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (!project) return;
+    const pending = project.clips.filter(
+      (c) => c.downloadStatus === "pending" || c.downloadStatus === "failed",
+    );
+    if (pending.length === 0) return;
+
+    if (downloadQueueRef.current) clearTimeout(downloadQueueRef.current);
+
+    let i = 0;
+    const downloadNext = () => {
+      if (i >= pending.length) return;
+      const clip = pending[i++];
+      invoke("download_clip", {
+        rootFolder: settings.rootFolder,
+        projectName: project.name,
+        clipId: clip.hubspotId,
+        url: clip.link,
+        cookiesBrowser: settings.cookiesBrowser || null,
+        cookiesFile: settings.cookiesFile || null,
+      }).catch(() => {});
+      downloadQueueRef.current = setTimeout(downloadNext, 2500);
+    };
+    downloadQueueRef.current = setTimeout(downloadNext, 500);
+
+    return () => {
+      if (downloadQueueRef.current) clearTimeout(downloadQueueRef.current);
+    };
+  }, [project?.name]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const saveSettings = (next: AppSettings) => {
     setSettings(next);
@@ -544,10 +615,6 @@ function App() {
         >
           <div className="flex items-center justify-between mx-4 mt-2">
             <TabsList className="w-fit">
-              <TabsTrigger value="project">
-                <Download className="mr-1.5 h-4 w-4" />
-                Project
-              </TabsTrigger>
               <TabsTrigger value="search">
                 <Search className="mr-1.5 h-4 w-4" />
                 Search
@@ -627,21 +694,12 @@ function App() {
           </div>
 
           {/* Keep all tabs mounted, toggle visibility with CSS */}
-          <div className={`flex-1 overflow-auto px-4 ${activeTab === "project" ? "" : "hidden"}`}>
-            <TabErrorBoundary name="Project">
-              <ProjectTab
-                settings={settings}
-                project={project}
-                setProject={setProject}
-                removeClip={removeClipFromProject}
-              />
-            </TabErrorBoundary>
-          </div>
           <div className={`flex-1 overflow-auto px-4 ${activeTab === "search" ? "" : "hidden"}`}>
             <TabErrorBoundary name="Search">
               <SearchTab
                 settings={settings}
                 project={project}
+                setProject={setProject}
                 addClip={addClipToProject}
                 removeClip={removeClipFromProject}
               />
@@ -749,13 +807,9 @@ function App() {
                               import("@tauri-apps/plugin-opener").then(({ openUrl }) =>
                                 openUrl(actionUrl)
                               );
-                            } else if (i === 1) {
+                            } else {
                               import("@tauri-apps/plugin-opener").then(({ revealItemInDir }) =>
                                 revealItemInDir(actionUrl)
-                              );
-                            } else {
-                              import("@tauri-apps/plugin-opener").then(({ openPath }) =>
-                                openPath(actionUrl)
                               );
                             }
                           }}

@@ -504,8 +504,9 @@ dependencies = [
 
 [[package]]
 name = "compi-builder"
-version = "0.1.15"
+version = "0.1.16"
 dependencies = [
+ "base64 0.22.1",
  "mp4",
  "once_cell",
  "rand 0.8.5",
