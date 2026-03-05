@@ -406,14 +406,9 @@ export function ClipCard({
               </span>
             )}
             {clip.notes && (
-              <div className="group/notes relative max-w-full">
-                <span className="block truncate rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-white/80 max-w-[8rem]">
-                  {clip.notes}
-                </span>
-                <div className="pointer-events-none absolute bottom-full left-1/2 -translate-x-1/2 mb-1 hidden group-hover/notes:block z-20 w-48 rounded bg-black/90 px-2 py-1.5 text-[11px] leading-snug text-white shadow-lg">
-                  {clip.notes}
-                </div>
-              </div>
+              <span className="block rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-white/80 text-center overflow-hidden whitespace-nowrap text-ellipsis max-w-[8rem] hover:overflow-visible hover:whitespace-normal hover:break-words hover:max-w-full">
+                {clip.notes}
+              </span>
             )}
           </div>
         )}
@@ -484,9 +479,29 @@ export function ClipCard({
             );
           })}
           {clip.tags.length > 3 && (
-            <Badge variant="outline" className="text-[10px] px-1 py-0">
-              +{clip.tags.length - 3}
-            </Badge>
+            <div className="group/moretags relative">
+              <Badge variant="outline" className="text-[10px] px-1 py-0 cursor-default">
+                +{clip.tags.length - 3}
+              </Badge>
+              <div className="pointer-events-none absolute bottom-full left-0 mb-1 hidden group-hover/moretags:flex flex-wrap gap-1 z-20 max-w-40 rounded bg-popover border shadow-md px-2 py-1.5">
+                {clip.tags.slice(3).map((tag) => {
+                  const isSearched = searchTags.some((t) => t.toLowerCase() === tag.toLowerCase());
+                  return (
+                    <Badge
+                      key={tag}
+                      variant="outline"
+                      className={`text-[10px] px-1 py-0 ${
+                        isSearched
+                          ? "border-green-400 bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300 dark:border-green-700"
+                          : ""
+                      }`}
+                    >
+                      {tag}
+                    </Badge>
+                  );
+                })}
+              </div>
+            </div>
           )}
         </div>
 
