@@ -96,7 +96,7 @@ const CLIP_PROPERTIES: &[&str] = &[
     "clip_mix_link_4", "clip_mix_link_5", "clip_mix_link_6",
     "clip_mix_link_7", "clip_mix_link_8", "clip_mix_link_9",
     "clip_mix_link_10", "notes", "creator_license_type", "creator_notes",
-    "fetched_social_thumbnail",
+    "fetched_social_thumbnail", "original_clip",
 ];
 
 /// Fetch the options for the "tags" property (label + internal value)
@@ -378,7 +378,7 @@ async fn fetch_clip_video_projects(
     );
 
     let batch_body = serde_json::json!({
-        "properties": ["name", "tag", "pub_date", "youtube_video_id", "status"],
+        "properties": ["name", "tag", "pub_date", "youtube_video_id", "status", "clips_order"],
         "inputs": project_ids.iter().map(|id| serde_json::json!({ "id": id })).collect::<Vec<_>>()
     });
 
@@ -443,7 +443,7 @@ async fn search_video_projects(
                 "value": query
             }]
         }],
-        "properties": ["name", "tag", "pub_date", "youtube_video_id", "status"],
+        "properties": ["name", "tag", "pub_date", "youtube_video_id", "status", "clips_order"],
         "sorts": [{ "propertyName": "hs_lastmodifieddate", "direction": "DESCENDING" }],
         "limit": 20
     });
@@ -1793,6 +1793,127 @@ async fn update_clip_property(
 }
 
 
+/// Update a single property on a Video Project in HubSpot
+#[tauri::command]
+async fn update_video_project_property(
+    token: String,
+    project_id: String,
+    property_name: String,
+    property_value: String,
+) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let body = serde_json::json!({
+        "properties": {
+            property_name: property_value
+        }
+    });
+
+    let res = client
+        .patch(&format!(
+            "https://api.hubapi.com/crm/v3/objects/{}/{}",
+            VIDEO_PROJECTS_OBJECT_ID, project_id
+        ))
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to update Video Project: {}", e))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("HubSpot update failed ({}): {}", status, text));
+    }
+
+    Ok(())
+}
+
+/// Upload a local video file to HubSpot File Manager and store the URL on the clip's original_clip property
+#[tauri::command]
+async fn upload_clip_video(
+    token: String,
+    clip_id: String,
+    file_path: String,
+) -> Result<String, String> {
+    let path = PathBuf::from(&file_path);
+    if !path.exists() {
+        return Err(format!("File not found: {}", file_path));
+    }
+
+    let file_bytes = std::fs::read(&path)
+        .map_err(|e| format!("Failed to read file: {}", e))?;
+
+    let filename = format!("clip_{}.mp4", clip_id);
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(180))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let file_part = reqwest::multipart::Part::bytes(file_bytes)
+        .file_name(filename.clone())
+        .mime_str("video/mp4")
+        .map_err(|e| e.to_string())?;
+
+    let options = serde_json::json!({
+        "access": "PUBLIC_NOT_INDEXABLE",
+        "overwrite": true,
+        "duplicateValidationStrategy": "NONE",
+        "duplicateValidationScope": "ENTIRE_PORTAL"
+    });
+
+    let form = reqwest::multipart::Form::new()
+        .part("file", file_part)
+        .text("options", options.to_string())
+        .text("folderPath", "/clips")
+        .text("fileName", filename);
+
+    let upload_res = client
+        .post("https://api.hubapi.com/files/v3/files")
+        .bearer_auth(&token)
+        .multipart(form)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to upload video to HubSpot: {}", e))?;
+
+    if !upload_res.status().is_success() {
+        let status = upload_res.status();
+        let text = upload_res.text().await.unwrap_or_default();
+        return Err(format!("HubSpot file upload failed ({}): {}", status, text));
+    }
+
+    let upload_json: serde_json::Value = upload_res.json().await
+        .map_err(|e| format!("Failed to parse upload response: {}", e))?;
+
+    let file_url = upload_json.get("url")
+        .and_then(|v| v.as_str())
+        .ok_or("No URL in upload response")?
+        .to_string();
+
+    let update_body = serde_json::json!({
+        "properties": {
+            "original_clip": file_url
+        }
+    });
+
+    client
+        .patch(&format!(
+            "https://api.hubapi.com/crm/v3/objects/{}/{}",
+            EXTERNAL_CLIPS_OBJECT_ID, clip_id
+        ))
+        .bearer_auth(&token)
+        .json(&update_body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to update clip original_clip: {}", e))?;
+
+    Ok(file_url)
+}
+
 // ── Project Commands ────────────────────────────────────────────────────────
 
 #[tauri::command]
@@ -1855,6 +1976,7 @@ async fn download_clip(
     cookies_file: Option<String>,
     #[allow(unused_variables)]
     force: Option<bool>,
+    hubspot_url: Option<String>,
 ) -> Result<(), String> {
     let clips_dir = PathBuf::from(&root_folder)
         .join(&project_name)
@@ -1878,6 +2000,41 @@ async fn download_clip(
         local_duration: None,
         error: None,
     });
+
+    // Fast path: download from HubSpot CDN if available (already uploaded by another user)
+    if let Some(ref hs_url) = hubspot_url {
+        if !hs_url.is_empty() {
+            let _ = fs::create_dir_all(&clips_dir);
+            let dest = clips_dir.join(format!("{}_hubspot.mp4", &clip_id));
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(180))
+                .build()
+                .map_err(|e| e.to_string())?;
+
+            match client.get(hs_url).send().await {
+                Ok(resp) if resp.status().is_success() => {
+                    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+                    if let Ok(()) = fs::write(&dest, &bytes) {
+                        let rel_path = format!("clips/{}_hubspot.mp4", &clip_id);
+                        let project_dir = PathBuf::from(&root_folder).join(&project_name);
+                        let local_duration = probe_duration(&project_dir.join(&rel_path).to_string_lossy());
+                        let _ = app.emit("download-progress", DownloadProgress {
+                            clip_id,
+                            status: "complete".into(),
+                            progress: Some(100.0),
+                            local_file: Some(rel_path),
+                            local_duration,
+                            error: None,
+                        });
+                        return Ok(());
+                    }
+                }
+                _ => {
+                    eprintln!("[download_clip] HubSpot CDN download failed for {}, falling back to yt-dlp", clip_id);
+                }
+            }
+        }
+    }
 
     let output_template = clips_dir
         .join(format!("{}_%(title).50s.%(ext)s", &clip_id))
@@ -2142,6 +2299,8 @@ pub fn run() {
             upload_clip_thumbnail_base64,
             read_file_base64,
             update_clip_property,
+            update_video_project_property,
+            upload_clip_video,
             fetch_creators_batch,
             create_project,
             load_project,

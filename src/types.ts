@@ -17,6 +17,8 @@ export interface Clip {
   notes?: string;
   licenseType?: string;
   fetchedThumbnail?: string;
+  /** HubSpot CDN URL for the original video file (uploaded after download) */
+  originalClip?: string;
 }
 
 /** A local video project */
@@ -50,6 +52,8 @@ export interface ProjectClip {
   creatorStatus?: string;
   clipMixLinks?: string[];
   availableAskFirst?: boolean;
+  /** HubSpot CDN URL for the original video file */
+  originalClip?: string;
   /** Number of times the user has manually retried downloading this clip */
   retryCount?: number;
 }

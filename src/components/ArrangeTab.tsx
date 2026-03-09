@@ -16,7 +16,7 @@ import {
   arrayMove,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { GripVertical, CheckCircle, StickyNote, Download, FolderOpen, Loader2, Trash2, Maximize2, Minimize2, ImageIcon, RefreshCw, AlertTriangle, CheckCircle2, Copy, ClipboardCheck } from "lucide-react";
+import { GripVertical, CheckCircle, StickyNote, Download, FolderOpen, Loader2, Trash2, Maximize2, Minimize2, ImageIcon, RefreshCw, AlertTriangle, CheckCircle2, Copy, ClipboardCheck, CloudUpload, Cloud } from "lucide-react";
 import { MediaPlayer, MediaProvider, type MediaPlayerInstance } from "@vidstack/react";
 import { defaultLayoutIcons, DefaultVideoLayout } from "@vidstack/react/player/layouts/default";
 import "@vidstack/react/player/styles/default/theme.css";
@@ -85,6 +85,7 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
   const [reportedClipId, setReportedClipId] = useState<string | null>(null);
   const [reporting, setReporting] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
+  const [uploadingClipId, setUploadingClipId] = useState<string | null>(null);
   const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT);
   const isDraggingDivider = useRef(false);
   const dragStartX = useRef(0);
@@ -375,6 +376,24 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
     }
   }, [reporting]);
 
+  const uploadClipToHubSpot = useCallback(async (clip: ProjectClip) => {
+    if (!project || !settings.hubspotToken || !clip.localFile || clip.originalClip) return;
+    setUploadingClipId(clip.hubspotId);
+    try {
+      const absPath = resolveClipPath(settings.rootFolder, project.name, clip.localFile);
+      const hubspotUrl = await invoke<string>("upload_clip_video", {
+        token: settings.hubspotToken,
+        clipId: clip.hubspotId,
+        filePath: absPath,
+      });
+      updateClipField(clip.hubspotId, { originalClip: hubspotUrl });
+    } catch (e) {
+      console.warn("Manual video upload failed:", e);
+    } finally {
+      setUploadingClipId(null);
+    }
+  }, [project, settings, updateClipField]);
+
   if (!project) {
     return (
       <div className="flex h-full items-center justify-center text-muted-foreground">
@@ -410,6 +429,15 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
       rootFolder: settings.rootFolder,
       project: updated,
     }).catch(() => {});
+
+    if (project.hubspotVideoProjectId && settings.hubspotToken) {
+      invoke("update_video_project_property", {
+        token: settings.hubspotToken,
+        projectId: project.hubspotVideoProjectId,
+        propertyName: "clips_order",
+        propertyValue: JSON.stringify(reordered.map((c) => c.hubspotId)),
+      }).catch((e) => console.warn("Order sync failed:", e));
+    }
   };
 
   const formatDuration = (s?: number) => {
@@ -447,6 +475,16 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
       .map((c, i) => ({ ...c, order: i }));
     const updated = { ...project, clips: reordered };
     setProject(updated);
+
+    if (project.hubspotVideoProjectId && settings.hubspotToken) {
+      invoke("update_video_project_property", {
+        token: settings.hubspotToken,
+        projectId: project.hubspotVideoProjectId,
+        propertyName: "clips_order",
+        propertyValue: JSON.stringify(reordered.map((c) => c.hubspotId)),
+      }).catch((e) => console.warn("Order sync failed:", e));
+    }
+
     invoke("save_project_data", {
       rootFolder: settings.rootFolder,
       project: updated,
@@ -583,6 +621,26 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
                 >
                   {copiedLink ? <ClipboardCheck className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
                 </button>
+
+                {ds === "complete" && selectedClip.localFile && settings.hubspotToken && (
+                  selectedClip.originalClip ? (
+                    <span className="flex items-center gap-1 px-1.5 py-0.5 text-[11px] text-green-600" title="Video synced to HubSpot">
+                      <Cloud className="h-3 w-3" />
+                    </span>
+                  ) : uploadingClipId === selectedClip.hubspotId ? (
+                    <span className="flex items-center gap-1 px-1.5 py-0.5 text-[11px] text-blue-500" title="Uploading to HubSpot...">
+                      <CloudUpload className="h-3 w-3 animate-pulse" />
+                    </span>
+                  ) : (
+                    <button
+                      onClick={() => uploadClipToHubSpot(selectedClip)}
+                      className={`${btnClass} text-orange-500 hover:text-orange-600`}
+                      title="Upload video to HubSpot (share with team)"
+                    >
+                      <CloudUpload className="h-3 w-3" />
+                    </button>
+                  )
+                )}
 
                 {retried && isSupabaseConfigured && (
                   reportedClipId === selectedClip.hubspotId ? (

@@ -95,6 +95,7 @@ export interface VideoProjectSummary {
   status: string;
   tag: string;
   pubDate: string;
+  clipsOrder?: string;
 }
 
 export async function searchVideoProjects(
@@ -111,6 +112,7 @@ export async function searchVideoProjects(
     status: r.properties.status ?? "",
     tag: r.properties.tag ?? "",
     pubDate: r.properties.pub_date ?? "",
+    clipsOrder: r.properties.clips_order ?? undefined,
   }));
 }
 
@@ -158,5 +160,6 @@ function parseClip(record: {
     notes: p.creator_notes ?? p.notes ?? undefined,
     licenseType: p.creator_license_type ?? undefined,
     fetchedThumbnail: p.fetched_social_thumbnail ?? undefined,
+    originalClip: p.original_clip ?? undefined,
   };
 }

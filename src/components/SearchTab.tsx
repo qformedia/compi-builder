@@ -137,6 +137,16 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
         rootFolder: settings.rootFolder,
         name: vp.name,
       }).catch(() => {});
+
+      // Use clips_order from HubSpot to restore the correct arrangement
+      const orderMap = new Map<string, number>();
+      if (vp.clipsOrder) {
+        try {
+          const ids = JSON.parse(vp.clipsOrder) as string[];
+          ids.forEach((id, i) => orderMap.set(id, i));
+        } catch { /* invalid JSON, fall back to association order */ }
+      }
+
       const projectClips: ProjectClip[] = clips.map((clip, i) => ({
         hubspotId: clip.id,
         link: clip.link,
@@ -145,8 +155,18 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
         score: clip.score,
         editedDuration: clip.editedDuration,
         downloadStatus: "pending" as const,
-        order: i,
-      }));
+        order: orderMap.get(clip.id) ?? clips.length + i,
+        fetchedThumbnail: clip.fetchedThumbnail,
+        originalClip: clip.originalClip,
+        licenseType: clip.licenseType,
+        notes: clip.notes,
+        creatorId: clip.creatorId,
+        creatorStatus: clip.creatorStatus,
+        clipMixLinks: clip.clipMixLinks,
+        availableAskFirst: clip.availableAskFirst,
+      })).sort((a, b) => a.order - b.order)
+        .map((c, i) => ({ ...c, order: i }));
+
       const proj: Project = {
         name: vp.name,
         createdAt: new Date().toISOString(),

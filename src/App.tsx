@@ -143,6 +143,49 @@ function App() {
   const projectRef = useRef(project);
   projectRef.current = project;
 
+  // ── Video upload queue (sequential, paced for HubSpot API limits) ──────
+  // Each entry stores clipId + the resolved absolute file path so we don't
+  // depend on projectRef having the latest localFile at dequeue time.
+  const uploadQueueRef = useRef<Array<{ clipId: string; filePath: string }>>([]);
+  const uploadRunningRef = useRef(false);
+
+  const processUploadQueue = useCallback(() => {
+    if (uploadRunningRef.current) return;
+    const entry = uploadQueueRef.current.shift();
+    if (!entry) return;
+    const proj = projectRef.current;
+    if (!proj || !settings.hubspotToken) return;
+    const clip = proj.clips.find((c) => c.hubspotId === entry.clipId);
+    if (clip?.originalClip) {
+      setTimeout(processUploadQueue, 100);
+      return;
+    }
+    uploadRunningRef.current = true;
+    invoke<string>("upload_clip_video", {
+      token: settings.hubspotToken,
+      clipId: entry.clipId,
+      filePath: entry.filePath,
+    })
+      .then((hubspotUrl) => {
+        const current = projectRef.current;
+        if (!current) return;
+        const updatedClips = current.clips.map((c) =>
+          c.hubspotId === entry.clipId ? { ...c, originalClip: hubspotUrl } : c,
+        );
+        const updated = { ...current, clips: updatedClips };
+        setProject(updated);
+        invoke("save_project_data", {
+          rootFolder: settings.rootFolder,
+          project: updated,
+        }).catch(() => {});
+      })
+      .catch((e) => console.warn("Video upload to HubSpot failed:", e))
+      .finally(() => {
+        uploadRunningRef.current = false;
+        setTimeout(processUploadQueue, 2000);
+      });
+  }, [settings.hubspotToken, settings.rootFolder]);
+
   useEffect(() => {
     const unlisten = listen<DownloadProgress>("download-progress", (event) => {
       const dp = event.payload;
@@ -164,9 +207,19 @@ function App() {
         rootFolder: settings.rootFolder,
         project: updated,
       }).catch(() => {});
+
+      // Enqueue video upload to HubSpot after successful download
+      if (dp.status === "complete" && dp.localFile && settings.hubspotToken) {
+        const clip = prev.clips.find((c) => c.hubspotId === dp.clipId);
+        if (!clip?.originalClip) {
+          const filePath = `${settings.rootFolder}/${prev.name}/${dp.localFile}`;
+          uploadQueueRef.current.push({ clipId: dp.clipId, filePath });
+          processUploadQueue();
+        }
+      }
     });
     return () => { unlisten.then((fn) => fn()); };
-  }, [settings.rootFolder]);
+  }, [settings.rootFolder, settings.hubspotToken, processUploadQueue]);
 
   // ── Staggered auto-download on project open ────────────────────────────
   const downloadQueueRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -184,6 +237,7 @@ function App() {
     const downloadNext = () => {
       if (i >= pending.length) return;
       const clip = pending[i++];
+      const hasHubSpotVideo = !!clip.originalClip;
       invoke("download_clip", {
         rootFolder: settings.rootFolder,
         projectName: project.name,
@@ -191,14 +245,33 @@ function App() {
         url: clip.link,
         cookiesBrowser: settings.cookiesBrowser || null,
         cookiesFile: settings.cookiesFile || null,
+        hubspotUrl: clip.originalClip || null,
       }).catch(() => {});
-      downloadQueueRef.current = setTimeout(downloadNext, 2500);
+      const delay = hasHubSpotVideo ? 500 : 2500;
+      downloadQueueRef.current = setTimeout(downloadNext, delay);
     };
     downloadQueueRef.current = setTimeout(downloadNext, 500);
 
     return () => {
       if (downloadQueueRef.current) clearTimeout(downloadQueueRef.current);
     };
+  }, [project?.name]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── Auto-upload already-downloaded clips that haven't been synced to HubSpot
+  useEffect(() => {
+    if (!project || !settings.hubspotToken) return;
+    const needUpload = project.clips.filter(
+      (c) => c.downloadStatus === "complete" && c.localFile && !c.originalClip,
+    );
+    if (needUpload.length === 0) return;
+    const queued = new Set(uploadQueueRef.current.map((e) => e.clipId));
+    for (const clip of needUpload) {
+      if (!queued.has(clip.hubspotId) && clip.localFile) {
+        const filePath = `${settings.rootFolder}/${project.name}/${clip.localFile}`;
+        uploadQueueRef.current.push({ clipId: clip.hubspotId, filePath });
+      }
+    }
+    processUploadQueue();
   }, [project?.name]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const saveSettings = (next: AppSettings) => {
@@ -215,10 +288,26 @@ function App() {
     if (!project?.hubspotVideoProjectId) return;
     setSyncing(true);
     try {
-      const hsClips = await fetchVideoProjectClips(
-        settings.hubspotToken,
-        project.hubspotVideoProjectId,
-      );
+      // Fetch clips and VP record (for clips_order) in parallel
+      const [hsClips, vpData] = await Promise.all([
+        fetchVideoProjectClips(settings.hubspotToken, project.hubspotVideoProjectId),
+        invoke<{ results: Array<{ id: string; properties: Record<string, string | null> }> }>(
+          "fetch_video_projects_by_ids",
+          { token: settings.hubspotToken, projectIds: [project.hubspotVideoProjectId] },
+        ),
+      ]);
+
+      // Parse clips_order from the VP record
+      const vpRecord = vpData.results?.[0];
+      const clipsOrderStr = vpRecord?.properties?.clips_order;
+      const orderMap = new Map<string, number>();
+      if (clipsOrderStr) {
+        try {
+          const ids = JSON.parse(clipsOrderStr) as string[];
+          ids.forEach((id, i) => orderMap.set(id, i));
+        } catch { /* invalid JSON, keep local order */ }
+      }
+
       const hsClipIds = new Set(hsClips.map((c) => c.id));
       const localClipIds = new Set(project.clips.map((c) => c.hubspotId));
 
@@ -232,10 +321,11 @@ function App() {
           score: c.score,
           editedDuration: c.editedDuration,
           downloadStatus: "pending" as const,
-          order: project.clips.length + i,
+          order: orderMap.get(c.id) ?? project.clips.length + i,
           licenseType: c.licenseType,
           notes: c.notes,
           fetchedThumbnail: c.fetchedThumbnail,
+          originalClip: c.originalClip,
           creatorId: c.creatorId,
           creatorStatus: c.creatorStatus,
           clipMixLinks: c.clipMixLinks,
@@ -257,13 +347,25 @@ function App() {
             licenseType: hs.licenseType,
             notes: hs.notes,
             fetchedThumbnail: hs.fetchedThumbnail,
+            originalClip: hs.originalClip ?? c.originalClip,
             creatorId: hs.creatorId,
             creatorStatus: hs.creatorStatus,
             clipMixLinks: hs.clipMixLinks,
             availableAskFirst: hs.availableAskFirst,
           };
         });
-      const allClips = [...keptClips, ...newClips].map((c, i) => ({ ...c, order: i }));
+
+      // If we have a clips_order, use it for all clips; otherwise keep local order for kept clips
+      let allClips = [...keptClips, ...newClips];
+      if (orderMap.size > 0) {
+        allClips.sort((a, b) => {
+          const oa = orderMap.get(a.hubspotId) ?? Infinity;
+          const ob = orderMap.get(b.hubspotId) ?? Infinity;
+          return oa - ob;
+        });
+      }
+      allClips = allClips.map((c, i) => ({ ...c, order: i }));
+
       const updated = { ...project, clips: allClips };
       setProject(updated);
       await invoke("save_project_data", {
@@ -271,7 +373,7 @@ function App() {
         project: updated,
       });
 
-      // Auto-download new clips
+      // Auto-download new clips (prefer HubSpot CDN)
       for (const clip of newClips) {
         invoke("download_clip", {
           rootFolder: settings.rootFolder,
@@ -280,6 +382,7 @@ function App() {
           url: clip.link,
           cookiesBrowser: settings.cookiesBrowser || null,
           cookiesFile: settings.cookiesFile || null,
+          hubspotUrl: clip.originalClip || null,
         }).catch(() => {});
       }
     } catch (e) {
@@ -306,6 +409,7 @@ function App() {
       licenseType: clip.licenseType,
       notes: clip.notes,
       fetchedThumbnail: clip.fetchedThumbnail,
+      originalClip: clip.originalClip,
       creatorId: clip.creatorId,
       creatorStatus: clip.creatorStatus,
       clipMixLinks: clip.clipMixLinks,
@@ -320,16 +424,22 @@ function App() {
       project: updated,
     }).catch(() => {});
 
-    // Associate in HubSpot (fire and forget, don't block)
+    // Associate in HubSpot + sync order (fire and forget)
     if (project.hubspotVideoProjectId) {
       invoke("associate_clips_to_project", {
         token: settings.hubspotToken,
         projectId: project.hubspotVideoProjectId,
         clipIds: [clip.id],
       }).catch((e) => console.warn("HubSpot association failed:", e));
+      invoke("update_video_project_property", {
+        token: settings.hubspotToken,
+        projectId: project.hubspotVideoProjectId,
+        propertyName: "clips_order",
+        propertyValue: JSON.stringify(updated.clips.map((c) => c.hubspotId)),
+      }).catch((e) => console.warn("Order sync failed:", e));
     }
 
-    // Auto-download
+    // Auto-download (prefer HubSpot CDN if available)
     invoke("download_clip", {
       rootFolder: settings.rootFolder,
       projectName: project.name,
@@ -337,6 +447,7 @@ function App() {
       url: clip.link,
       cookiesBrowser: settings.cookiesBrowser || null,
       cookiesFile: settings.cookiesFile || null,
+      hubspotUrl: clip.originalClip || null,
     }).catch(() => {});
   };
 
@@ -355,13 +466,19 @@ function App() {
       project: updated,
     }).catch(() => {});
 
-    // Disassociate in HubSpot (fire and forget)
+    // Disassociate in HubSpot + sync order (fire and forget)
     if (project.hubspotVideoProjectId) {
       invoke("disassociate_clip_from_project", {
         token: settings.hubspotToken,
         projectId: project.hubspotVideoProjectId,
         clipIds: [hubspotId],
       }).catch((e) => console.warn("HubSpot disassociation failed:", e));
+      invoke("update_video_project_property", {
+        token: settings.hubspotToken,
+        projectId: project.hubspotVideoProjectId,
+        propertyName: "clips_order",
+        propertyValue: JSON.stringify(updated.clips.map((c) => c.hubspotId)),
+      }).catch((e) => console.warn("Order sync failed:", e));
     }
   };
 
