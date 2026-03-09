@@ -526,10 +526,10 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
           const isChinese = ["Douyin", "Bilibili", "Xiaohongshu"].includes(platform);
           const isXiaohongshu = platform === "Xiaohongshu";
           const retried = (selectedClip.retryCount ?? 0) >= 1;
-          const btnClass = "flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted cursor-pointer transition-colors";
+          const btnClass = "flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-muted cursor-pointer transition-colors";
 
           return (
-            <div className="flex flex-col gap-1 py-1.5">
+            <div className="flex flex-col gap-0.5 border-b py-1">
               {/* Error message (failed clips only) */}
               {ds === "failed" && (
                 <p className="px-2 text-[10px] text-destructive leading-snug">
@@ -542,7 +542,7 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
               {/* Action buttons row */}
               <div className="flex items-center gap-1 flex-wrap">
                 {ds === "downloading" ? (
-                  <span className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-muted-foreground">
+                  <span className="flex items-center gap-1 px-1.5 py-0.5 text-[11px] text-muted-foreground">
                     <Loader2 className="h-3 w-3 animate-spin" /> Downloading...
                   </span>
                 ) : ds === "failed" ? (
@@ -586,7 +586,7 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
 
                 {retried && isSupabaseConfigured && (
                   reportedClipId === selectedClip.hubspotId ? (
-                    <span className="flex items-center gap-1 px-2 py-1 text-[11px] text-green-600">
+                    <span className="flex items-center gap-1 px-1.5 py-0.5 text-[11px] text-green-600">
                       <CheckCircle2 className="h-3 w-3" /> Reported
                     </span>
                   ) : (
