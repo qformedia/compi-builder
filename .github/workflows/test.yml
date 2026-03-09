@@ -30,6 +30,20 @@ jobs:
           workspaces: "./src-tauri -> target"
           cache-on-failure: true
 
+      - name: Create sidecar placeholder (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p src-tauri/binaries
+          touch src-tauri/binaries/yt-dlp-aarch64-apple-darwin
+          touch src-tauri/binaries/yt-dlp-x86_64-apple-darwin
+
+      - name: Create sidecar placeholder (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          New-Item -ItemType Directory -Force -Path src-tauri\binaries
+          New-Item -ItemType File -Force -Path src-tauri\binaries\yt-dlp-x86_64-pc-windows-msvc.exe
+        shell: pwsh
+
       - name: Run Rust tests
         working-directory: src-tauri
         run: cargo test --lib
