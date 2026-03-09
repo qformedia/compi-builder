@@ -13,6 +13,20 @@ globalThis.IntersectionObserver = class {
   constructor(_cb: any, _opts?: any) {}
 } as any;
 
+// jsdom localStorage polyfill (some vitest environments disable it)
+if (typeof localStorage === "undefined" || typeof localStorage.setItem === "undefined") {
+  const storage: Record<string, string> = {};
+  Object.defineProperty(globalThis, "localStorage", {
+    value: {
+      setItem: (k: string, v: string) => { storage[k] = v; },
+      getItem: (k: string) => storage[k] ?? null,
+      removeItem: (k: string) => { delete storage[k]; },
+      clear: () => { Object.keys(storage).forEach((k) => delete storage[k]); },
+    },
+    writable: true,
+  });
+}
+
 // Mock Tauri APIs — not available in jsdom
 vi.mock("@tauri-apps/api/core", () => ({
   invoke: vi.fn(),

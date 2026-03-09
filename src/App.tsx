@@ -376,13 +376,8 @@ function App() {
     setCsvPath(undefined);
     setClipsDir(undefined);
 
-    const completedClips = project.clips.filter(
-      (c) => c.downloadStatus === "complete" && c.localFile,
-    );
-
     // All clips sorted by order — used for CSV (all rows) and zip (with null gaps)
     const allClipsSorted = [...project.clips].sort((a, b) => a.order - b.order);
-
     const updateStep = (idx: 0 | 1 | 2, status: StepStatus, error?: string) => {
       setStepStatuses((prev) => {
         const next = [...prev] as [StepStatus, StepStatus, StepStatus];
