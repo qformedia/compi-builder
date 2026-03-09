@@ -710,6 +710,7 @@ function App() {
                 isActive={activeTab === "arrange"}
                 removeClip={removeClipFromProject}
                 thumbWidth={thumbWidth}
+                suppressAutoPlay={finishDialogOpen}
               />
             </TabErrorBoundary>
           </div>

@@ -43,6 +43,9 @@ interface Props {
   isActive: boolean;
   removeClip?: (hubspotId: string) => void;
   thumbWidth?: number;
+  /** When true, the player will not autoplay even if the clip key changes.
+   *  Used to prevent unwanted playback when Finish Video renames localFiles. */
+  suppressAutoPlay?: boolean;
 }
 
 function toCardData(clip: ProjectClip): ClipCardData {
@@ -72,7 +75,7 @@ const LEFT_MIN = 180;
 const LEFT_MAX = 560;
 const LEFT_DEFAULT = 288;
 
-export function ArrangeTab({ settings, project, setProject, isActive, removeClip, thumbWidth = THUMB_DEFAULT }: Props) {
+export function ArrangeTab({ settings, project, setProject, isActive, removeClip, thumbWidth = THUMB_DEFAULT, suppressAutoPlay = false }: Props) {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [playerError, setPlayerError] = useState<string | null>(null);
   const playerRef = useRef<MediaPlayerInstance>(null);
@@ -420,7 +423,7 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
         ref={playerRef}
         key={selectedClip.localFile}
         src={convertFileSrc(resolveClipPath(settings.rootFolder, project.name, selectedClip.localFile!), "localfile")}
-        autoPlay={isActive}
+        autoPlay={isActive && !suppressAutoPlay}
         onEnded={handleNextClip}
         onError={(detail) => {
           const msg = detail instanceof Event

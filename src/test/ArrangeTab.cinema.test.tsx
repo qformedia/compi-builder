@@ -21,7 +21,11 @@ import { render, screen, fireEvent, act } from "@testing-library/react";
 // @vidstack/react reads localStorage at module init time; mock it entirely.
 vi.mock("@vidstack/react", () => ({
   MediaPlayer: ({ children, ...props }: any) => (
-    <div data-testid="media-player" data-src={props.src ?? ""}>
+    <div
+      data-testid="media-player"
+      data-src={props.src ?? ""}
+      data-autoplay={String(props.autoPlay ?? false)}
+    >
       {children}
     </div>
   ),
@@ -125,7 +129,7 @@ describe("ArrangeTab — cinema mode: single MediaPlayer instance invariant", ()
     vi.clearAllMocks();
   });
 
-  it("renders exactly one MediaPlayer in normal mode", () => {
+  it("renders exactly one MediaPlayer in normal mode with autoPlay enabled", () => {
     render(
       <ArrangeTab
         settings={settings}
@@ -137,6 +141,7 @@ describe("ArrangeTab — cinema mode: single MediaPlayer instance invariant", ()
     );
 
     expect(screen.queryAllByTestId("media-player")).toHaveLength(1);
+    expect(screen.getByTestId("media-player").getAttribute("data-autoplay")).toBe("true");
   });
 
   it("renders exactly one MediaPlayer when cinema mode is open", async () => {
@@ -210,6 +215,45 @@ describe("ArrangeTab — cinema mode: single MediaPlayer instance invariant", ()
     expect(screen.queryAllByTestId("media-player")).toHaveLength(1);
     expect(screen.queryAllByTitle("Exit cinema mode")).toHaveLength(0);
     expect(screen.getByTitle("Cinema mode (16:9)")).toBeTruthy();
+  });
+
+  it("does not autoplay when suppressAutoPlay is true (Finish Video rename scenario)", () => {
+    const { rerender } = render(
+      <ArrangeTab
+        settings={settings}
+        project={projectWithDownloadedClip}
+        setProject={noop}
+        isActive={true}
+        removeClip={noop}
+        suppressAutoPlay={false}
+      />,
+    );
+
+    // Simulate what Finish Video does: renames localFile, causing key change
+    // while suppressAutoPlay is true (finish dialog is open)
+    const renamedProject: Project = {
+      ...projectWithDownloadedClip,
+      clips: [{
+        ...projectWithDownloadedClip.clips[0],
+        localFile: "clips/1 - clip1_video.mp4",  // renamed by order_and_zip_clips
+      }],
+    };
+
+    rerender(
+      <ArrangeTab
+        settings={settings}
+        project={renamedProject}
+        setProject={noop}
+        isActive={true}
+        removeClip={noop}
+        suppressAutoPlay={true}
+      />,
+    );
+
+    // Player remounted due to key change, but autoPlay must be false
+    const player = screen.getByTestId("media-player");
+    expect(player.getAttribute("data-src")).toContain("1 - clip1_video.mp4");
+    expect(player.getAttribute("data-autoplay")).toBe("false");
   });
 
   it("renders no MediaPlayer when the clip is not yet downloaded", () => {
