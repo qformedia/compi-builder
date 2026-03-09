@@ -195,6 +195,7 @@ pub(crate) fn detect_platform(url: &str) -> &str {
     else if url.contains("youtube.com") || url.contains("youtu.be") { "YouTube" }
     else if url.contains("bilibili.com") { "Bilibili" }
     else if url.contains("xiaohongshu.com") { "Xiaohongshu" }
+    else if url.contains("kuaishou.com") { "Kuaishou" }
     else { "this platform" }
 }
 
@@ -240,6 +241,12 @@ pub(crate) fn friendly_download_error(stderr: &str, url: &str, cookies_browser: 
     }
     if lower.contains("urlopen error") || lower.contains("connection") {
         return "Network error. Check your internet connection.".into();
+    }
+    if lower.contains("unsupported url") {
+        return format!(
+            "{} links can't be downloaded automatically. Use KuKuTool or import the file manually.",
+            platform
+        );
     }
 
     stderr

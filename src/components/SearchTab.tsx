@@ -117,6 +117,17 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
     }
   };
 
+  useEffect(() => {
+    if (!hsQuery.trim()) {
+      setHsResults([]);
+      return;
+    }
+    const timer = setTimeout(() => {
+      searchHubSpotProjects();
+    }, 400);
+    return () => clearTimeout(timer);
+  }, [hsQuery]);
+
   const openFromHubSpot = async (vp: VideoProjectSummary) => {
     setHsOpening(vp.id);
     setProjectError(undefined);
@@ -333,7 +344,6 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
               placeholder="Search by name..."
               value={hsQuery}
               onChange={(e) => setHsQuery(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && searchHubSpotProjects()}
             />
             <Button onClick={searchHubSpotProjects} disabled={!hsQuery.trim() || hsSearching} variant="outline">
               {hsSearching ? <Loader2 className="h-4 w-4 animate-spin" /> : <SearchIcon className="h-4 w-4" />}

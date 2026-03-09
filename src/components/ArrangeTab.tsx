@@ -523,7 +523,7 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
         {selectedClip && (() => {
           const ds = selectedClip.downloadStatus;
           const platform = getPlatform(selectedClip.link);
-          const isChinese = ["Douyin", "Bilibili", "Xiaohongshu"].includes(platform);
+          const isChinese = ["Douyin", "Bilibili", "Xiaohongshu", "Kuaishou"].includes(platform);
           const isXiaohongshu = platform === "Xiaohongshu";
           const retried = (selectedClip.retryCount ?? 0) >= 1;
           const btnClass = "flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-muted cursor-pointer transition-colors";
