@@ -510,21 +510,17 @@ function App() {
     await Promise.all([step1, step2, step3]);
   };
 
-  // Arrange tab stats
+  // Arrange tab stats — use editedDuration (from HubSpot) or localDuration (probed from file)
   const arrangeStats = useMemo(() => {
-    if (!project) return null;
-    const completed = project.clips.filter(
-      (c) => c.downloadStatus === "complete" && c.localFile,
-    );
-    if (completed.length === 0) return null;
-    const totalSec = completed.reduce(
+    if (!project || project.clips.length === 0) return null;
+    const totalSec = project.clips.reduce(
       (sum, c) => sum + (c.editedDuration ?? c.localDuration ?? 0),
       0,
     );
     const m = Math.floor(totalSec / 60);
     const s = Math.round(totalSec % 60);
     return {
-      count: completed.length,
+      count: project.clips.length,
       duration: `${m}:${s.toString().padStart(2, "0")}`,
     };
   }, [project]);

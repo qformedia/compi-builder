@@ -21,14 +21,15 @@ pub struct ProjectClip {
     pub creator_name: String,
     pub tags: Vec<String>,
     pub score: Option<String>,
-    #[serde(rename = "editedDuration")]
+    #[serde(rename = "editedDuration", default)]
     pub edited_duration: Option<f64>,
-    #[serde(rename = "localDuration")]
+    #[serde(rename = "localDuration", default)]
     pub local_duration: Option<f64>,
-    #[serde(rename = "localFile")]
+    #[serde(rename = "localFile", default)]
     pub local_file: Option<String>,
-    #[serde(rename = "downloadStatus")]
+    #[serde(rename = "downloadStatus", default)]
     pub download_status: String,
+    #[serde(default)]
     pub order: usize,
     #[serde(rename = "licenseType", default)]
     pub license_type: Option<String>,
@@ -1516,6 +1517,40 @@ fn apply_windows_cookie_workaround(args: &mut Vec<String>) {
     args[browser_idx + 1] = format!("{}:{}", browser_name, temp_profile.display());
 }
 
+/// macOS .app bundles don't inherit the user's shell PATH. Build an augmented
+/// PATH that includes well-known Homebrew directories so that yt-dlp (and any
+/// runtimes it spawns, like deno for YouTube's n-challenge) can be found.
+#[cfg(target_os = "macos")]
+fn augmented_path() -> String {
+    let extra = ["/opt/homebrew/bin", "/usr/local/bin"];
+    let current = std::env::var("PATH").unwrap_or_default();
+    let mut parts: Vec<&str> = extra.to_vec();
+    if !current.is_empty() {
+        parts.push(&current);
+    }
+    parts.join(":")
+}
+
+/// Resolve the system-installed yt-dlp path, checking common locations that may
+/// not be in PATH when launched as a macOS .app bundle.
+fn find_system_ytdlp() -> Option<std::path::PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        let extra_paths = [
+            "/opt/homebrew/bin/yt-dlp",
+            "/usr/local/bin/yt-dlp",
+        ];
+        for p in &extra_paths {
+            let path = std::path::PathBuf::from(p);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
+
+    which::which("yt-dlp").ok()
+}
+
 /// Run yt-dlp with args, trying bundled sidecar first then system PATH as fallback
 async fn run_ytdlp(app: &AppHandle, args: &[String]) -> Result<YtDlpOutput, String> {
     #[allow(unused_mut)]
@@ -1524,20 +1559,41 @@ async fn run_ytdlp(app: &AppHandle, args: &[String]) -> Result<YtDlpOutput, Stri
     #[cfg(target_os = "windows")]
     apply_windows_cookie_workaround(&mut args);
 
-    // Try bundled sidecar first
-    if let Ok(cmd) = app.shell().sidecar("binaries/yt-dlp") {
-        if let Ok(out) = cmd.args(&args).output().await {
-            return Ok(YtDlpOutput {
-                success: out.status.success(),
-                stdout: out.stdout,
-                stderr: out.stderr,
-            });
+    // Try bundled sidecar first.
+    // yt-dlp may spawn helper runtimes (e.g. deno for YouTube's n-challenge),
+    // so we inject an augmented PATH that includes Homebrew directories.
+    match app.shell().sidecar("binaries/yt-dlp") {
+        Ok(cmd) => {
+            #[cfg(target_os = "macos")]
+            let cmd = cmd.env("PATH", augmented_path());
+            match cmd.args(&args).output().await {
+                Ok(out) => {
+                    return Ok(YtDlpOutput {
+                        success: out.status.success(),
+                        stdout: out.stdout,
+                        stderr: out.stderr,
+                    });
+                }
+                Err(e) => {
+                    eprintln!("[yt-dlp] sidecar execution failed: {e}");
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("[yt-dlp] sidecar not available: {e}");
         }
     }
 
-    // Fallback: system-installed yt-dlp (works in dev mode)
-    let mut cmd = tokio::process::Command::new("yt-dlp");
+    // Fallback: system-installed yt-dlp (works in dev mode).
+    // macOS .app bundles don't inherit the user's shell PATH, so we probe
+    // well-known Homebrew locations before falling back to bare PATH lookup.
+    let ytdlp_path = find_system_ytdlp()
+        .ok_or_else(|| "yt-dlp is not installed. Install it with: brew install yt-dlp".to_string())?;
+
+    let mut cmd = tokio::process::Command::new(&ytdlp_path);
     cmd.args(&args);
+    #[cfg(target_os = "macos")]
+    cmd.env("PATH", augmented_path());
     #[cfg(target_os = "windows")]
     {
         #[allow(unused_imports)]
@@ -1547,13 +1603,7 @@ async fn run_ytdlp(app: &AppHandle, args: &[String]) -> Result<YtDlpOutput, Stri
     let out = cmd
         .output()
         .await
-        .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                "yt-dlp is not installed. Install it with: brew install yt-dlp".into()
-            } else {
-                format!("Failed to run yt-dlp: {}", e)
-            }
-        })?;
+        .map_err(|e| format!("Failed to run yt-dlp at {}: {}", ytdlp_path.display(), e))?;
 
     Ok(YtDlpOutput {
         success: out.status.success(),
@@ -2080,11 +2130,22 @@ fn save_project(folder: &PathBuf, project: &Project) -> Result<(), String> {
 
 /// Get duration of a local video file by reading MP4 headers (no external binary needed).
 fn probe_duration(path: &str) -> Option<f64> {
-    let file = fs::File::open(path).ok()?;
+    let file = match fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("[probe_duration] cannot open {path}: {e}");
+            return None;
+        }
+    };
     let size = file.metadata().ok()?.len();
     let reader = BufReader::new(file);
-    let mp4 = mp4::Mp4Reader::read_header(reader, size).ok()?;
-    Some(mp4.duration().as_secs_f64())
+    match mp4::Mp4Reader::read_header(reader, size) {
+        Ok(mp4) => Some(mp4.duration().as_secs_f64()),
+        Err(e) => {
+            eprintln!("[probe_duration] failed to parse MP4 headers for {path}: {e}");
+            None
+        }
+    }
 }
 
 /// Find a downloaded file by clip ID prefix. Returns a **relative** path like "clips/ID_title.mp4".
