@@ -16,7 +16,7 @@ import {
   arrayMove,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { GripVertical, CheckCircle, StickyNote, Download, FolderOpen, Loader2, Trash2, Maximize2, Minimize2, ImageIcon, RefreshCw, AlertTriangle, CheckCircle2 } from "lucide-react";
+import { GripVertical, CheckCircle, StickyNote, Download, FolderOpen, Loader2, Trash2, Maximize2, Minimize2, ImageIcon, RefreshCw, AlertTriangle, CheckCircle2, Copy, ClipboardCheck } from "lucide-react";
 import { MediaPlayer, MediaProvider, type MediaPlayerInstance } from "@vidstack/react";
 import { defaultLayoutIcons, DefaultVideoLayout } from "@vidstack/react/player/layouts/default";
 import "@vidstack/react/player/styles/default/theme.css";
@@ -84,6 +84,7 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
   const [cinemaMode, setCinemaMode] = useState(false);
   const [reportedClipId, setReportedClipId] = useState<string | null>(null);
   const [reporting, setReporting] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
   const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT);
   const isDraggingDivider = useRef(false);
   const dragStartX = useRef(0);
@@ -569,6 +570,19 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
                     KuKuTool ↗
                   </button>
                 )}
+
+                <button
+                  onClick={() => {
+                    navigator.clipboard.writeText(selectedClip.link).then(() => {
+                      setCopiedLink(true);
+                      setTimeout(() => setCopiedLink(false), 2000);
+                    });
+                  }}
+                  className={btnClass}
+                  title="Copy clip link"
+                >
+                  {copiedLink ? <ClipboardCheck className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                </button>
 
                 {retried && isSupabaseConfigured && (
                   reportedClipId === selectedClip.hubspotId ? (
