@@ -82,6 +82,14 @@ vi.mock("@tauri-apps/plugin-opener", () => ({
   revealItemInDir: vi.fn(),
 }));
 
+// Supabase
+vi.mock("@/lib/supabase", () => ({
+  isSupabaseConfigured: true,
+  reportDownloadIssue: vi.fn(() => Promise.resolve()),
+  submitFeedback: vi.fn(() => Promise.resolve()),
+  uploadFeedbackScreenshot: vi.fn(() => Promise.resolve("")),
+}));
+
 // ---------------------------------------------------------------------------
 // Imports after mocks
 // ---------------------------------------------------------------------------
@@ -277,5 +285,90 @@ describe("ArrangeTab — cinema mode: single MediaPlayer instance invariant", ()
     );
 
     expect(screen.queryAllByTestId("media-player")).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Action bar tests
+// ---------------------------------------------------------------------------
+
+describe("ArrangeTab — clip action bar", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("shows Re-download and Browse for a completed clip", () => {
+    render(
+      <ArrangeTab
+        settings={settings}
+        project={projectWithDownloadedClip}
+        setProject={noop}
+        isActive={true}
+        removeClip={noop}
+      />,
+    );
+
+    expect(screen.getByTitle("Re-download clip")).toBeTruthy();
+    expect(screen.getByTitle("Import a local video file")).toBeTruthy();
+  });
+
+  it("shows Download and Browse for a pending clip", () => {
+    const pendingProject: Project = {
+      ...projectWithDownloadedClip,
+      clips: [{
+        ...projectWithDownloadedClip.clips[0],
+        downloadStatus: "pending",
+        localFile: undefined,
+      }],
+    };
+
+    render(
+      <ArrangeTab
+        settings={settings}
+        project={pendingProject}
+        setProject={noop}
+        isActive={true}
+        removeClip={noop}
+      />,
+    );
+
+    expect(screen.getByTitle("Download clip")).toBeTruthy();
+    expect(screen.getByTitle("Import a local video file")).toBeTruthy();
+  });
+
+  it("hides Report button when retryCount is 0", () => {
+    render(
+      <ArrangeTab
+        settings={settings}
+        project={projectWithDownloadedClip}
+        setProject={noop}
+        isActive={true}
+        removeClip={noop}
+      />,
+    );
+
+    expect(screen.queryByTitle("Report this download issue")).toBeNull();
+  });
+
+  it("shows Report button when retryCount >= 1", () => {
+    const retriedProject: Project = {
+      ...projectWithDownloadedClip,
+      clips: [{
+        ...projectWithDownloadedClip.clips[0],
+        retryCount: 1,
+      }],
+    };
+
+    render(
+      <ArrangeTab
+        settings={settings}
+        project={retriedProject}
+        setProject={noop}
+        isActive={true}
+        removeClip={noop}
+      />,
+    );
+
+    expect(screen.getByTitle("Report this download issue")).toBeTruthy();
   });
 });

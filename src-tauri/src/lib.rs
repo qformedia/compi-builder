@@ -54,6 +54,8 @@ pub struct ProjectClip {
     pub clip_mix_links: Option<Vec<String>>,
     #[serde(rename = "availableAskFirst", default)]
     pub available_ask_first: Option<bool>,
+    #[serde(rename = "retryCount", default)]
+    pub retry_count: Option<u32>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

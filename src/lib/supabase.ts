@@ -47,3 +47,40 @@ export async function submitFeedback(payload: FeedbackPayload) {
   const { error } = await client.from("feedback").insert(payload);
   if (error) throw error;
 }
+
+export interface DownloadIssueInfo {
+  clipId: string;
+  clipUrl: string;
+  platform: string;
+  downloadStatus: string;
+  localFile?: string;
+  downloadError?: string;
+  retryCount: number;
+  reporterName?: string;
+}
+
+export async function reportDownloadIssue(info: DownloadIssueInfo) {
+  const description = [
+    `URL: ${info.clipUrl}`,
+    `Platform: ${info.platform}`,
+    `Status: ${info.downloadStatus}`,
+    `File: ${info.localFile ?? "(none)"}`,
+    `Error: ${info.downloadError ?? "(none)"}`,
+    `Retry count: ${info.retryCount}`,
+    `OS: ${navigator.userAgent}`,
+    `App: v${__APP_VERSION__}`,
+  ].join("\n");
+
+  const payload: FeedbackPayload = {
+    type: "bug",
+    title: `Download issue: ${info.clipId}`,
+    description,
+    importance: "important",
+    reporter_name: info.reporterName || undefined,
+    screenshots: [],
+    app_version: __APP_VERSION__,
+    os_info: navigator.userAgent,
+  };
+
+  await submitFeedback(payload);
+}

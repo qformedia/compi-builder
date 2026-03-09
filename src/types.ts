@@ -50,6 +50,8 @@ export interface ProjectClip {
   creatorStatus?: string;
   clipMixLinks?: string[];
   availableAskFirst?: boolean;
+  /** Number of times the user has manually retried downloading this clip */
+  retryCount?: number;
 }
 
 /** Resolve a relative localFile path to an absolute path.

@@ -16,7 +16,7 @@ import {
   arrayMove,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { GripVertical, CheckCircle, StickyNote, Download, FolderOpen, Loader2, Trash2, Maximize2, Minimize2, ImageIcon } from "lucide-react";
+import { GripVertical, CheckCircle, StickyNote, Download, FolderOpen, Loader2, Trash2, Maximize2, Minimize2, ImageIcon, RefreshCw, AlertTriangle, CheckCircle2 } from "lucide-react";
 import { MediaPlayer, MediaProvider, type MediaPlayerInstance } from "@vidstack/react";
 import { defaultLayoutIcons, DefaultVideoLayout } from "@vidstack/react/player/layouts/default";
 import "@vidstack/react/player/styles/default/theme.css";
@@ -32,6 +32,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
+import { isSupabaseConfigured, reportDownloadIssue } from "@/lib/supabase";
 import { resolveClipPath } from "@/types";
 import type { AppSettings, Project, ProjectClip } from "@/types";
 import type { ClipCardData } from "@/components/ClipCard";
@@ -81,6 +82,8 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
   const playerRef = useRef<MediaPlayerInstance>(null);
   const thumbCache = useRef(new Map<string, string | null>());
   const [cinemaMode, setCinemaMode] = useState(false);
+  const [reportedClipId, setReportedClipId] = useState<string | null>(null);
+  const [reporting, setReporting] = useState(false);
   const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT);
   const isDraggingDivider = useRef(false);
   const dragStartX = useRef(0);
@@ -288,13 +291,15 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
 
   const downloadClip = useCallback(async (clip: ProjectClip, force = false) => {
     if (!project) return;
+    const updates: Partial<ProjectClip> = {
+      retryCount: (clip.retryCount ?? 0) + (force ? 1 : 0),
+    };
     if (force) {
-      updateClipField(clip.hubspotId, {
-        downloadStatus: "pending",
-        localFile: undefined,
-        localDuration: undefined,
-      });
+      updates.downloadStatus = "pending";
+      updates.localFile = undefined;
+      updates.localDuration = undefined;
     }
+    updateClipField(clip.hubspotId, updates);
     try {
       await invoke("download_clip", {
         rootFolder: settings.rootFolder,
@@ -345,6 +350,28 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
       console.error("Import failed:", e);
     }
   }, [project, settings, setProject]);
+
+  const handleReportIssue = useCallback(async (clip: ProjectClip) => {
+    if (!isSupabaseConfigured || reporting) return;
+    setReporting(true);
+    try {
+      await reportDownloadIssue({
+        clipId: clip.hubspotId,
+        clipUrl: clip.link,
+        platform: getPlatform(clip.link),
+        downloadStatus: clip.downloadStatus,
+        localFile: clip.localFile,
+        downloadError: clip.downloadError,
+        retryCount: clip.retryCount ?? 0,
+      });
+      setReportedClipId(clip.hubspotId);
+      setTimeout(() => setReportedClipId(null), 3000);
+    } catch (e) {
+      console.error("Report failed:", e);
+    } finally {
+      setReporting(false);
+    }
+  }, [reporting]);
 
   if (!project) {
     return (
@@ -456,27 +483,16 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
     </>
   ) : selectedClip ? (
     <div className="flex h-full flex-col items-center justify-center gap-3">
-      <p className="text-sm text-white/40">
-        {selectedClip.downloadStatus === "downloading" ? "Downloading..." : "Clip not downloaded yet"}
-      </p>
-      {selectedClip.downloadStatus === "downloading" && (
-        <Loader2 className="h-6 w-6 animate-spin text-white/40" />
+      {selectedClip.downloadStatus === "downloading" ? (
+        <>
+          <Loader2 className="h-6 w-6 animate-spin text-white/40" />
+          <p className="text-sm text-white/40">Downloading...</p>
+        </>
+      ) : selectedClip.downloadStatus === "failed" ? (
+        <p className="text-sm text-white/40">Download failed — use the buttons below to retry</p>
+      ) : (
+        <p className="text-sm text-white/40">Clip not downloaded yet</p>
       )}
-      <div className="flex gap-2">
-        <button
-          onClick={() => downloadClip(selectedClip)}
-          className="flex items-center gap-1.5 rounded-md bg-white/10 px-3 py-1.5 text-xs text-white hover:bg-white/20 cursor-pointer"
-        >
-          <Download className="h-3.5 w-3.5" />
-          {selectedClip.downloadStatus === "downloading" ? "Retry" : "Download"}
-        </button>
-        <button
-          onClick={() => importClipFile(selectedClip)}
-          className="flex items-center gap-1.5 rounded-md bg-white/10 px-3 py-1.5 text-xs text-white hover:bg-white/20 cursor-pointer"
-        >
-          <FolderOpen className="h-3.5 w-3.5" /> Browse
-        </button>
-      </div>
     </div>
   ) : (
     <div className="flex h-full items-center justify-center">
@@ -492,26 +508,64 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
             the cinema overlay is the sole live <video> element. */}
         <div className="relative aspect-[9/16] w-full rounded-lg bg-black overflow-hidden flex-shrink-0">
           {!cinemaMode && playerContent}
-          {/* Player overlay buttons */}
-          <div className="absolute top-1.5 right-1.5 z-10 flex items-center gap-1">
-            {selectedClip && isPlayable(selectedClip) && (
+          <button
+            onClick={() => setCinemaMode(!cinemaMode)}
+            className="absolute top-1.5 right-1.5 z-10 rounded-full bg-black/60 p-1 text-white hover:bg-black/80 cursor-pointer transition-colors"
+            title={cinemaMode ? "Exit cinema mode" : "Cinema mode (16:9)"}
+          >
+            <Maximize2 className="h-3.5 w-3.5" />
+          </button>
+        </div>
+
+        {/* Clip action bar */}
+        {selectedClip && (
+          <div className="flex items-center gap-1 py-1.5">
+            {selectedClip.downloadStatus === "downloading" ? (
+              <span className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-muted-foreground">
+                <Loader2 className="h-3 w-3 animate-spin" /> Downloading...
+              </span>
+            ) : isPlayable(selectedClip) ? (
               <button
                 onClick={() => downloadClip(selectedClip, true)}
-                className="rounded-full bg-black/60 p-1 text-white hover:bg-black/80 cursor-pointer transition-colors"
+                className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted cursor-pointer transition-colors"
                 title="Re-download clip"
               >
-                <Download className="h-3.5 w-3.5" />
+                <RefreshCw className="h-3 w-3" /> Re-download
+              </button>
+            ) : (
+              <button
+                onClick={() => downloadClip(selectedClip)}
+                className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted cursor-pointer transition-colors"
+                title="Download clip"
+              >
+                <Download className="h-3 w-3" /> Download
               </button>
             )}
             <button
-              onClick={() => setCinemaMode(!cinemaMode)}
-              className="rounded-full bg-black/60 p-1 text-white hover:bg-black/80 cursor-pointer transition-colors"
-              title={cinemaMode ? "Exit cinema mode" : "Cinema mode (16:9)"}
+              onClick={() => importClipFile(selectedClip)}
+              className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted cursor-pointer transition-colors"
+              title="Import a local video file"
             >
-              <Maximize2 className="h-3.5 w-3.5" />
+              <FolderOpen className="h-3 w-3" /> Browse
             </button>
+            {(selectedClip.retryCount ?? 0) >= 1 && isSupabaseConfigured && (
+              reportedClipId === selectedClip.hubspotId ? (
+                <span className="flex items-center gap-1 px-2 py-1 text-[11px] text-green-600">
+                  <CheckCircle2 className="h-3 w-3" /> Reported
+                </span>
+              ) : (
+                <button
+                  onClick={() => handleReportIssue(selectedClip)}
+                  disabled={reporting}
+                  className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted cursor-pointer transition-colors disabled:opacity-50"
+                  title="Report this download issue"
+                >
+                  <AlertTriangle className="h-3 w-3" /> Report
+                </button>
+              )
+            )}
           </div>
-        </div>
+        )}
 
         {/* Metadata panel below player */}
         {selectedClip && (
