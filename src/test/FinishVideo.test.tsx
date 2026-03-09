@@ -15,9 +15,8 @@
  * The Rust-side CSV generation is covered by tests in src-tauri/src/lib.rs.
  */
 
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { render, screen } from "@testing-library/react";
-import React from "react";
 import type { ProjectClip } from "@/types";
 
 // ---------------------------------------------------------------------------
@@ -40,7 +39,7 @@ type ClipData = {
 /** Mirrors the clipsData mapping in handleFinishVideo step 2 */
 function buildClipsData(
   allClipsSorted: ProjectClip[],
-  creatorMap: Map<string, Record<string, string | null>>,
+  _creatorMap: Map<string, Record<string, string | null>>,
   vpId: string,
 ): ClipData[] {
   return allClipsSorted.map((c, idx) => {
