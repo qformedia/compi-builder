@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { Clock, Film, CheckCircle, Loader2, Sparkles, RefreshCw, X, RulerDimensionLine } from "lucide-react";
+import { Clock, Film, CheckCircle, Loader2, Sparkles, RefreshCw, X, RulerDimensionLine, AlertTriangle } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { HubSpotIcon } from "@/components/ClipCard";
 import { fetchVideoProjectClips } from "@/lib/hubspot";
@@ -380,6 +380,9 @@ function App() {
       (c) => c.downloadStatus === "complete" && c.localFile,
     );
 
+    // All clips sorted by order — used for CSV (all rows) and zip (with null gaps)
+    const allClipsSorted = [...project.clips].sort((a, b) => a.order - b.order);
+
     const updateStep = (idx: 0 | 1 | 2, status: StepStatus, error?: string) => {
       setStepStatuses((prev) => {
         const next = [...prev] as [StepStatus, StepStatus, StepStatus];
@@ -413,9 +416,9 @@ function App() {
     // Step 2: Generate CSV (fetch creator data from HubSpot, then merge)
     const step2 = (async () => {
       try {
-        // Collect unique creator IDs and fetch their properties
+        // Collect unique creator IDs from ALL clips (completed only have creator data)
         const creatorIds = [...new Set(
-          completedClips.map((c) => c.creatorId).filter((id): id is string => !!id)
+          allClipsSorted.map((c) => c.creatorId).filter((id): id is string => !!id)
         )];
 
         type CreatorRecord = { id: string; properties: Record<string, string | null> };
@@ -433,11 +436,16 @@ function App() {
 
         const vpId = project.hubspotVideoProjectId ?? "";
 
-        const clipsData = completedClips.map((c) => {
+        // Build one row per clip in project order; missing clips get missing:true
+        const clipsData = allClipsSorted.map((c, idx) => {
+          const isMissing = c.downloadStatus !== "complete" || !c.localFile;
           const cr = c.creatorId ? creatorMap.get(c.creatorId) : undefined;
           const noVal = (v?: string | null) => v || "";
           return {
-            duration: c.editedDuration ?? c.localDuration ?? null,
+            order: idx + 1,
+            missing: isMissing,
+            downloadStatus: c.downloadStatus,
+            duration: isMissing ? null : (c.editedDuration ?? c.localDuration ?? null),
             link: c.link,
             mainLink: noVal(cr?.main_link),
             mainAccount: noVal(cr?.main_account),
@@ -476,21 +484,26 @@ function App() {
       try {
         // Wait for CSV to be ready before zipping (so it's included)
         await step2;
-        const result = await invoke<{ dir: string; zipPath: string; newPaths: string[] }>(
+        // Pass all clips in order; null entries mark missing clips so position
+        // numbers are preserved in the renamed files (no gap-shifting)
+        const result = await invoke<{ dir: string; zipPath: string; newPaths: (string | null)[] }>(
           "order_and_zip_clips",
           {
             rootFolder: settings.rootFolder,
             projectName: project.name,
-            clipFiles: completedClips.map((c) => c.localFile!),
+            clipFiles: allClipsSorted.map((c) =>
+              c.downloadStatus === "complete" && c.localFile ? c.localFile : null
+            ),
           },
         );
         setClipsDir(result.dir);
 
-        // Update localFile paths in project data
+        // Update localFile paths in project data (only for downloaded clips)
         const updatedClips = project.clips.map((c) => {
-          const idx = completedClips.findIndex((cc) => cc.hubspotId === c.hubspotId);
-          if (idx >= 0 && result.newPaths[idx]) {
-            return { ...c, localFile: result.newPaths[idx] };
+          const idx = allClipsSorted.findIndex((cc) => cc.hubspotId === c.hubspotId);
+          const newPath = idx >= 0 ? result.newPaths[idx] : null;
+          if (newPath) {
+            return { ...c, localFile: newPath };
           }
           return c;
         });
@@ -749,6 +762,29 @@ function App() {
 
           {finishPhase === "confirm" ? (
             <div className="space-y-3 text-sm">
+              {(() => {
+                const missingClips = project?.clips.filter(
+                  (c) => c.downloadStatus !== "complete" || !c.localFile
+                ) ?? [];
+                if (missingClips.length === 0) return null;
+                return (
+                  <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-xs space-y-1.5">
+                    <p className="flex items-center gap-1.5 font-semibold text-amber-800">
+                      <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" />
+                      {missingClips.length} clip{missingClips.length !== 1 ? "s" : ""} not downloaded
+                    </p>
+                    <ul className="space-y-0.5 text-amber-700 pl-5">
+                      {missingClips.map((c, i) => {
+                        const pos = (project?.clips.findIndex((x) => x.hubspotId === c.hubspotId) ?? 0) + 1;
+                        return (
+                          <li key={i}>#{pos} {c.creatorName} <span className="opacity-60">({c.downloadStatus})</span></li>
+                        );
+                      })}
+                    </ul>
+                    <p className="text-amber-700">These will appear as <strong>⚠ MISSING</strong> rows in the CSV. The zip will only contain downloaded clips.</p>
+                  </div>
+                );
+              })()}
               <p className="font-medium">This will:</p>
               <ol className="space-y-2 text-muted-foreground">
                 {FINISH_STEPS.map((step, i) => (

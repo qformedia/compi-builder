@@ -912,6 +912,8 @@ async fn order_clips(
 
 /// Generate a CSV file matching the HubSpot workspace report format.
 /// The frontend passes pre-merged clip+creator data as JSON objects.
+/// Clips with `"missing": true` get a warning row; all other fields are preserved.
+/// The Order column always uses the clip's position in the full project list.
 /// Returns the absolute path to the CSV file.
 #[tauri::command]
 async fn generate_clips_csv(
@@ -942,35 +944,75 @@ async fn generate_clips_csv(
     );
 
     for (i, clip) in clips.iter().enumerate() {
-        let duration = clip.get("duration")
-            .and_then(|v| v.as_f64())
-            .map(|d| format!("{:.0}", d))
-            .unwrap_or_default();
+        // Each clip carries its 1-based project position (passed from frontend).
+        // Fall back to loop index + 1 if not provided.
+        let order = clip.get("order")
+            .and_then(|v| v.as_u64())
+            .unwrap_or((i + 1) as u64);
 
-        let fields = [
-            format!("{}", i + 1),
-            escape(&duration),
-            escape(&get(clip, "editingNotes")),
-            escape(&get(clip, "link")),
-            escape(&get(clip, "mainLink")),
-            escape(&get(clip, "mainAccount")),
-            escape(&get(clip, "name")),
-            escape(&get(clip, "douyinId")),
-            escape(&get(clip, "kuaishouId")),
-            escape(&get(clip, "xiaohongshuId")),
-            escape(&get(clip, "clipMixLinks")),
-            escape(&get(clip, "specialRequests")),
-            escape(&get(clip, "notes")),
-            escape(&get(clip, "licenseChecked")),
-            escape(&get(clip, "licenseType")),
-            escape(&get(clip, "availableAskFirst")),
-            escape(&get(clip, "score")),
-            escape(&get(clip, "externalClipId")),
-            escape(&get(clip, "creatorId")),
-            escape(&get(clip, "videoProjectId")),
-        ];
+        let is_missing = clip.get("missing").and_then(|v| v.as_bool()).unwrap_or(false);
+        let download_status = get(clip, "downloadStatus");
 
-        csv_content.push_str(&fields.join(","));
+        if is_missing {
+            // Warning row: preserve link + ids so the editor can identify the clip,
+            // leave all creator/duration fields empty.
+            let warning_note = format!(
+                "\u{26A0} MISSING \u{2014} {}",
+                if download_status.is_empty() { "not downloaded".to_string() } else { download_status }
+            );
+            let fields = [
+                format!("{}", order),
+                String::new(),                      // Duration
+                escape(&warning_note),              // Editing Notes (warning)
+                escape(&get(clip, "link")),
+                String::new(),                      // Main Link
+                String::new(),                      // Main Account
+                String::new(),                      // Name
+                String::new(),                      // Douyin ID
+                String::new(),                      // Kuaishou ID
+                String::new(),                      // Xiaohongshu ID
+                String::new(),                      // Clip Mix Links
+                String::new(),                      // Special Requests
+                String::new(),                      // Notes
+                String::new(),                      // License Checked
+                String::new(),                      // License Type
+                String::new(),                      // Available Ask First
+                String::new(),                      // Score
+                escape(&get(clip, "externalClipId")),
+                escape(&get(clip, "creatorId")),
+                escape(&get(clip, "videoProjectId")),
+            ];
+            csv_content.push_str(&fields.join(","));
+        } else {
+            let duration = clip.get("duration")
+                .and_then(|v| v.as_f64())
+                .map(|d| format!("{:.0}", d))
+                .unwrap_or_default();
+
+            let fields = [
+                format!("{}", order),
+                escape(&duration),
+                escape(&get(clip, "editingNotes")),
+                escape(&get(clip, "link")),
+                escape(&get(clip, "mainLink")),
+                escape(&get(clip, "mainAccount")),
+                escape(&get(clip, "name")),
+                escape(&get(clip, "douyinId")),
+                escape(&get(clip, "kuaishouId")),
+                escape(&get(clip, "xiaohongshuId")),
+                escape(&get(clip, "clipMixLinks")),
+                escape(&get(clip, "specialRequests")),
+                escape(&get(clip, "notes")),
+                escape(&get(clip, "licenseChecked")),
+                escape(&get(clip, "licenseType")),
+                escape(&get(clip, "availableAskFirst")),
+                escape(&get(clip, "score")),
+                escape(&get(clip, "externalClipId")),
+                escape(&get(clip, "creatorId")),
+                escape(&get(clip, "videoProjectId")),
+            ];
+            csv_content.push_str(&fields.join(","));
+        }
         csv_content.push('\n');
     }
 
@@ -982,22 +1024,36 @@ async fn generate_clips_csv(
 
 /// Rename clips with order prefix, mark unused files, and create a zip archive.
 /// The zip includes the numbered clips and clips.csv (if it exists).
-/// Returns JSON with `dir` (absolute clips dir), `zipPath` (absolute), `newPaths` (relative).
+/// `clip_files` is a list of optional relative paths — None entries represent missing
+/// clips whose position is preserved in numbering but skipped in the zip.
+/// Returns JSON with `dir`, `zipPath`, and `newPaths` (None for missing entries).
 #[tauri::command]
 async fn order_and_zip_clips(
     root_folder: String,
     project_name: String,
-    clip_files: Vec<String>,
+    clip_files: Vec<Option<String>>,
 ) -> Result<serde_json::Value, String> {
     let project_dir = PathBuf::from(&root_folder).join(&project_name);
     let clips_dir = project_dir.join("clips");
 
-    // Step A: Rename ordered clips with number prefix
-    let mut new_rel_paths: Vec<String> = Vec::new();
+    // Step A: Rename downloaded clips using their project position (1-indexed over ALL clips).
+    // Missing entries (None) skip a number — the gap is intentional.
+    let mut new_rel_paths: Vec<serde_json::Value> = Vec::new();
     let mut new_used_names: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut zip_files: Vec<(String, PathBuf)> = Vec::new(); // (name_in_zip, abs_path)
+    let mut zip_files: Vec<(String, PathBuf)> = Vec::new();
 
-    for (i, rel_path) in clip_files.iter().enumerate() {
+    for (i, maybe_path) in clip_files.iter().enumerate() {
+        let position = i + 1; // 1-indexed project position, preserved regardless of gaps
+
+        let rel_path = match maybe_path {
+            None => {
+                // Missing clip: preserve the position slot but skip file operations
+                new_rel_paths.push(serde_json::Value::Null);
+                continue;
+            }
+            Some(p) => p,
+        };
+
         let abs_path = project_dir.join(rel_path);
 
         let actual_path = if abs_path.exists() {
@@ -1015,7 +1071,7 @@ async fn order_and_zip_clips(
             .to_string();
 
         let clean_name = strip_prefix(&file_name);
-        let new_name = format!("{} - {}", i + 1, clean_name);
+        let new_name = format!("{} - {}", position, clean_name);
         new_used_names.insert(new_name.clone());
         let new_abs_path = actual_path.with_file_name(&new_name);
 
@@ -1024,7 +1080,7 @@ async fn order_and_zip_clips(
                 .map_err(|e| format!("Failed to rename {}: {e}", file_name))?;
         }
         zip_files.push((new_name.clone(), new_abs_path));
-        new_rel_paths.push(format!("clips/{}", new_name));
+        new_rel_paths.push(serde_json::json!(format!("clips/{}", new_name)));
     }
 
     // Step B: Prefix unused files in clips dir with "unused_"
@@ -1048,7 +1104,7 @@ async fn order_and_zip_clips(
     let options = zip::write::SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Stored); // no compression for video
 
-    // Add clip files
+    // Add clip files (missing clips have no file, so nothing to add for them)
     for (name, path) in &zip_files {
         let data = fs::read(path)
             .map_err(|e| format!("Failed to read {}: {e}", name))?;
@@ -2095,4 +2151,137 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+// ── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+
+    /// Build the CSV content string inline (mirrors generate_clips_csv logic)
+    /// so we can test it without a Tauri app handle.
+    fn build_csv(clips: &[serde_json::Value]) -> String {
+        let escape = |s: &str| -> String {
+            if s.contains(',') || s.contains('"') || s.contains('\n') {
+                format!("\"{}\"", s.replace('"', "\"\""))
+            } else {
+                s.to_string()
+            }
+        };
+        let get = |clip: &serde_json::Value, key: &str| -> String {
+            clip.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
+        };
+
+        let mut out = String::from(
+            "Order,Duration,Editing Notes,Link,Main Link,Main Account,Name,Douyin ID,Kuaishou ID,Xiaohongshu ID,Clip Mix Links,Special Requests,Notes,License Checked,License Type,Available Ask First,Score,External Clip ID,Creator ID,Video Project ID\n"
+        );
+
+        for (i, clip) in clips.iter().enumerate() {
+            let order = clip.get("order").and_then(|v| v.as_u64()).unwrap_or((i + 1) as u64);
+            let is_missing = clip.get("missing").and_then(|v| v.as_bool()).unwrap_or(false);
+            let download_status = get(clip, "downloadStatus");
+
+            if is_missing {
+                let warning = format!("\u{26A0} MISSING \u{2014} {}",
+                    if download_status.is_empty() { "not downloaded".to_string() } else { download_status }
+                );
+                let row = [
+                    format!("{}", order), String::new(), escape(&warning),
+                    escape(&get(clip, "link")),
+                    String::new(), String::new(), String::new(), String::new(),
+                    String::new(), String::new(), String::new(), String::new(),
+                    String::new(), String::new(), String::new(), String::new(),
+                    String::new(), escape(&get(clip, "externalClipId")),
+                    escape(&get(clip, "creatorId")), escape(&get(clip, "videoProjectId")),
+                ];
+                out.push_str(&row.join(","));
+            } else {
+                let duration = clip.get("duration").and_then(|v| v.as_f64())
+                    .map(|d| format!("{:.0}", d)).unwrap_or_default();
+                let row = [
+                    format!("{}", order), escape(&duration),
+                    escape(&get(clip, "editingNotes")), escape(&get(clip, "link")),
+                    escape(&get(clip, "mainLink")), escape(&get(clip, "mainAccount")),
+                    escape(&get(clip, "name")), escape(&get(clip, "douyinId")),
+                    escape(&get(clip, "kuaishouId")), escape(&get(clip, "xiaohongshuId")),
+                    escape(&get(clip, "clipMixLinks")), escape(&get(clip, "specialRequests")),
+                    escape(&get(clip, "notes")), escape(&get(clip, "licenseChecked")),
+                    escape(&get(clip, "licenseType")), escape(&get(clip, "availableAskFirst")),
+                    escape(&get(clip, "score")), escape(&get(clip, "externalClipId")),
+                    escape(&get(clip, "creatorId")), escape(&get(clip, "videoProjectId")),
+                ];
+                out.push_str(&row.join(","));
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    #[test]
+    fn csv_all_complete_has_correct_row_count() {
+        let clips = vec![
+            serde_json::json!({ "order": 1, "link": "https://tiktok.com/a", "duration": 30.0 }),
+            serde_json::json!({ "order": 2, "link": "https://tiktok.com/b", "duration": 25.0 }),
+            serde_json::json!({ "order": 3, "link": "https://tiktok.com/c", "duration": 20.0 }),
+        ];
+        let csv = build_csv(&clips);
+        let data_rows: Vec<_> = csv.lines().skip(1).collect();
+        assert_eq!(data_rows.len(), 3);
+        assert!(data_rows[0].starts_with("1,"));
+        assert!(data_rows[1].starts_with("2,"));
+        assert!(data_rows[2].starts_with("3,"));
+    }
+
+    #[test]
+    fn csv_missing_clip_preserves_row_count_and_order() {
+        let clips = vec![
+            serde_json::json!({ "order": 1, "link": "https://tiktok.com/a", "duration": 30.0 }),
+            serde_json::json!({ "order": 2, "link": "https://instagram.com/b", "missing": true, "downloadStatus": "failed" }),
+            serde_json::json!({ "order": 3, "link": "https://tiktok.com/c", "duration": 20.0 }),
+        ];
+        let csv = build_csv(&clips);
+        let data_rows: Vec<_> = csv.lines().skip(1).collect();
+
+        // Always 3 rows — clip 2 is missing but still present
+        assert_eq!(data_rows.len(), 3);
+
+        // Row 1 is normal
+        assert!(data_rows[0].starts_with("1,"));
+        // Row 2 has order 2, empty duration, and warning in Editing Notes
+        assert!(data_rows[1].starts_with("2,,"));
+        assert!(data_rows[1].contains("MISSING"));
+        assert!(data_rows[1].contains("failed"));
+        // Row 3 still has order 3 (not shifted to 2)
+        assert!(data_rows[2].starts_with("3,"));
+    }
+
+    #[test]
+    fn csv_missing_clip_preserves_link_for_identification() {
+        let clips = vec![
+            serde_json::json!({
+                "order": 1,
+                "link": "https://instagram.com/p/ABC/",
+                "missing": true,
+                "downloadStatus": "pending",
+                "externalClipId": "clip_42"
+            }),
+        ];
+        let csv = build_csv(&clips);
+        let row = csv.lines().nth(1).unwrap();
+        assert!(row.contains("https://instagram.com/p/ABC/"), "link must be present for missing clips");
+        assert!(row.contains("clip_42"), "clip ID must be present for missing clips");
+    }
+
+    #[test]
+    fn csv_all_missing_row_count_matches_total() {
+        let clips = (1..=5).map(|i| serde_json::json!({
+            "order": i,
+            "link": format!("https://tiktok.com/{}", i),
+            "missing": true,
+            "downloadStatus": "failed"
+        })).collect::<Vec<_>>();
+        let csv = build_csv(&clips);
+        let data_rows: Vec<_> = csv.lines().skip(1).collect();
+        assert_eq!(data_rows.len(), 5, "must have one row per clip even if all are missing");
+    }
 }
