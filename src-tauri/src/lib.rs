@@ -1315,7 +1315,11 @@ async fn extract_video_thumbnail(video_path: String) -> Result<Option<String>, S
     cmd.stderr(std::process::Stdio::null());
 
     #[cfg(target_os = "windows")]
-    { cmd.creation_flags(0x08000000); }
+    {
+        #[allow(unused_imports)]
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x08000000);
+    }
 
     #[cfg(target_os = "macos")]
     {

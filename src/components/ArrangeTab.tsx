@@ -16,12 +16,12 @@ import {
   arrayMove,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { GripVertical, CheckCircle, StickyNote, Download, FolderOpen, Loader2, Trash2, Maximize2, Minimize2, ImageIcon, RefreshCw, AlertTriangle, CheckCircle2, Copy, ClipboardCheck, CloudUpload, Cloud } from "lucide-react";
+import { GripVertical, CheckCircle, StickyNote, Download, FolderOpen, Loader2, Trash2, Maximize2, Minimize2, ImageIcon, RefreshCw, AlertTriangle, CheckCircle2, Copy, ClipboardCheck, CloudUpload, Cloud, Film, ChevronDown } from "lucide-react";
 import { MediaPlayer, MediaProvider, type MediaPlayerInstance } from "@vidstack/react";
 import { defaultLayoutIcons, DefaultVideoLayout } from "@vidstack/react/player/layouts/default";
 import "@vidstack/react/player/styles/default/theme.css";
 import "@vidstack/react/player/styles/default/layouts/video.css";
-import { ClipCard, SCORE_COLORS, getPlatform, getNonVideoUrlWarning } from "@/components/ClipCard";
+import { ClipCard, SCORE_COLORS, getPlatform, getNonVideoUrlWarning, PlatformIcon, HubSpotIcon } from "@/components/ClipCard";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Dialog,
@@ -47,6 +47,28 @@ interface Props {
   /** When true, the player will not autoplay even if the clip key changes.
    *  Used to prevent unwanted playback when Finish Video renames localFiles. */
   suppressAutoPlay?: boolean;
+}
+
+function Tip({ label, children }: { label: string; children: React.ReactNode }) {
+  const [pos, setPos] = useState<{ x: number; y: number } | null>(null);
+  return (
+    <span
+      className="relative inline-flex"
+      onMouseEnter={(e) => setPos({ x: e.clientX, y: e.clientY })}
+      onMouseMove={(e) => setPos({ x: e.clientX, y: e.clientY })}
+      onMouseLeave={() => setPos(null)}
+    >
+      {children}
+      {pos && (
+        <span
+          className="fixed z-[9999] pointer-events-none -translate-x-1/2 rounded bg-foreground px-2 py-0.5 text-[10px] text-background whitespace-nowrap shadow-lg"
+          style={{ left: pos.x, top: pos.y + 20 }}
+        >
+          {label}
+        </span>
+      )}
+    </span>
+  );
 }
 
 function toCardData(clip: ProjectClip): ClipCardData {
@@ -86,6 +108,7 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
   const [reportedClipId, setReportedClipId] = useState<string | null>(null);
   const [reporting, setReporting] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
+  const [scoreOpen, setScoreOpen] = useState(false);
   const [uploadingClipId, setUploadingClipId] = useState<string | null>(null);
   const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT);
   const isDraggingDivider = useRef(false);
@@ -551,6 +574,11 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
             the cinema overlay is the sole live <video> element. */}
         <div className="relative aspect-[9/16] w-full rounded-lg bg-black overflow-hidden flex-shrink-0">
           {!cinemaMode && playerContent}
+          {selectedClip && (
+            <span className="absolute top-2 left-2 z-10 rounded-lg bg-black/60 px-3 py-1 text-2xl font-black text-white tabular-nums">
+              #{selectedIndex + 1}
+            </span>
+          )}
           <button
             onClick={() => setCinemaMode(!cinemaMode)}
             className="absolute top-1.5 right-1.5 z-10 rounded-full bg-black/60 p-1 text-white hover:bg-black/80 cursor-pointer transition-colors"
@@ -560,7 +588,7 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
           </button>
         </div>
 
-        {/* Clip action bar — single source of truth for all download actions */}
+        {/* Below-player panel */}
         {selectedClip && (() => {
           const ds = selectedClip.downloadStatus;
           const platform = getPlatform(selectedClip.link);
@@ -568,58 +596,76 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
           const isXiaohongshu = platform === "Xiaohongshu";
           const retried = (selectedClip.retryCount ?? 0) >= 1;
           const urlWarning = getNonVideoUrlWarning(selectedClip.link);
-          const btnClass = "flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-muted cursor-pointer transition-colors";
+          const iconBtn = "flex items-center justify-center rounded p-1.5 text-muted-foreground hover:bg-muted cursor-pointer transition-colors";
 
           return (
-            <div className="flex flex-col gap-0.5 border-b py-1">
-              {/* Warning for non-video URLs */}
-              {urlWarning && (
-                <p className="flex items-center gap-1 px-2 text-[10px] text-orange-600 leading-snug">
-                  <AlertTriangle className="h-3 w-3 flex-shrink-0" /> {urlWarning}
-                </p>
+            <div className="flex min-h-0 flex-1 flex-col overflow-y-auto">
+
+              {/* Warning / error messages */}
+              {(urlWarning || ds === "failed") && (
+                <div className="flex flex-col gap-0.5 px-2 pt-1">
+                  {urlWarning && (
+                    <p className="flex items-center gap-1 text-[10px] text-orange-600 leading-snug">
+                      <AlertTriangle className="h-3 w-3 flex-shrink-0" /> {urlWarning}
+                    </p>
+                  )}
+                  {ds === "failed" && (
+                    <p className="text-[10px] text-destructive leading-snug">
+                      {isXiaohongshu
+                        ? "Xiaohongshu can't be auto-downloaded — import manually"
+                        : (selectedClip.downloadError ?? "Download failed")}
+                    </p>
+                  )}
+                </div>
               )}
 
-              {/* Error message (failed clips only) */}
-              {ds === "failed" && (
-                <p className="px-2 text-[10px] text-destructive leading-snug">
-                  {isXiaohongshu
-                    ? "Xiaohongshu videos can't be auto-downloaded — import manually"
-                    : (selectedClip.downloadError ?? "Download failed")}
-                </p>
-              )}
-
-              {/* Action buttons row */}
-              <div className="flex items-center gap-1 flex-wrap">
+              {/* Row 1: Icon-only action toolbar */}
+              <div className="flex items-center gap-0.5 border-b px-1.5 py-1 flex-wrap">
                 {ds === "downloading" ? (
                   <span className="flex items-center gap-1 px-1.5 py-0.5 text-[11px] text-muted-foreground">
-                    <Loader2 className="h-3 w-3 animate-spin" /> Downloading...
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" /> Downloading...
                   </span>
                 ) : ds === "failed" ? (
                   !isXiaohongshu && (
-                    <button onClick={() => downloadClip(selectedClip)} className={btnClass} title="Retry download">
-                      <RefreshCw className="h-3 w-3" /> Retry
-                    </button>
+                    <Tip label="Retry download"><button onClick={() => downloadClip(selectedClip)} className={iconBtn}>
+                      <RefreshCw className="h-3.5 w-3.5" />
+                    </button></Tip>
                   )
                 ) : isPlayable(selectedClip) ? (
-                  <button onClick={() => downloadClip(selectedClip, true)} className={btnClass} title="Re-download clip">
-                    <RefreshCw className="h-3 w-3" /> Re-download
-                  </button>
+                  <Tip label="Re-download"><button onClick={() => downloadClip(selectedClip, true)} className={iconBtn}>
+                    <RefreshCw className="h-3.5 w-3.5" />
+                  </button></Tip>
                 ) : (
-                  <button onClick={() => downloadClip(selectedClip)} className={btnClass} title="Download clip">
-                    <Download className="h-3 w-3" /> Download
-                  </button>
+                  <Tip label="Download"><button onClick={() => downloadClip(selectedClip)} className={iconBtn}>
+                    <Download className="h-3.5 w-3.5" />
+                  </button></Tip>
                 )}
 
-                <button onClick={() => importClipFile(selectedClip)} className={btnClass} title="Import a local video file">
-                  <FolderOpen className="h-3 w-3" /> Browse
-                </button>
+                <Tip label="Replace video with local file"><button onClick={() => importClipFile(selectedClip)} className={iconBtn}>
+                  <Film className="h-3.5 w-3.5" />
+                </button></Tip>
 
-                {isChinese && (
-                  <button onClick={() => openUrl("https://dy.kukutool.com/en")} className={`${btnClass} text-blue-600 hover:bg-blue-50`} title="Open KuKuTool for Chinese platform downloads">
-                    KuKuTool ↗
-                  </button>
+                <Tip label="Change thumbnail"><button onClick={() => setThumbModalOpen(true)} className={iconBtn}>
+                  <ImageIcon className="h-3.5 w-3.5" />
+                </button></Tip>
+
+                {ds === "complete" && selectedClip.localFile && settings.hubspotToken && (
+                  selectedClip.originalClip ? (
+                    <Tip label="Video synced to HubSpot"><span className="flex items-center justify-center rounded p-1.5 text-green-600">
+                      <Cloud className="h-3.5 w-3.5" />
+                    </span></Tip>
+                  ) : uploadingClipId === selectedClip.hubspotId ? (
+                    <Tip label="Uploading to HubSpot..."><span className="flex items-center justify-center rounded p-1.5 text-blue-500">
+                      <CloudUpload className="h-3.5 w-3.5 animate-pulse" />
+                    </span></Tip>
+                  ) : (
+                    <Tip label="Upload to HubSpot"><button onClick={() => uploadClipToHubSpot(selectedClip)} className={`${iconBtn} text-orange-500 hover:text-orange-600`}>
+                      <CloudUpload className="h-3.5 w-3.5" />
+                    </button></Tip>
+                  )
                 )}
 
+                <Tip label="Copy link">
                 <button
                   onClick={() => {
                     navigator.clipboard.writeText(selectedClip.link).then(() => {
@@ -627,114 +673,143 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
                       setTimeout(() => setCopiedLink(false), 2000);
                     });
                   }}
-                  className={btnClass}
-                  title="Copy clip link"
+                  className={iconBtn}
                 >
-                  {copiedLink ? <ClipboardCheck className="h-3 w-3 text-green-600" /> : <Copy className="h-3 w-3" />}
+                  {copiedLink ? <ClipboardCheck className="h-3.5 w-3.5 text-green-600" /> : <Copy className="h-3.5 w-3.5" />}
                 </button>
+                </Tip>
 
-                {ds === "complete" && selectedClip.localFile && settings.hubspotToken && (
-                  selectedClip.originalClip ? (
-                    <span className="flex items-center gap-1 px-1.5 py-0.5 text-[11px] text-green-600" title="Video synced to HubSpot">
-                      <Cloud className="h-3 w-3" />
-                    </span>
-                  ) : uploadingClipId === selectedClip.hubspotId ? (
-                    <span className="flex items-center gap-1 px-1.5 py-0.5 text-[11px] text-blue-500" title="Uploading to HubSpot...">
-                      <CloudUpload className="h-3 w-3 animate-pulse" />
-                    </span>
-                  ) : (
-                    <button
-                      onClick={() => uploadClipToHubSpot(selectedClip)}
-                      className={`${btnClass} text-orange-500 hover:text-orange-600`}
-                      title="Upload video to HubSpot (share with team)"
-                    >
-                      <CloudUpload className="h-3 w-3" />
-                    </button>
-                  )
+                {removeClip && (
+                  <Tip label="Remove clip"><button
+                    onClick={() => {
+                      if (skipConfirmRef.current) {
+                        removeClip(selectedClip.hubspotId);
+                        const next = allClips.find((c) => c.hubspotId !== selectedClip.hubspotId);
+                        setSelectedClipId(next?.hubspotId ?? null);
+                      } else {
+                        setRemoveTarget(selectedClip.hubspotId);
+                      }
+                    }}
+                    className="flex items-center justify-center rounded p-1.5 text-destructive hover:bg-destructive/10 cursor-pointer transition-colors"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button></Tip>
                 )}
 
                 {retried && isSupabaseConfigured && (
                   reportedClipId === selectedClip.hubspotId ? (
-                    <span className="flex items-center gap-1 px-1.5 py-0.5 text-[11px] text-green-600">
-                      <CheckCircle2 className="h-3 w-3" /> Reported
-                    </span>
+                    <Tip label="Issue reported"><span className="flex items-center justify-center rounded p-1.5 text-green-600">
+                      <CheckCircle2 className="h-3.5 w-3.5" />
+                    </span></Tip>
                   ) : (
-                    <button onClick={() => handleReportIssue(selectedClip)} disabled={reporting} className={`${btnClass} disabled:opacity-50`} title="Report this download issue">
-                      <AlertTriangle className="h-3 w-3" /> Report
-                    </button>
+                    <Tip label="Report issue"><button onClick={() => handleReportIssue(selectedClip)} disabled={reporting} className={`${iconBtn} disabled:opacity-50`}>
+                      <AlertTriangle className="h-3.5 w-3.5" />
+                    </button></Tip>
                   )
                 )}
+
+                {isChinese && (
+                  <button onClick={() => openUrl("https://dy.kukutool.com/en")} className="flex items-center gap-0.5 rounded px-1.5 py-1 text-[10px] font-medium text-blue-600 hover:bg-blue-50 cursor-pointer transition-colors">
+                    KuKuTool ↗
+                  </button>
+                )}
               </div>
-            </div>
-          );
-        })()}
 
-        {/* Metadata panel below player */}
-        {selectedClip && (
-          <div className="flex min-h-0 flex-1 flex-col gap-2.5 overflow-y-auto p-3">
-            {/* Clip header */}
-            <div className="flex items-center gap-2">
-              <span className="text-xs font-bold text-muted-foreground">#{selectedIndex + 1}</span>
-              <span className="truncate text-sm font-semibold">{selectedClip.creatorName}</span>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-              {selectedClip.creatorStatus && (
-                <span className={`rounded px-1.5 py-0.5 font-semibold ${
-                  selectedClip.creatorStatus === "Granted"
-                    ? "bg-green-100 text-green-700"
-                    : "bg-muted text-muted-foreground"
-                }`}>
-                  {selectedClip.creatorStatus}
-                </span>
-              )}
-              {selectedClip.licenseType && (
-                <span className={`rounded px-1.5 py-0.5 font-semibold ${
-                  selectedClip.licenseType.toLowerCase() === "recurrent"
-                    ? "bg-blue-100 text-blue-700"
-                    : "bg-amber-100 text-amber-700"
-                }`}>
-                  {selectedClip.licenseType}
-                </span>
-              )}
-            </div>
-
-            {selectedClip.notes && (
-              <p className="text-[11px] text-muted-foreground italic leading-snug">
-                {selectedClip.notes}
-              </p>
-            )}
-
-            {/* Score — label + buttons on same row */}
-            <div className="flex flex-wrap items-center gap-1.5">
-              <span className="text-[11px] font-semibold text-muted-foreground flex-shrink-0">Score</span>
-              {(["XL", "L", "M", "S", "XS"] as const).map((s) => {
-                const active = selectedClip.score === s;
-                return (
+              {/* Row 2: Links + Score */}
+              <div className="flex items-center border-b px-2 py-1 text-[11px] gap-2">
+                <button
+                  onClick={() => openUrl(`https://app-eu1.hubspot.com/contacts/146859718/record/2-192287471/${selectedClip.hubspotId}`)}
+                  className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground cursor-pointer transition-colors"
+                >
+                  <HubSpotIcon className="h-3 w-3" />
+                  <span>HubSpot</span>
+                </button>
+                <span className="text-border">|</span>
+                <button
+                  onClick={() => {
+                    let url = selectedClip.link;
+                    if (url.includes("instagram.com")) url = url.replace(/\/reels?\//i, "/p/");
+                    openUrl(url);
+                  }}
+                  className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground cursor-pointer transition-colors"
+                >
+                  <PlatformIcon platform={platform} className="h-3 w-3" />
+                  <span>{platform}</span>
+                </button>
+                {/* Score — clickable badge with dropdown */}
+                <div className="relative ml-auto">
                   <button
-                    key={s}
-                    onClick={() => {
-                      updateHubSpotField(selectedClip.hubspotId, "score", s, { score: s });
-                    }}
-                    className={`rounded px-2 py-0.5 text-[11px] font-bold uppercase leading-none cursor-pointer transition-all ${
-                      active
-                        ? SCORE_COLORS[s]
-                        : "bg-muted text-muted-foreground hover:bg-muted/80"
+                    onClick={() => setScoreOpen(!scoreOpen)}
+                    className={`flex items-center gap-1 rounded px-2 py-0.5 text-[10px] font-bold uppercase leading-none cursor-pointer transition-all ${
+                      selectedClip.score
+                        ? SCORE_COLORS[selectedClip.score as keyof typeof SCORE_COLORS] ?? "bg-muted text-muted-foreground"
+                        : "bg-muted text-muted-foreground"
                     }`}
                   >
-                    {s}
+                    {selectedClip.score || "Score"}
+                    <ChevronDown className="h-2.5 w-2.5" />
                   </button>
-                );
-              })}
-            </div>
+                  {scoreOpen && (<>
+                    <div className="fixed inset-0 z-40" onClick={() => setScoreOpen(false)} />
+                    <div className="absolute right-0 top-full mt-1 z-50 flex gap-0.5 rounded-md border bg-background p-1 shadow-lg">
+                      {(["XL", "L", "M", "S", "XS"] as const).map((s) => (
+                        <button
+                          key={s}
+                          onClick={() => {
+                            updateHubSpotField(selectedClip.hubspotId, "score", s, { score: s });
+                            setScoreOpen(false);
+                          }}
+                          className={`rounded px-2 py-1 text-[10px] font-bold uppercase leading-none cursor-pointer transition-all ${
+                            selectedClip.score === s
+                              ? SCORE_COLORS[s]
+                              : "bg-muted text-muted-foreground hover:bg-muted/80"
+                          }`}
+                        >
+                          {s}
+                        </button>
+                      ))}
+                    </div>
+                  </>)}
+                </div>
+              </div>
 
-            {/* Duration + Position — same row */}
-            <div className="flex items-end gap-3">
-              <div className="flex flex-col gap-0.5">
-                <label className="text-[11px] font-semibold text-muted-foreground whitespace-nowrap">
-                  Duration (s)
-                </label>
-                <div className="flex items-center gap-1">
+              {/* Row 3: Creator + License badges */}
+              <div className="flex items-center gap-2 px-3 pt-2 pb-1">
+                <span className="truncate text-sm font-semibold flex-1 min-w-0">{selectedClip.creatorName}</span>
+                <div className="flex items-center gap-1 flex-shrink-0 text-[10px]">
+                  {selectedClip.creatorStatus && (
+                    <span className={`rounded px-1.5 py-0.5 font-semibold ${
+                      selectedClip.creatorStatus === "Granted"
+                        ? "bg-green-100 text-green-700"
+                        : "bg-muted text-muted-foreground"
+                    }`}>
+                      {selectedClip.creatorStatus}
+                    </span>
+                  )}
+                  {selectedClip.licenseType && (
+                    <span className={`rounded px-1.5 py-0.5 font-semibold ${
+                      selectedClip.licenseType.toLowerCase() === "recurrent"
+                        ? "bg-blue-100 text-blue-700"
+                        : "bg-amber-100 text-amber-700"
+                    }`}>
+                      {selectedClip.licenseType}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              {/* HubSpot notes (if any) */}
+              {selectedClip.notes && (
+                <p className="px-3 pb-1 text-[11px] text-muted-foreground italic leading-snug">
+                  {selectedClip.notes}
+                </p>
+              )}
+
+              {/* Row 4: Duration + Position */}
+              <div className="border-t mx-3" />
+              <div className="flex items-center gap-3 px-3 py-1.5">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[10px] text-muted-foreground">Duration</span>
                   <input
                     type="number"
                     min={0}
@@ -756,16 +831,12 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
                         { editedDuration: num || undefined },
                       );
                     }}
-                    className="w-16 rounded-md border bg-background px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                    className="w-12 rounded border bg-background px-1.5 py-0.5 text-[11px] text-center focus:outline-none focus:ring-1 focus:ring-ring"
                   />
-                  <span className="text-[10px] text-muted-foreground whitespace-nowrap">
-                    /{formatDuration(selectedClip.localDuration)}
-                  </span>
+                  <span className="text-[10px] text-muted-foreground">/ {formatDuration(selectedClip.localDuration)}s</span>
                 </div>
-              </div>
-              <div className="flex flex-col gap-0.5">
-                <label className="text-[11px] font-semibold text-muted-foreground">Pos.</label>
-                <div className="flex items-center gap-1">
+                <div className="flex items-center gap-1.5 ml-auto">
+                  <span className="text-[10px] text-muted-foreground">Pos</span>
                   <input
                     type="number"
                     min={1}
@@ -777,67 +848,37 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
                         handleMoveToPosition(selectedClip.hubspotId, val);
                       }
                     }}
-                    className="w-14 rounded-md border bg-background px-2 py-1 text-sm focus:outline-none focus:ring-1 focus:ring-ring"
+                    className="w-10 rounded border bg-background px-1 py-0.5 text-[11px] text-center focus:outline-none focus:ring-1 focus:ring-ring"
                   />
-                  <span className="text-[10px] text-muted-foreground">/{allClips.length}</span>
+                  <span className="text-[10px] text-muted-foreground">/ {allClips.length}</span>
                 </div>
               </div>
-            </div>
 
-            <div className="border-t" />
+              <div className="border-t mx-3" />
 
-            {/* Editing notes */}
-            <div className="flex flex-1 flex-col gap-1">
-              <label className="flex items-center gap-1.5 text-[11px] font-semibold">
-                <StickyNote className="h-3.5 w-3.5" />
-                Editing Notes
-              </label>
-              <textarea
-                value={notesText}
-                onChange={(e) => handleNotesChange(e.target.value)}
-                onFocus={() => { notesActiveRef.current = true; }}
-                onBlur={handleNotesBlur}
-                placeholder="Trim, transitions, effects..."
-                className="flex-1 min-h-[4rem] resize-none rounded-md border bg-background px-2.5 py-2 text-sm leading-snug placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
-              />
-              {notesSaved && (
-                <span className="flex items-center gap-1 text-[11px] text-green-600">
-                  <CheckCircle className="h-3 w-3" /> Saved
-                </span>
-              )}
+              {/* Editing notes — fills remaining space */}
+              <div className="flex flex-1 flex-col gap-1 px-3 pt-2 pb-3 min-h-0">
+                <label className="flex items-center gap-1.5 text-[11px] font-semibold">
+                  <StickyNote className="h-3.5 w-3.5" />
+                  Editing Notes
+                </label>
+                <textarea
+                  value={notesText}
+                  onChange={(e) => handleNotesChange(e.target.value)}
+                  onFocus={() => { notesActiveRef.current = true; }}
+                  onBlur={handleNotesBlur}
+                  placeholder="Trim, transitions, effects..."
+                  className="flex-1 min-h-[4rem] resize-none rounded-md border bg-background px-2.5 py-2 text-sm leading-snug placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
+                />
+                {notesSaved && (
+                  <span className="flex items-center gap-1 text-[11px] text-green-600">
+                    <CheckCircle className="h-3 w-3" /> Saved
+                  </span>
+                )}
+              </div>
             </div>
-
-            {/* Clip management actions */}
-            <div className="border-t" />
-            <div className="flex items-center gap-0.5 flex-wrap">
-              <button
-                onClick={() => setThumbModalOpen(true)}
-                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-muted cursor-pointer transition-colors"
-                title="Change thumbnail"
-              >
-                <ImageIcon className="h-3 w-3" />
-                Thumb
-              </button>
-              {removeClip && (
-                <button
-                  onClick={() => {
-                    if (skipConfirmRef.current) {
-                      removeClip(selectedClip.hubspotId);
-                      const next = allClips.find((c) => c.hubspotId !== selectedClip.hubspotId);
-                      setSelectedClipId(next?.hubspotId ?? null);
-                    } else {
-                      setRemoveTarget(selectedClip.hubspotId);
-                    }
-                  }}
-                  className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-destructive hover:bg-destructive/10 cursor-pointer transition-colors"
-                >
-                  <Trash2 className="h-3 w-3" />
-                  Remove
-                </button>
-              )}
-            </div>
-          </div>
-        )}
+          );
+        })()}
       </div>
 
       {/* ── Resizable divider ── */}
@@ -1036,29 +1077,23 @@ function SortableCard({
     <div
       ref={setNodeRef}
       style={style}
-      className={`overflow-hidden cursor-grab touch-none [&_*]:!cursor-grab
-        ${hasMarker ? "rounded-r-lg" : "rounded-lg"}
+      className={`relative overflow-hidden rounded-lg cursor-grab touch-none [&_*]:!cursor-grab
         ${isSelected
           ? "border-2 border-green-500"
-          : hasMarker
-            ? "border border-border border-l-[3px] border-l-[#00a8ff]"
-            : "border border-border"
+          : "border border-border"
         }`}
       onClick={onSelect}
       {...attributes}
       {...listeners}
     >
-      {/* Top bar: order number + optional minute badge + drag icon */}
-      <div className="flex items-center justify-between border-b bg-muted/50 px-1.5 py-0.5">
-        <div className="flex items-center gap-1 min-w-0">
-          <span className="text-[10px] font-bold text-muted-foreground flex-shrink-0">#{index + 1}</span>
-          {hasMarker && (
-            <span className="rounded px-1 py-px text-[9px] font-bold leading-tight text-white flex-shrink-0" style={{ backgroundColor: "#00a8ff" }}>
-              {minuteMarker}:00
-            </span>
-          )}
-        </div>
-        <GripVertical className="h-3 w-3 text-muted-foreground flex-shrink-0" />
+      {/* Top bar: order number + optional minute marker + drag icon */}
+      <div className={`flex items-center border-b px-1.5 py-0.5 ${hasMarker ? "bg-sky-500" : "bg-muted/50"}`}>
+        <span className={`text-[10px] font-bold flex-shrink-0 ${hasMarker ? "text-white/70" : "text-muted-foreground"}`}>#{index + 1}</span>
+        {hasMarker && (
+          <span className="flex-1 text-center text-[10px] font-black text-white">{minuteMarker}:00</span>
+        )}
+        {!hasMarker && <span className="flex-1" />}
+        <GripVertical className={`h-3 w-3 flex-shrink-0 ${hasMarker ? "text-white/60" : "text-muted-foreground"}`} />
       </div>
 
       <ClipCard

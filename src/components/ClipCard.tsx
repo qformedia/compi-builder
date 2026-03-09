@@ -453,36 +453,6 @@ export function ClipCard({
         )}
       </div>
 
-      {/* Compact action bar (arrange mode only) */}
-      {compact && (
-        <div className="flex border-t">
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              openUrl(`https://app-eu1.hubspot.com/contacts/146859718/record/2-192287471/${clip.id}`);
-            }}
-            className="flex flex-1 items-center justify-center py-1 cursor-pointer transition-colors hover:bg-muted"
-            title="Open in HubSpot"
-          >
-            <HubSpotIcon className="h-3.5 w-3.5" />
-          </button>
-          <button
-            onClick={(e) => {
-              e.stopPropagation();
-              let url = clip.link;
-              if (url.includes("instagram.com")) {
-                url = url.replace(/\/reels?\//i, "/p/");
-              }
-              openUrl(url);
-            }}
-            className="flex flex-1 items-center justify-center py-1 border-l cursor-pointer transition-colors hover:bg-muted"
-            title={`Open on ${platform}`}
-          >
-            <PlatformIcon platform={platform} className="h-3 w-3" />
-          </button>
-        </div>
-      )}
-
       {/* Info section (hidden in compact mode) */}
       {!compact && <div className="flex flex-col gap-1 p-2">
         {/* Creator name → links to External Clip in HubSpot */}
@@ -845,10 +815,11 @@ export function PlatformIcon({ platform, className }: { platform: string; classN
     );
   }
   if (platform === "Douyin") {
-    // Same shape as TikTok but rendered in red to distinguish the Chinese app
     return (
-      <svg className={className} viewBox="0 0 24 24" fill="#e0001b">
-        <path d="M12.525.02c1.31-.02 2.61-.01 3.91-.02.08 1.53.63 3.09 1.75 4.17 1.12 1.11 2.7 1.62 4.24 1.79v4.03c-1.44-.05-2.89-.35-4.2-.97-.57-.26-1.1-.59-1.62-.93-.01 2.92.01 5.84-.02 8.75-.08 1.4-.54 2.79-1.35 3.94-1.31 1.92-3.58 3.17-5.91 3.21-1.43.08-2.86-.31-4.08-1.03-2.02-1.19-3.44-3.37-3.65-5.71-.02-.5-.03-1-.01-1.49.18-1.9 1.12-3.72 2.58-4.96 1.66-1.44 3.98-2.13 6.15-1.72.02 1.48-.04 2.96-.04 4.44-.99-.32-2.15-.23-3.02.37-.63.41-1.11 1.04-1.36 1.75-.21.51-.15 1.07-.14 1.61.24 1.64 1.82 3.02 3.5 2.87 1.12-.01 2.19-.66 2.77-1.61.19-.33.4-.67.41-1.06.1-1.79.06-3.57.07-5.36.01-4.03-.01-8.05.02-12.07z"/>
+      <svg className={className} viewBox="0 0 48 48" fill="none">
+        <path d="M21.5 4h5c.2 3.3 1.3 6.3 3.6 8.5 2.3 2.3 5 3.3 8.4 3.5v5c-3-.1-5.7-.8-8.2-2.2v14.7c0 5.8-4.7 10.5-10.5 10.5S9.3 39.3 9.3 33.5 14 23 19.8 23v5.2c-2.9 0-5.3 2.4-5.3 5.3s2.4 5.3 5.3 5.3 5.2-2.4 5.2-5.3V4h-3.5z" fill="#fe2c55"/>
+        <path d="M23.5 2h5c.2 3.3 1.3 6.3 3.6 8.5 2.3 2.3 5 3.3 8.4 3.5v5c-3-.1-5.7-.8-8.2-2.2v14.7c0 5.8-4.7 10.5-10.5 10.5S11.3 37.3 11.3 31.5 16 21 21.8 21v5.2c-2.9 0-5.3 2.4-5.3 5.3s2.4 5.3 5.3 5.3 5.2-2.4 5.2-5.3V2h-3.5z" fill="#25f4ee"/>
+        <path d="M22.5 3h5c.2 3.3 1.3 6.3 3.6 8.5 2.3 2.3 5 3.3 8.4 3.5v5c-3-.1-5.7-.8-8.2-2.2v14.7c0 5.8-4.7 10.5-10.5 10.5S10.3 38.3 10.3 32.5 15 22 20.8 22v5.2c-2.9 0-5.3 2.4-5.3 5.3s2.4 5.3 5.3 5.3 5.2-2.4 5.2-5.3V3h-3.5z" fill="currentColor"/>
       </svg>
     );
   }

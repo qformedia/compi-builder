@@ -1,6 +1,6 @@
 [package]
 name = "compi-builder"
-version = "0.3.0"
+version = "0.4.0"
 description = "Compi Builder - desktop app for managing video clips and projects"
 authors = ["QforMedia"]
 edition = "2021"
