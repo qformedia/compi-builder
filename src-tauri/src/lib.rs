@@ -11,6 +11,7 @@ use tokio::sync::Semaphore;
 use helpers::{
     build_filter_groups, strip_prefix, find_file_by_id, find_downloaded_file,
     probe_duration, friendly_download_error, format_selection_for_url,
+    remove_existing_clip_files,
 };
 
 /// Rate limiter: max 1 concurrent Instagram yt-dlp request
@@ -1794,10 +1795,22 @@ async fn download_clip(
     url: String,
     cookies_browser: Option<String>,
     cookies_file: Option<String>,
+    #[allow(unused_variables)]
+    force: Option<bool>,
 ) -> Result<(), String> {
     let clips_dir = PathBuf::from(&root_folder)
         .join(&project_name)
         .join("clips");
+
+    // When force-redownloading, remove old files so stale/broken files
+    // (e.g. audio-only .m4a from a previous failed format selection)
+    // don't get picked up by find_downloaded_file afterwards.
+    if force.unwrap_or(false) {
+        let removed = remove_existing_clip_files(&clips_dir, &clip_id);
+        if !removed.is_empty() {
+            eprintln!("[download_clip] force: removed old files for {}: {:?}", clip_id, removed);
+        }
+    }
 
     let _ = app.emit("download-progress", DownloadProgress {
         clip_id: clip_id.clone(),

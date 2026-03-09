@@ -115,16 +115,54 @@ pub(crate) fn find_file_by_id(dir: &PathBuf, id_prefix: &str) -> Option<PathBuf>
 
 /// Find a downloaded file by clip ID prefix.
 /// Returns a **relative** path like "clips/ID_title.mp4".
+/// When multiple files match (e.g. a leftover .m4a and a new .mp4),
+/// prefers `.mp4` files, then falls back to the most recently modified.
 pub(crate) fn find_downloaded_file(clips_dir: &PathBuf, clip_id: &str) -> Option<String> {
+    let prefix = format!("{clip_id}_");
+    let mut matches: Vec<(String, std::time::SystemTime)> = Vec::new();
+
     if let Ok(entries) = fs::read_dir(clips_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with(&format!("{clip_id}_")) {
-                return Some(format!("clips/{}", name));
+            if name.starts_with(&prefix) {
+                let mtime = entry.metadata().ok()
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                matches.push((name, mtime));
             }
         }
     }
-    None
+
+    if matches.is_empty() { return None; }
+
+    // Prefer .mp4 files (the intended output format)
+    if let Some(mp4) = matches.iter().find(|(n, _)| n.ends_with(".mp4")) {
+        return Some(format!("clips/{}", mp4.0));
+    }
+
+    // Fall back to most recently modified
+    matches.sort_by(|a, b| b.1.cmp(&a.1));
+    Some(format!("clips/{}", matches[0].0))
+}
+
+/// Remove all existing files for a clip ID from the clips directory.
+/// Called before re-downloading so stale/broken files don't interfere.
+pub(crate) fn remove_existing_clip_files(clips_dir: &PathBuf, clip_id: &str) -> Vec<String> {
+    let prefix = format!("{clip_id}_");
+    let mut removed = Vec::new();
+
+    if let Ok(entries) = fs::read_dir(clips_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name.starts_with(&prefix) {
+                if fs::remove_file(entry.path()).is_ok() {
+                    removed.push(name);
+                }
+            }
+        }
+    }
+
+    removed
 }
 
 /// Get duration of a local video file by reading MP4 headers.
@@ -567,6 +605,60 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let result = find_downloaded_file(&dir.path().to_path_buf(), "12345");
         assert_eq!(result, None);
+    }
+
+    #[test]
+    fn find_downloaded_file_prefers_mp4_over_m4a() {
+        let dir = tempfile::tempdir().unwrap();
+        // Simulate the bug: both an audio-only .m4a and a proper .mp4 exist
+        let _ = fs::File::create(dir.path().join("12345_video.m4a")).unwrap();
+        let _ = fs::File::create(dir.path().join("12345_video.mp4")).unwrap();
+
+        let result = find_downloaded_file(&dir.path().to_path_buf(), "12345");
+        assert_eq!(result, Some("clips/12345_video.mp4".into()));
+    }
+
+    #[test]
+    fn find_downloaded_file_falls_back_to_non_mp4() {
+        let dir = tempfile::tempdir().unwrap();
+        let _ = fs::File::create(dir.path().join("12345_video.webm")).unwrap();
+
+        let result = find_downloaded_file(&dir.path().to_path_buf(), "12345");
+        assert_eq!(result, Some("clips/12345_video.webm".into()));
+    }
+
+    // ── remove_existing_clip_files ───────────────────────────────────────
+
+    #[test]
+    fn remove_existing_clip_files_removes_matching() {
+        let dir = tempfile::tempdir().unwrap();
+        let _ = fs::File::create(dir.path().join("12345_video.mp4")).unwrap();
+        let _ = fs::File::create(dir.path().join("12345_video.m4a")).unwrap();
+        let _ = fs::File::create(dir.path().join("99999_other.mp4")).unwrap();
+
+        let removed = remove_existing_clip_files(&dir.path().to_path_buf(), "12345");
+        assert_eq!(removed.len(), 2);
+        assert!(removed.iter().any(|n| n.contains("12345_video.mp4")));
+        assert!(removed.iter().any(|n| n.contains("12345_video.m4a")));
+        // Other clip's file untouched
+        assert!(dir.path().join("99999_other.mp4").exists());
+    }
+
+    #[test]
+    fn remove_existing_clip_files_empty_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let removed = remove_existing_clip_files(&dir.path().to_path_buf(), "12345");
+        assert!(removed.is_empty());
+    }
+
+    #[test]
+    fn remove_existing_clip_files_no_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let _ = fs::File::create(dir.path().join("99999_clip.mp4")).unwrap();
+
+        let removed = remove_existing_clip_files(&dir.path().to_path_buf(), "12345");
+        assert!(removed.is_empty());
+        assert!(dir.path().join("99999_clip.mp4").exists());
     }
 
     // ── find_file_by_id ──────────────────────────────────────────────────

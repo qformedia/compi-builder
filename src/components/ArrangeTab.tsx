@@ -286,8 +286,15 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
     }
   }, [updateClipField, settings.hubspotToken]);
 
-  const downloadClip = useCallback(async (clip: ProjectClip) => {
+  const downloadClip = useCallback(async (clip: ProjectClip, force = false) => {
     if (!project) return;
+    if (force) {
+      updateClipField(clip.hubspotId, {
+        downloadStatus: "pending",
+        localFile: undefined,
+        localDuration: undefined,
+      });
+    }
     try {
       await invoke("download_clip", {
         rootFolder: settings.rootFolder,
@@ -296,9 +303,10 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
         url: clip.link,
         cookiesBrowser: settings.cookiesBrowser || null,
         cookiesFile: settings.cookiesFile || null,
+        force,
       });
     } catch { /* handled via event listener */ }
-  }, [project, settings]);
+  }, [project, settings, updateClipField]);
 
   const importClipFile = useCallback(async (clip: ProjectClip) => {
     if (!project) return;
@@ -484,14 +492,25 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
             the cinema overlay is the sole live <video> element. */}
         <div className="relative aspect-[9/16] w-full rounded-lg bg-black overflow-hidden flex-shrink-0">
           {!cinemaMode && playerContent}
-          {/* Cinema mode toggle */}
-          <button
-            onClick={() => setCinemaMode(!cinemaMode)}
-            className="absolute top-1.5 right-1.5 z-10 rounded-full bg-black/60 p-1 text-white hover:bg-black/80 cursor-pointer transition-colors"
-            title={cinemaMode ? "Exit cinema mode" : "Cinema mode (16:9)"}
-          >
-            <Maximize2 className="h-3.5 w-3.5" />
-          </button>
+          {/* Player overlay buttons */}
+          <div className="absolute top-1.5 right-1.5 z-10 flex items-center gap-1">
+            {selectedClip && isPlayable(selectedClip) && (
+              <button
+                onClick={() => downloadClip(selectedClip, true)}
+                className="rounded-full bg-black/60 p-1 text-white hover:bg-black/80 cursor-pointer transition-colors"
+                title="Re-download clip"
+              >
+                <Download className="h-3.5 w-3.5" />
+              </button>
+            )}
+            <button
+              onClick={() => setCinemaMode(!cinemaMode)}
+              className="rounded-full bg-black/60 p-1 text-white hover:bg-black/80 cursor-pointer transition-colors"
+              title={cinemaMode ? "Exit cinema mode" : "Cinema mode (16:9)"}
+            >
+              <Maximize2 className="h-3.5 w-3.5" />
+            </button>
+          </div>
         </div>
 
         {/* Metadata panel below player */}
