@@ -312,8 +312,8 @@ describe("ArrangeTab — clip action bar", () => {
       />,
     );
 
-    expect(screen.getByTitle("Re-download clip")).toBeTruthy();
-    expect(screen.getByTitle("Import a local video file")).toBeTruthy();
+    expect(screen.getByTitle("Re-download")).toBeTruthy();
+    expect(screen.getByTitle("Replace video with local file")).toBeTruthy();
   });
 
   it("shows Download and Browse for a pending clip", () => {
@@ -336,8 +336,8 @@ describe("ArrangeTab — clip action bar", () => {
       />,
     );
 
-    expect(screen.getByTitle("Download clip")).toBeTruthy();
-    expect(screen.getByTitle("Import a local video file")).toBeTruthy();
+    expect(screen.getByTitle("Download")).toBeTruthy();
+    expect(screen.getByTitle("Replace video with local file")).toBeTruthy();
   });
 
   it("shows Retry and Browse for a failed clip", () => {
@@ -362,7 +362,7 @@ describe("ArrangeTab — clip action bar", () => {
     );
 
     expect(screen.getByTitle("Retry download")).toBeTruthy();
-    expect(screen.getByTitle("Import a local video file")).toBeTruthy();
+    expect(screen.getByTitle("Replace video with local file")).toBeTruthy();
   });
 
   it("shows Report button for a failed clip after retry", () => {
@@ -388,7 +388,7 @@ describe("ArrangeTab — clip action bar", () => {
     );
 
     expect(screen.getByTitle("Retry download")).toBeTruthy();
-    expect(screen.getByTitle("Report this download issue")).toBeTruthy();
+    expect(screen.getByTitle("Report issue")).toBeTruthy();
   });
 
   it("hides Report button when retryCount is 0", () => {
@@ -402,7 +402,7 @@ describe("ArrangeTab — clip action bar", () => {
       />,
     );
 
-    expect(screen.queryByTitle("Report this download issue")).toBeNull();
+    expect(screen.queryByTitle("Report issue")).toBeNull();
   });
 
   it("shows Report button when retryCount >= 1", () => {
@@ -424,6 +424,6 @@ describe("ArrangeTab — clip action bar", () => {
       />,
     );
 
-    expect(screen.getByTitle("Report this download issue")).toBeTruthy();
+    expect(screen.getByTitle("Report issue")).toBeTruthy();
   });
 });

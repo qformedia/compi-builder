@@ -627,21 +627,21 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
                   </span>
                 ) : ds === "failed" ? (
                   !isXiaohongshu && (
-                    <Tip label="Retry download"><button onClick={() => downloadClip(selectedClip)} className={iconBtn}>
+                    <Tip label="Retry download"><button onClick={() => downloadClip(selectedClip)} className={iconBtn} title="Retry download">
                       <RefreshCw className="h-3.5 w-3.5" />
                     </button></Tip>
                   )
                 ) : isPlayable(selectedClip) ? (
-                  <Tip label="Re-download"><button onClick={() => downloadClip(selectedClip, true)} className={iconBtn}>
+                  <Tip label="Re-download"><button onClick={() => downloadClip(selectedClip, true)} className={iconBtn} title="Re-download">
                     <RefreshCw className="h-3.5 w-3.5" />
                   </button></Tip>
                 ) : (
-                  <Tip label="Download"><button onClick={() => downloadClip(selectedClip)} className={iconBtn}>
+                  <Tip label="Download"><button onClick={() => downloadClip(selectedClip)} className={iconBtn} title="Download">
                     <Download className="h-3.5 w-3.5" />
                   </button></Tip>
                 )}
 
-                <Tip label="Replace video with local file"><button onClick={() => importClipFile(selectedClip)} className={iconBtn}>
+                <Tip label="Replace video with local file"><button onClick={() => importClipFile(selectedClip)} className={iconBtn} title="Replace video with local file">
                   <Film className="h-3.5 w-3.5" />
                 </button></Tip>
 
@@ -702,7 +702,7 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
                       <CheckCircle2 className="h-3.5 w-3.5" />
                     </span></Tip>
                   ) : (
-                    <Tip label="Report issue"><button onClick={() => handleReportIssue(selectedClip)} disabled={reporting} className={`${iconBtn} disabled:opacity-50`}>
+                    <Tip label="Report issue"><button onClick={() => handleReportIssue(selectedClip)} disabled={reporting} className={`${iconBtn} disabled:opacity-50`} title="Report issue">
                       <AlertTriangle className="h-3.5 w-3.5" />
                     </button></Tip>
                   )
