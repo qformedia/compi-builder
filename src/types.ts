@@ -71,6 +71,7 @@ export interface AppSettings {
   rootFolder: string;
   cookiesBrowser: string; // "chrome" | "firefox" | "safari" | "edge" | "brave" | "opera" | "chromium" | ""
   cookiesFile: string;    // manual cookies.txt fallback
+  preferHubSpotPreview: boolean;
 }
 
 export type FeedbackType = "bug" | "feature";

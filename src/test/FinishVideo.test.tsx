@@ -53,7 +53,9 @@ function buildClipsData(
       externalClipId: c.hubspotId,
       creatorId: c.creatorId ?? "",
       videoProjectId: vpId,
-      editingNotes: c.editingNotes ?? "",
+      editingNotes: isMissing
+        ? `Missing file in zip${c.editingNotes ? ` - ${c.editingNotes}` : ""}`
+        : (c.editingNotes ?? ""),
     };
   });
 }
@@ -184,6 +186,24 @@ describe("buildClipsData — CSV payload construction", () => {
     const result = buildClipsData(clips, emptyCreatorMap, "vp-ABC");
     expect(result[0].videoProjectId).toBe("vp-ABC");
     expect(result[1].videoProjectId).toBe("vp-ABC");
+  });
+
+  it("prepends 'Missing file in zip' to editingNotes for missing clips", () => {
+    const clips = [clip({ hubspotId: "c1", order: 0, downloadStatus: "failed", localFile: undefined, editingNotes: "needs color grade" })];
+    const result = buildClipsData(clips, emptyCreatorMap, "vp1");
+    expect(result[0].editingNotes).toBe("Missing file in zip - needs color grade");
+  });
+
+  it("sets editingNotes to 'Missing file in zip' when missing clip has no notes", () => {
+    const clips = [clip({ hubspotId: "c1", order: 0, downloadStatus: "failed", localFile: undefined, editingNotes: undefined })];
+    const result = buildClipsData(clips, emptyCreatorMap, "vp1");
+    expect(result[0].editingNotes).toBe("Missing file in zip");
+  });
+
+  it("does not modify editingNotes for complete clips", () => {
+    const clips = [clip({ hubspotId: "c1", order: 0, editingNotes: "trim start" })];
+    const result = buildClipsData(clips, emptyCreatorMap, "vp1");
+    expect(result[0].editingNotes).toBe("trim start");
   });
 
   it("order is contiguous over all clips, not just completed ones", () => {

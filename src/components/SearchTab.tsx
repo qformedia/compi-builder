@@ -745,6 +745,7 @@ function CreatorRow({
             hubspotToken={settings.hubspotToken}
             searchTags={selectedTags}
             thumbRetryKey={thumbRetryKey}
+            preferHubSpotPreview={settings.preferHubSpotPreview}
           />
         ))}
       </div>

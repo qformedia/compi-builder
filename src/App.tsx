@@ -64,12 +64,13 @@ const DEFAULT_SETTINGS: AppSettings = {
   rootFolder: "",
   cookiesBrowser: "chrome",
   cookiesFile: "",
+  preferHubSpotPreview: true,
 };
 
 function App() {
   const [settings, setSettings] = useState<AppSettings>(() => {
     const saved = localStorage.getItem("compi-settings");
-    return saved ? JSON.parse(saved) : DEFAULT_SETTINGS;
+    return saved ? { ...DEFAULT_SETTINGS, ...JSON.parse(saved) } : DEFAULT_SETTINGS;
   });
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
@@ -574,7 +575,9 @@ function App() {
             externalClipId: c.hubspotId,
             creatorId: c.creatorId ?? "",
             videoProjectId: vpId,
-            editingNotes: c.editingNotes ?? "",
+            editingNotes: isMissing
+              ? `Missing file in zip${c.editingNotes ? ` - ${c.editingNotes}` : ""}`
+              : (c.editingNotes ?? ""),
           };
         });
 

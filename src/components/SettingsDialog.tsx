@@ -156,6 +156,31 @@ export function SettingsDialog({ open, onOpenChange, settings, onSave, onCheckUp
             </div>
           </div>
 
+          {/* HubSpot Preview */}
+          <div className="flex items-center justify-between gap-4">
+            <div className="grid gap-0.5">
+              <Label htmlFor="hs-preview">Preview from HubSpot</Label>
+              <p className="text-xs text-muted-foreground">
+                Play uploaded videos from HubSpot instead of embedding from social networks
+              </p>
+            </div>
+            <button
+              id="hs-preview"
+              role="switch"
+              aria-checked={draft.preferHubSpotPreview ?? true}
+              onClick={() => setDraft({ ...draft, preferHubSpotPreview: !(draft.preferHubSpotPreview ?? true) })}
+              className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
+                (draft.preferHubSpotPreview ?? true) ? "bg-primary" : "bg-muted-foreground/30"
+              }`}
+            >
+              <span
+                className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                  (draft.preferHubSpotPreview ?? true) ? "translate-x-4" : "translate-x-0"
+                }`}
+              />
+            </button>
+          </div>
+
           {/* Manual Cookies File (advanced) */}
           <details className="group">
             <summary className="cursor-pointer text-xs font-medium text-muted-foreground hover:text-foreground">

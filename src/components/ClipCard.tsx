@@ -19,6 +19,7 @@ import {
   CheckCircle,
   FolderOpen,
   StickyNote,
+  Play,
 } from "lucide-react";
 
 // ── Persistent thumbnail cache (survives app restarts & cookie issues) ───────
@@ -85,6 +86,7 @@ export interface ClipCardData {
   notes?: string;
   fetchedThumbnail?: string;
   editingNotes?: string;
+  originalClip?: string;
   // Project-specific fields (optional)
   downloadStatus?: "pending" | "downloading" | "complete" | "failed";
   downloadError?: string;
@@ -114,6 +116,8 @@ export interface ClipCardProps {
   compact?: boolean;
   // Increment to trigger retry of failed thumbnails (e.g. on window focus)
   thumbRetryKey?: number;
+  // When true + originalClip exists, use HubSpot video instead of social embed
+  preferHubSpotPreview?: boolean;
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -145,6 +149,7 @@ export function ClipCard({
   searchTags = [],
   compact = false,
   thumbRetryKey = 0,
+  preferHubSpotPreview = false,
 }: ClipCardProps) {
   const [thumb, setThumb] = useState<string | null>(
     thumbCache.current?.get(clip.link) ?? null,
@@ -281,7 +286,8 @@ export function ClipCard({
     loadThumb(true);
   }, [thumbRetryKey]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  const embedUrl = isActive ? getEmbedUrl(clip.link) : null;
+  const useHubSpotVideo = isActive && preferHubSpotPreview && !!clip.originalClip;
+  const embedUrl = isActive && !useHubSpotVideo ? getEmbedUrl(clip.link) : null;
   const platform = getPlatform(clip.link);
   const ds = clip.downloadStatus;
   const showLicenseType =
@@ -297,7 +303,9 @@ export function ClipCard({
         className="relative aspect-[9/16] w-full cursor-pointer overflow-hidden bg-muted"
         onClick={onTogglePreview}
       >
-        {isActive && embedUrl ? (
+        {useHubSpotVideo ? (
+          <HubSpotVideoPlayer src={clip.originalClip!} onClose={() => onTogglePreview?.()} />
+        ) : isActive && embedUrl ? (
           <>
             <iframe
               src={embedUrl}
@@ -721,6 +729,77 @@ export function ClipCard({
         </button>
       </div>}
     </div>
+  );
+}
+
+// ── Compact HubSpot video player (fits in the small card thumbnail) ──────────
+
+function HubSpotVideoPlayer({ src, onClose }: { src: string; onClose: () => void }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [paused, setPaused] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const progressBarRef = useRef<HTMLDivElement>(null);
+
+  const togglePlay = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const v = videoRef.current;
+    if (!v) return;
+    if (v.paused) { v.play(); setPaused(false); }
+    else { v.pause(); setPaused(true); }
+  };
+
+  const seek = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const v = videoRef.current;
+    const bar = progressBarRef.current;
+    if (!v || !bar || !v.duration) return;
+    const rect = bar.getBoundingClientRect();
+    const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+    v.currentTime = pct * v.duration;
+  };
+
+  return (
+    <>
+      <video
+        ref={videoRef}
+        src={src}
+        className="absolute inset-0 h-full w-full object-cover"
+        autoPlay
+        playsInline
+        loop
+        onTimeUpdate={() => {
+          const v = videoRef.current;
+          if (v && v.duration) setProgress(v.currentTime / v.duration);
+        }}
+        onClick={togglePlay}
+      />
+      {/* Close button */}
+      <button
+        onClick={(e) => { e.stopPropagation(); onClose(); }}
+        className="absolute right-1 top-1 z-10 rounded-full bg-black/60 p-1 text-white hover:bg-black/80"
+      >
+        <X className="h-3.5 w-3.5" />
+      </button>
+      {/* Play/pause overlay (only when paused) */}
+      {paused && (
+        <div className="absolute inset-0 flex items-center justify-center" onClick={togglePlay}>
+          <div className="rounded-full bg-black/50 p-2">
+            <Play className="h-5 w-5 text-white" fill="white" />
+          </div>
+        </div>
+      )}
+      {/* Thin progress bar at bottom */}
+      <div
+        ref={progressBarRef}
+        className="absolute bottom-0 left-0 right-0 z-10 h-1.5 cursor-pointer bg-white/20"
+        onClick={seek}
+      >
+        <div
+          className="h-full bg-white/80 transition-[width] duration-100"
+          style={{ width: `${progress * 100}%` }}
+        />
+      </div>
+    </>
   );
 }
 
