@@ -291,8 +291,9 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
 
   const downloadClip = useCallback(async (clip: ProjectClip, force = false) => {
     if (!project) return;
+    const isRetry = force || clip.downloadStatus === "failed";
     const updates: Partial<ProjectClip> = {
-      retryCount: (clip.retryCount ?? 0) + (force ? 1 : 0),
+      retryCount: (clip.retryCount ?? 0) + (isRetry ? 1 : 0),
     };
     if (force) {
       updates.downloadStatus = "pending";
@@ -517,55 +518,73 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
           </button>
         </div>
 
-        {/* Clip action bar */}
-        {selectedClip && (
-          <div className="flex items-center gap-1 py-1.5">
-            {selectedClip.downloadStatus === "downloading" ? (
-              <span className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-muted-foreground">
-                <Loader2 className="h-3 w-3 animate-spin" /> Downloading...
-              </span>
-            ) : isPlayable(selectedClip) ? (
-              <button
-                onClick={() => downloadClip(selectedClip, true)}
-                className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted cursor-pointer transition-colors"
-                title="Re-download clip"
-              >
-                <RefreshCw className="h-3 w-3" /> Re-download
-              </button>
-            ) : (
-              <button
-                onClick={() => downloadClip(selectedClip)}
-                className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted cursor-pointer transition-colors"
-                title="Download clip"
-              >
-                <Download className="h-3 w-3" /> Download
-              </button>
-            )}
-            <button
-              onClick={() => importClipFile(selectedClip)}
-              className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted cursor-pointer transition-colors"
-              title="Import a local video file"
-            >
-              <FolderOpen className="h-3 w-3" /> Browse
-            </button>
-            {(selectedClip.retryCount ?? 0) >= 1 && isSupabaseConfigured && (
-              reportedClipId === selectedClip.hubspotId ? (
-                <span className="flex items-center gap-1 px-2 py-1 text-[11px] text-green-600">
-                  <CheckCircle2 className="h-3 w-3" /> Reported
-                </span>
-              ) : (
-                <button
-                  onClick={() => handleReportIssue(selectedClip)}
-                  disabled={reporting}
-                  className="flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted cursor-pointer transition-colors disabled:opacity-50"
-                  title="Report this download issue"
-                >
-                  <AlertTriangle className="h-3 w-3" /> Report
+        {/* Clip action bar — single source of truth for all download actions */}
+        {selectedClip && (() => {
+          const ds = selectedClip.downloadStatus;
+          const platform = getPlatform(selectedClip.link);
+          const isChinese = ["Douyin", "Bilibili", "Xiaohongshu"].includes(platform);
+          const isXiaohongshu = platform === "Xiaohongshu";
+          const retried = (selectedClip.retryCount ?? 0) >= 1;
+          const btnClass = "flex items-center gap-1 rounded-md px-2 py-1 text-[11px] text-muted-foreground hover:bg-muted cursor-pointer transition-colors";
+
+          return (
+            <div className="flex flex-col gap-1 py-1.5">
+              {/* Error message (failed clips only) */}
+              {ds === "failed" && (
+                <p className="px-2 text-[10px] text-destructive leading-snug">
+                  {isXiaohongshu
+                    ? "Xiaohongshu videos can't be auto-downloaded — import manually"
+                    : (selectedClip.downloadError ?? "Download failed")}
+                </p>
+              )}
+
+              {/* Action buttons row */}
+              <div className="flex items-center gap-1 flex-wrap">
+                {ds === "downloading" ? (
+                  <span className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-muted-foreground">
+                    <Loader2 className="h-3 w-3 animate-spin" /> Downloading...
+                  </span>
+                ) : ds === "failed" ? (
+                  !isXiaohongshu && (
+                    <button onClick={() => downloadClip(selectedClip)} className={btnClass} title="Retry download">
+                      <RefreshCw className="h-3 w-3" /> Retry
+                    </button>
+                  )
+                ) : isPlayable(selectedClip) ? (
+                  <button onClick={() => downloadClip(selectedClip, true)} className={btnClass} title="Re-download clip">
+                    <RefreshCw className="h-3 w-3" /> Re-download
+                  </button>
+                ) : (
+                  <button onClick={() => downloadClip(selectedClip)} className={btnClass} title="Download clip">
+                    <Download className="h-3 w-3" /> Download
+                  </button>
+                )}
+
+                <button onClick={() => importClipFile(selectedClip)} className={btnClass} title="Import a local video file">
+                  <FolderOpen className="h-3 w-3" /> Browse
                 </button>
-              )
-            )}
-          </div>
-        )}
+
+                {isChinese && (
+                  <button onClick={() => openUrl("https://dy.kukutool.com/en")} className={`${btnClass} text-blue-600 hover:bg-blue-50`} title="Open KuKuTool for Chinese platform downloads">
+                    KuKuTool ↗
+                  </button>
+                )}
+
+                {retried && isSupabaseConfigured && (
+                  reportedClipId === selectedClip.hubspotId ? (
+                    <span className="flex items-center gap-1 px-2 py-1 text-[11px] text-green-600">
+                      <CheckCircle2 className="h-3 w-3" /> Reported
+                    </span>
+                  ) : (
+                    <button onClick={() => handleReportIssue(selectedClip)} disabled={reporting} className={`${btnClass} disabled:opacity-50`} title="Report this download issue">
+                      <AlertTriangle className="h-3 w-3" /> Report
+                    </button>
+                  )
+                )}
+              </div>
+            </div>
+          );
+        })()}
 
         {/* Metadata panel below player */}
         {selectedClip && (
@@ -705,117 +724,34 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
               )}
             </div>
 
-            {/* Download status + actions — compact */}
+            {/* Clip management actions */}
             <div className="border-t" />
-            <div className="flex flex-col gap-1">
-              {/* Error message (failed only, above the row) */}
-              {selectedClip.downloadStatus === "failed" && (() => {
-                const platform = getPlatform(selectedClip.link);
-                const isXiaohongshu = platform === "Xiaohongshu";
-                return (
-                  <p className="text-[10px] text-destructive leading-snug">
-                    {isXiaohongshu
-                      ? "Xiaohongshu videos can't be auto-downloaded — import manually"
-                      : (selectedClip.downloadError ?? "Download failed")}
-                  </p>
-                );
-              })()}
-
-              {/* Single action row: status | thumbnail | remove */}
-              <div className="flex items-center gap-0.5 flex-wrap">
-                {/* Status / primary action */}
-                {(() => {
-                  const ds = selectedClip.downloadStatus;
-                  const platform = getPlatform(selectedClip.link);
-                  const isXiaohongshu = platform === "Xiaohongshu";
-                  const isChinese = ["Douyin", "Bilibili", "Xiaohongshu"].includes(platform);
-
-                  if (ds === "downloading") return (
-                    <span className="flex items-center gap-1 px-1.5 py-0.5 text-[11px] text-muted-foreground">
-                      <Loader2 className="h-3 w-3 animate-spin" />
-                      Downloading…
-                    </span>
-                  );
-                  if (ds === "pending") return (
-                    <span className="flex items-center gap-1 px-1.5 py-0.5 text-[11px] text-muted-foreground">
-                      <Download className="h-3 w-3" />
-                      Queued
-                    </span>
-                  );
-                  if (ds === "complete" && selectedClip.localFile) return (
-                    <button
-                      onClick={() => {
-                        const fullPath = resolveClipPath(settings.rootFolder, project.name, selectedClip.localFile!);
-                        import("@tauri-apps/plugin-opener").then(({ revealItemInDir }) =>
-                          revealItemInDir(fullPath)
-                        ).catch(() => {});
-                      }}
-                      className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-green-600 hover:bg-green-50 cursor-pointer transition-colors"
-                    >
-                      <CheckCircle className="h-3 w-3" />
-                      Downloaded
-                    </button>
-                  );
-                  if (ds === "failed") return (
-                    <>
-                      {!isXiaohongshu && (
-                        <button
-                          onClick={() => downloadClip(selectedClip)}
-                          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-orange-600 hover:bg-orange-50 cursor-pointer transition-colors"
-                        >
-                          <Download className="h-3 w-3" />
-                          Retry
-                        </button>
-                      )}
-                      <button
-                        onClick={() => importClipFile(selectedClip)}
-                        className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-muted cursor-pointer transition-colors"
-                      >
-                        <FolderOpen className="h-3 w-3" />
-                        Import
-                      </button>
-                      {isChinese && (
-                        <button
-                          onClick={() => openUrl("https://dy.kukutool.com/en")}
-                          className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-blue-600 hover:bg-blue-50 cursor-pointer transition-colors"
-                        >
-                          KuKuTool ↗
-                        </button>
-                      )}
-                    </>
-                  );
-                  return null;
-                })()}
-
-                {/* Change thumbnail */}
+            <div className="flex items-center gap-0.5 flex-wrap">
+              <button
+                onClick={() => setThumbModalOpen(true)}
+                className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-muted cursor-pointer transition-colors"
+                title="Change thumbnail"
+              >
+                <ImageIcon className="h-3 w-3" />
+                Thumb
+              </button>
+              {removeClip && (
                 <button
-                  onClick={() => setThumbModalOpen(true)}
-                  className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-muted cursor-pointer transition-colors"
-                  title="Change thumbnail"
+                  onClick={() => {
+                    if (skipConfirmRef.current) {
+                      removeClip(selectedClip.hubspotId);
+                      const next = allClips.find((c) => c.hubspotId !== selectedClip.hubspotId);
+                      setSelectedClipId(next?.hubspotId ?? null);
+                    } else {
+                      setRemoveTarget(selectedClip.hubspotId);
+                    }
+                  }}
+                  className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-destructive hover:bg-destructive/10 cursor-pointer transition-colors"
                 >
-                  <ImageIcon className="h-3 w-3" />
-                  Thumb
+                  <Trash2 className="h-3 w-3" />
+                  Remove
                 </button>
-
-                {/* Remove */}
-                {removeClip && (
-                  <button
-                    onClick={() => {
-                      if (skipConfirmRef.current) {
-                        removeClip(selectedClip.hubspotId);
-                        const next = allClips.find((c) => c.hubspotId !== selectedClip.hubspotId);
-                        setSelectedClipId(next?.hubspotId ?? null);
-                      } else {
-                        setRemoveTarget(selectedClip.hubspotId);
-                      }
-                    }}
-                    className="flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-destructive hover:bg-destructive/10 cursor-pointer transition-colors"
-                  >
-                    <Trash2 className="h-3 w-3" />
-                    Remove
-                  </button>
-                )}
-              </div>
+              )}
             </div>
           </div>
         )}

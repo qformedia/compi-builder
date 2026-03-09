@@ -233,7 +233,7 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
   );
 
   const search = async (loadMore = false) => {
-    if (selectedTags.length === 0) return;
+    if (selectedTags.length === 0 && selectedCreator === null) return;
     setLoading(true);
     setError(undefined);
     try {
@@ -309,7 +309,7 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
   const searchRef = useRef(search);
   searchRef.current = search;
   useEffect(() => {
-    if (selectedTags.length > 0) {
+    if (selectedTags.length > 0 || selectedCreator !== null) {
       searchRef.current(false);
     }
   }, [selectedTags, selectedScores, neverUsed, tagMode, selectedCreator]);

@@ -336,6 +336,57 @@ describe("ArrangeTab — clip action bar", () => {
     expect(screen.getByTitle("Import a local video file")).toBeTruthy();
   });
 
+  it("shows Retry and Browse for a failed clip", () => {
+    const failedProject: Project = {
+      ...projectWithDownloadedClip,
+      clips: [{
+        ...projectWithDownloadedClip.clips[0],
+        downloadStatus: "failed",
+        downloadError: "Some error",
+        localFile: undefined,
+      }],
+    };
+
+    render(
+      <ArrangeTab
+        settings={settings}
+        project={failedProject}
+        setProject={noop}
+        isActive={true}
+        removeClip={noop}
+      />,
+    );
+
+    expect(screen.getByTitle("Retry download")).toBeTruthy();
+    expect(screen.getByTitle("Import a local video file")).toBeTruthy();
+  });
+
+  it("shows Report button for a failed clip after retry", () => {
+    const failedRetried: Project = {
+      ...projectWithDownloadedClip,
+      clips: [{
+        ...projectWithDownloadedClip.clips[0],
+        downloadStatus: "failed",
+        downloadError: "Some error",
+        localFile: undefined,
+        retryCount: 1,
+      }],
+    };
+
+    render(
+      <ArrangeTab
+        settings={settings}
+        project={failedRetried}
+        setProject={noop}
+        isActive={true}
+        removeClip={noop}
+      />,
+    );
+
+    expect(screen.getByTitle("Retry download")).toBeTruthy();
+    expect(screen.getByTitle("Report this download issue")).toBeTruthy();
+  });
+
   it("hides Report button when retryCount is 0", () => {
     render(
       <ArrangeTab
