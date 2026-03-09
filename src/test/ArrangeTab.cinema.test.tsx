@@ -106,6 +106,7 @@ const settings: AppSettings = {
   rootFolder: "/projects",
   cookiesBrowser: "chrome",
   cookiesFile: "",
+  preferHubSpotPreview: true,
 };
 
 const projectWithDownloadedClip: Project = {
