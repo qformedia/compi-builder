@@ -7,36 +7,7 @@ on:
 
 jobs:
   test:
-    name: cargo test (${{ matrix.os }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: macos-latest
-          - os: windows-2022
-
-    runs-on: ${{ matrix.os }}
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Rust cache
-        uses: swatinem/rust-cache@v2
-        with:
-          workspaces: "./src-tauri -> target"
-          cache-on-failure: true
-
-      - uses: ./.github/actions/sidecar-placeholders
-
-      - name: Run Rust tests
-        working-directory: src-tauri
-        run: cargo test --lib
-
-  frontend-test:
-    name: npm test
+    name: Tests (Linux)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -48,14 +19,30 @@ jobs:
           cache: npm
           cache-dependency-path: package-lock.json
 
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: "./src-tauri -> target"
+          cache-on-failure: true
+
       - name: Install dependencies
         run: npm ci
 
-      - name: Run tests
+      - name: TypeScript type check
+        run: npx tsc --noEmit
+
+      - name: Frontend tests
         run: npm test
 
+      - name: Rust tests
+        working-directory: src-tauri
+        run: cargo test --lib
+
   build:
-    needs: [test, frontend-test]
+    needs: test
     strategy:
       fail-fast: false
       matrix:
@@ -63,15 +50,9 @@ jobs:
           - platform: macos-latest
             args: "--target aarch64-apple-darwin"
             rust_target: aarch64-apple-darwin
-            suffix: aarch64
-          - platform: macos-latest
-            args: "--target x86_64-apple-darwin"
-            rust_target: x86_64-apple-darwin
-            suffix: x64
           - platform: windows-2022
             args: ""
             rust_target: x86_64-pc-windows-msvc
-            suffix: x64
 
     runs-on: ${{ matrix.platform }}
 
@@ -105,9 +86,7 @@ jobs:
           mkdir -p src-tauri/binaries
           curl -fSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos \
             -o src-tauri/binaries/yt-dlp-aarch64-apple-darwin
-          cp src-tauri/binaries/yt-dlp-aarch64-apple-darwin \
-            src-tauri/binaries/yt-dlp-x86_64-apple-darwin
-          chmod +x src-tauri/binaries/yt-dlp-*
+          chmod +x src-tauri/binaries/yt-dlp-aarch64-apple-darwin
 
       - name: Download yt-dlp sidecar (Windows)
         if: runner.os == 'Windows'
@@ -129,12 +108,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           mkdir -p artifacts
-          SUFFIX="${{ matrix.suffix }}"
-          TARGET="${{ matrix.rust_target }}"
-          BDIR="src-tauri/target/${TARGET}/release/bundle"
-
-          echo "=== Bundle outputs ==="
-          find "$BDIR" -type f 2>/dev/null | sort
+          BDIR="src-tauri/target/aarch64-apple-darwin/release/bundle"
 
           BUNDLE=$(find "$BDIR" -name "*.app.tar.gz" -not -name "*.sig" -type f | head -1)
           SIG=$(find "$BDIR" -name "*.app.tar.gz.sig" -type f | head -1)
@@ -144,11 +118,9 @@ jobs:
           [ -z "$SIG" ]    && { echo "ERROR: .app.tar.gz.sig not found"; exit 1; }
           [ -z "$DMG" ]    && { echo "ERROR: .dmg not found"; exit 1; }
 
-          cp "$BUNDLE" "artifacts/CompiFlow_${SUFFIX}.app.tar.gz"
-          cp "$SIG"    "artifacts/CompiFlow_${SUFFIX}.app.tar.gz.sig"
-          cp "$DMG"    "artifacts/CompiFlow_${SUFFIX}.dmg"
-
-          ls -la artifacts/
+          cp "$BUNDLE" "artifacts/CompiFlow_mac.app.tar.gz"
+          cp "$SIG"    "artifacts/CompiFlow_mac.app.tar.gz.sig"
+          cp "$DMG"    "artifacts/CompiFlow_mac.dmg"
 
       - name: Collect artifacts (Windows)
         if: runner.os == 'Windows'
@@ -156,19 +128,14 @@ jobs:
         run: |
           mkdir -p artifacts
 
-          echo "=== Bundle outputs ==="
-          find src-tauri/target -name "*-setup.exe" -o -name "*-setup.exe.sig" 2>/dev/null | sort
-
           SETUP_EXE=$(find src-tauri/target -name "*-setup.exe" -not -name "*.sig" -type f | head -1)
           SETUP_SIG=$(find src-tauri/target -name "*-setup.exe.sig" -type f | head -1)
 
           [ -z "$SETUP_EXE" ] && { echo "ERROR: setup.exe not found"; exit 1; }
           [ -z "$SETUP_SIG" ] && { echo "ERROR: setup.exe.sig not found"; exit 1; }
 
-          cp "$SETUP_EXE" "artifacts/CompiFlow_x64-setup.exe"
-          cp "$SETUP_SIG" "artifacts/CompiFlow_x64-setup.exe.sig"
-
-          ls -la artifacts/
+          cp "$SETUP_EXE" "artifacts/CompiFlow_win-setup.exe"
+          cp "$SETUP_SIG" "artifacts/CompiFlow_win-setup.exe.sig"
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -188,33 +155,25 @@ jobs:
           path: assets
           merge-multiple: true
 
-      - name: Verify all required files
+      - name: Verify required files
         run: |
-          echo "=== All collected assets ==="
           ls -la assets/
-
           for f in \
-            CompiFlow_aarch64.app.tar.gz \
-            CompiFlow_aarch64.app.tar.gz.sig \
-            CompiFlow_x64.app.tar.gz \
-            CompiFlow_x64.app.tar.gz.sig \
-            CompiFlow_x64-setup.exe \
-            CompiFlow_x64-setup.exe.sig \
+            CompiFlow_mac.app.tar.gz \
+            CompiFlow_mac.app.tar.gz.sig \
+            CompiFlow_win-setup.exe \
+            CompiFlow_win-setup.exe.sig \
           ; do
             [ -f "assets/$f" ] || { echo "MISSING: $f"; exit 1; }
           done
-
-          echo "All critical updater files present."
 
       - name: Create release on public repo
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           TAG="${{ github.ref_name }}"
-
           gh release delete "$TAG" \
             --repo qformedia/compi-builder-releases --yes 2>/dev/null || true
-
           gh release create "$TAG" assets/* \
             --repo qformedia/compi-builder-releases \
             --title "CompiFlow ${TAG}" \
@@ -229,33 +188,27 @@ jobs:
           BASE="https://github.com/qformedia/compi-builder-releases/releases/download/${TAG}"
           PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 
-          SIG_AARCH64=$(cat assets/CompiFlow_aarch64.app.tar.gz.sig)
-          SIG_X64=$(cat assets/CompiFlow_x64.app.tar.gz.sig)
-          SIG_WIN=$(cat assets/CompiFlow_x64-setup.exe.sig)
+          SIG_MAC=$(cat assets/CompiFlow_mac.app.tar.gz.sig)
+          SIG_WIN=$(cat assets/CompiFlow_win-setup.exe.sig)
 
           jq -n \
             --arg version "$VERSION" \
             --arg notes "CompiFlow ${TAG}" \
             --arg pub_date "$PUB_DATE" \
-            --arg sig_aarch64 "$SIG_AARCH64" \
-            --arg url_aarch64 "${BASE}/CompiFlow_aarch64.app.tar.gz" \
-            --arg sig_x64 "$SIG_X64" \
-            --arg url_x64 "${BASE}/CompiFlow_x64.app.tar.gz" \
+            --arg sig_mac "$SIG_MAC" \
+            --arg url_mac "${BASE}/CompiFlow_mac.app.tar.gz" \
             --arg sig_win "$SIG_WIN" \
-            --arg url_win "${BASE}/CompiFlow_x64-setup.exe" \
+            --arg url_win "${BASE}/CompiFlow_win-setup.exe" \
             '{
               version: $version,
               notes: $notes,
               pub_date: $pub_date,
               platforms: {
-                "darwin-aarch64": { signature: $sig_aarch64, url: $url_aarch64 },
-                "darwin-x86_64": { signature: $sig_x64, url: $url_x64 },
+                "darwin-aarch64": { signature: $sig_mac, url: $url_mac },
+                "darwin-x86_64":  { signature: $sig_mac, url: $url_mac },
                 "windows-x86_64": { signature: $sig_win, url: $url_win }
               }
             }' > latest.json
-
-          echo "Generated latest.json:"
-          cat latest.json
 
           gh release upload "$TAG" latest.json \
             --repo qformedia/compi-builder-releases --clobber
