@@ -1,0 +1,71 @@
+---
+description: Rules for modifying the video download pipeline (yt-dlp, clip files, video playback). Ensures cross-platform correctness.
+globs: src-tauri/src/lib.rs, src-tauri/src/helpers.rs, src/components/ArrangeTab.tsx, src/App.tsx, .github/workflows/release.yml
+alwaysApply: false
+---
+
+# Download System Rules
+
+Read `docs/download-system-requirements.md` before making changes to the
+download pipeline. It contains the full specification, flow diagrams, and
+invariants.
+
+## Architecture
+
+- **`src-tauri/src/helpers.rs`**: All testable pure/helper functions live here
+  with `pub(crate)` visibility. Tests are in `#[cfg(test)] mod tests` at the
+  bottom of the file. Run `cargo test` in `src-tauri/` to verify.
+- **`src-tauri/src/lib.rs`**: Tauri commands and wiring only. Imports helpers.
+
+When adding new helper logic, put it in `helpers.rs` and add tests.
+
+## Cross-Platform Checklist
+
+Before finishing any change to download-related code, verify:
+
+- [ ] **Format selection**: `format_selection_for_url()` returns the correct
+      `-f` arg per platform (Instagram uses `best`, others use
+      `bestvideo+bestaudio/best`)
+- [ ] **`--merge-output-format mp4`** is always present
+- [ ] **macOS PATH**: sidecar and fallback both get `augmented_path()` via `.env("PATH", ...)`
+- [ ] **Windows cookie workaround**: `apply_windows_cookie_workaround` runs before yt-dlp on Windows
+- [ ] **Windows CREATE_NO_WINDOW**: system fallback uses `creation_flags(0x08000000)`
+- [ ] **Cookie cascade**: retry order is browser → file → none (never skip the no-cookies fallback)
+- [ ] **File discovery**: output template prefix matches what `find_downloaded_file` expects
+- [ ] **Range support**: `localfile://` protocol serves correct `Content-Range` headers
+- [ ] **OS gates**: all platform-specific code uses `#[cfg(target_os = "...")]`
+- [ ] **Tests pass**: run `cargo test` in `src-tauri/` and verify all pass
+
+## Common Pitfalls
+
+1. **Black videos on Windows/Instagram**: Instagram reports `vcodec: null`
+   for h264 streams. Using `bestvideo+bestaudio` can select a VP9 DASH
+   video-only stream → black video. Always use `format_selection_for_url()`
+   which returns `best` for Instagram.
+
+2. **"yt-dlp not found" in .app bundles**: macOS .app bundles don't
+   inherit shell PATH. Always use `augmented_path()` and `find_system_ytdlp()`.
+
+3. **Cookie DB locked on Windows**: Chromium locks Cookies SQLite. The
+   copy-to-temp workaround in `apply_windows_cookie_workaround` is required.
+
+4. **File not found after download**: If you change the `-o` template,
+   update `find_downloaded_file` to match the new naming pattern.
+
+5. **Duration probe fails**: `probe_duration` only works for MP4.
+   Non-MP4 outputs will have `localDuration: None`.
+
+## When Adding yt-dlp Arguments
+
+- Check yt-dlp docs for cross-platform behavior differences
+- Test the exact command line manually on both macOS and Windows
+- Never add args that change the output container format without updating
+  the `localfile://` MIME type list and `probe_duration`
+- Add a test for any new URL-dependent logic in `helpers.rs`
+
+## Error Messages
+
+- All user-facing errors go through `friendly_download_error()`
+- Add new patterns there when handling new failure modes
+- Keep messages actionable (tell the user what to do, not what went wrong internally)
+- Platform-aware: don't mention `brew` on Windows

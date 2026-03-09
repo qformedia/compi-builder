@@ -1,0 +1,237 @@
+/**
+ * Tests for the cinema mode (fullscreen overlay) in ArrangeTab.
+ *
+ * Bug: Clicking cinema mode caused double audio because playerContent was
+ * rendered in both the left column and the overlay simultaneously — two
+ * independent <video> elements, both playing audio at the same time.
+ *
+ * Fix: The left column renders the player only when cinemaMode === false.
+ * The overlay renders the player only when cinemaMode === true.
+ * At most one <MediaPlayer> instance exists at any given time.
+ */
+
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { render, screen, fireEvent, act } from "@testing-library/react";
+
+// ---------------------------------------------------------------------------
+// Module mocks — must be declared before any component imports so that
+// Vitest's hoisting runs these factories before the real modules load.
+// ---------------------------------------------------------------------------
+
+// @vidstack/react reads localStorage at module init time; mock it entirely.
+vi.mock("@vidstack/react", () => ({
+  MediaPlayer: ({ children, ...props }: any) => (
+    <div data-testid="media-player" data-src={props.src ?? ""}>
+      {children}
+    </div>
+  ),
+  MediaProvider: () => <div data-testid="media-provider" />,
+  useMediaPlayer: () => null,
+  MediaPlayerInstance: class {},
+}));
+vi.mock("@vidstack/react/icons", () => ({
+  default: {},
+  defaultLayoutIcons: {},
+}));
+vi.mock("@vidstack/react/player/layouts/default", () => ({
+  DefaultVideoLayout: () => null,
+  defaultLayoutIcons: {},
+}));
+vi.mock("@vidstack/react/player/styles/default/theme.css", () => ({}));
+vi.mock("@vidstack/react/player/styles/default/layouts/video.css", () => ({}));
+
+// DnD-kit — not relevant to playback tests; pass-through stubs.
+vi.mock("@dnd-kit/core", async (importOriginal) => {
+  const actual = await importOriginal<any>();
+  return {
+    ...actual,
+    DndContext: ({ children }: any) => <div>{children}</div>,
+    useSensor: vi.fn(),
+    useSensors: vi.fn(() => []),
+  };
+});
+vi.mock("@dnd-kit/sortable", async (importOriginal) => {
+  const actual = await importOriginal<any>();
+  return {
+    ...actual,
+    SortableContext: ({ children }: any) => <div>{children}</div>,
+    useSortable: () => ({
+      attributes: {},
+      listeners: {},
+      setNodeRef: vi.fn(),
+      transform: null,
+      transition: null,
+      isDragging: false,
+    }),
+    arrayMove: vi.fn((arr: any[]) => arr),
+  };
+});
+
+// Tauri APIs
+vi.mock("@tauri-apps/api/core", () => ({
+  invoke: vi.fn(() => Promise.resolve()),
+  convertFileSrc: vi.fn((p: string) => `localfile://localhost/${p}`),
+}));
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+vi.mock("@tauri-apps/plugin-opener", () => ({
+  openUrl: vi.fn(),
+  revealItemInDir: vi.fn(),
+}));
+
+// ---------------------------------------------------------------------------
+// Imports after mocks
+// ---------------------------------------------------------------------------
+
+import { ArrangeTab } from "@/components/ArrangeTab";
+import type { AppSettings, Project } from "@/types";
+
+// ---------------------------------------------------------------------------
+// Fixtures
+// ---------------------------------------------------------------------------
+
+const settings: AppSettings = {
+  hubspotToken: "tok",
+  rootFolder: "/projects",
+  cookiesBrowser: "chrome",
+  cookiesFile: "",
+};
+
+const projectWithDownloadedClip: Project = {
+  name: "Test Project",
+  createdAt: "1234567890",
+  clips: [
+    {
+      hubspotId: "clip1",
+      link: "https://instagram.com/p/abc/",
+      creatorName: "Creator A",
+      tags: [],
+      score: "A",
+      downloadStatus: "complete",
+      order: 0,
+      localFile: "clips/clip1_video.mp4",
+      localDuration: 10,
+    },
+  ],
+};
+
+const noop = () => {};
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+describe("ArrangeTab — cinema mode: single MediaPlayer instance invariant", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("renders exactly one MediaPlayer in normal mode", () => {
+    render(
+      <ArrangeTab
+        settings={settings}
+        project={projectWithDownloadedClip}
+        setProject={noop}
+        isActive={true}
+        removeClip={noop}
+      />,
+    );
+
+    expect(screen.queryAllByTestId("media-player")).toHaveLength(1);
+  });
+
+  it("renders exactly one MediaPlayer when cinema mode is open", async () => {
+    render(
+      <ArrangeTab
+        settings={settings}
+        project={projectWithDownloadedClip}
+        setProject={noop}
+        isActive={true}
+        removeClip={noop}
+      />,
+    );
+
+    const cinemaBtn = screen.getByTitle("Cinema mode (16:9)");
+    await act(async () => { fireEvent.click(cinemaBtn); });
+
+    // The critical assertion: never two players at once
+    expect(screen.queryAllByTestId("media-player")).toHaveLength(1);
+  });
+
+  it("hides the inline player while the cinema overlay is open", async () => {
+    render(
+      <ArrangeTab
+        settings={settings}
+        project={projectWithDownloadedClip}
+        setProject={noop}
+        isActive={true}
+        removeClip={noop}
+      />,
+    );
+
+    // Before: one player, no overlay (the toggle button says "Cinema mode")
+    expect(screen.queryAllByTestId("media-player")).toHaveLength(1);
+    expect(screen.getByTitle("Cinema mode (16:9)")).toBeTruthy();
+
+    // Open cinema mode
+    await act(async () => {
+      fireEvent.click(screen.getByTitle("Cinema mode (16:9)"));
+    });
+
+    // After: two "Exit cinema mode" buttons exist — the toggle in the left
+    // column (which flips its title) and the X button inside the overlay.
+    // Still only ONE player, confirming the fix.
+    expect(screen.getAllByTitle("Exit cinema mode")).toHaveLength(2);
+    expect(screen.queryAllByTestId("media-player")).toHaveLength(1);
+  });
+
+  it("restores the inline player after closing cinema mode", async () => {
+    render(
+      <ArrangeTab
+        settings={settings}
+        project={projectWithDownloadedClip}
+        setProject={noop}
+        isActive={true}
+        removeClip={noop}
+      />,
+    );
+
+    // Open cinema mode
+    await act(async () => {
+      fireEvent.click(screen.getByTitle("Cinema mode (16:9)"));
+    });
+
+    // Close via the overlay's own X button (the second "Exit cinema mode" button)
+    const exitButtons = screen.getAllByTitle("Exit cinema mode");
+    await act(async () => {
+      fireEvent.click(exitButtons[exitButtons.length - 1]);
+    });
+
+    // Back to one player, toggle button says "Cinema mode" again
+    expect(screen.queryAllByTestId("media-player")).toHaveLength(1);
+    expect(screen.queryAllByTitle("Exit cinema mode")).toHaveLength(0);
+    expect(screen.getByTitle("Cinema mode (16:9)")).toBeTruthy();
+  });
+
+  it("renders no MediaPlayer when the clip is not yet downloaded", () => {
+    const projectPending: Project = {
+      ...projectWithDownloadedClip,
+      clips: [{
+        ...projectWithDownloadedClip.clips[0],
+        downloadStatus: "pending",
+        localFile: undefined,
+      }],
+    };
+
+    render(
+      <ArrangeTab
+        settings={settings}
+        project={projectPending}
+        setProject={noop}
+        isActive={true}
+        removeClip={noop}
+      />,
+    );
+
+    expect(screen.queryAllByTestId("media-player")).toHaveLength(0);
+  });
+});

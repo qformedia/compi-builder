@@ -30,6 +30,41 @@ jobs:
           workspaces: "./src-tauri -> target"
           cache-on-failure: true
 
-      - name: Run tests
+      - name: Run Rust tests
         working-directory: src-tauri
         run: cargo test --lib
+
+  frontend-test:
+    name: npm test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+
+      - name: Install cargo-llvm-cov
+        if: matrix.os == 'macos-latest'
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Coverage report
+        if: matrix.os == 'macos-latest'
+        working-directory: src-tauri
+        run: cargo llvm-cov --lib --lcov --output-path lcov.info
+
+      - name: Upload coverage to Codecov
+        if: matrix.os == 'macos-latest'
+        uses: codecov/codecov-action@v5
+        with:
+          files: src-tauri/lcov.info
+          fail_ci_if_error: false

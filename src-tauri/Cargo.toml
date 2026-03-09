@@ -37,3 +37,6 @@ regex = "1"
 base64 = "0.22"
 which = "7"
 
+[dev-dependencies]
+tempfile = "3"
+

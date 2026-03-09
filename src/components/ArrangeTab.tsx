@@ -137,6 +137,14 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
     }
   }, [isActive]);
 
+  // Pause the inline player before cinema mode mounts its own instance,
+  // preventing two <video> elements from playing audio simultaneously.
+  useEffect(() => {
+    if (cinemaMode && playerRef.current) {
+      playerRef.current.pause();
+    }
+  }, [cinemaMode]);
+
   const allClips = project?.clips ?? [];
 
   const selectedClip = allClips.find(
@@ -469,9 +477,10 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
     <div className="flex h-full overflow-hidden">
       {/* ── Left column: Player + Metadata ── */}
       <div className="flex flex-shrink-0 flex-col pr-2" style={{ width: leftWidth }}>
-        {/* Video player */}
+        {/* Video player — hidden (not unmounted) while cinema mode is active so
+            the cinema overlay is the sole live <video> element. */}
         <div className="relative aspect-[9/16] w-full rounded-lg bg-black overflow-hidden flex-shrink-0">
-          {playerContent}
+          {!cinemaMode && playerContent}
           {/* Cinema mode toggle */}
           <button
             onClick={() => setCinemaMode(!cinemaMode)}

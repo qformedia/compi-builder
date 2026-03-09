@@ -1,11 +1,17 @@
+mod helpers;
+
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::BufReader;
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter};
 use tauri_plugin_shell::ShellExt;
 use once_cell::sync::Lazy;
 use tokio::sync::Semaphore;
+
+use helpers::{
+    build_filter_groups, strip_prefix, find_file_by_id, find_downloaded_file,
+    probe_duration, friendly_download_error, format_selection_for_url,
+};
 
 /// Rate limiter: max 1 concurrent Instagram yt-dlp request
 static INSTAGRAM_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(1));
@@ -133,85 +139,6 @@ async fn fetch_tag_options(
     Ok(serde_json::json!(options))
 }
 
-/// Build HubSpot filterGroups for External Clips search.
-/// `tag_mode` = "AND" → one group with all tag filters; "OR" → one group per tag.
-/// When `creator_main_link` is provided, every group is narrowed to that creator.
-fn build_filter_groups(
-    tags: &[String],
-    scores: &[String],
-    never_used: bool,
-    tag_mode: &str,
-    creator_main_link: Option<&str>,
-) -> Vec<serde_json::Value> {
-    // Shared filters (always applied)
-    let mut shared: Vec<serde_json::Value> = Vec::new();
-
-    if !scores.is_empty() {
-        shared.push(serde_json::json!({
-            "propertyName": "score",
-            "operator": "IN",
-            "values": scores
-        }));
-    }
-
-    if never_used {
-        shared.push(serde_json::json!({
-            "propertyName": "num_of_published_video_project",
-            "operator": "EQ",
-            "value": "0"
-        }));
-    }
-
-    shared.push(serde_json::json!({
-        "propertyName": "creator_status",
-        "operator": "EQ",
-        "value": "Granted"
-    }));
-
-    shared.push(serde_json::json!({
-        "propertyName": "link_not_working_anymore",
-        "operator": "NEQ",
-        "value": "true"
-    }));
-
-    if let Some(link) = creator_main_link {
-        shared.push(serde_json::json!({
-            "propertyName": "creator_main_link",
-            "operator": "EQ",
-            "value": link
-        }));
-    }
-
-    if tags.is_empty() {
-        return vec![serde_json::json!({ "filters": shared })];
-    }
-
-    if tag_mode == "OR" {
-        // One filter group per tag, each combined with shared filters
-        tags.iter()
-            .map(|tag| {
-                let mut group = shared.clone();
-                group.push(serde_json::json!({
-                    "propertyName": "tags",
-                    "operator": "CONTAINS_TOKEN",
-                    "value": tag
-                }));
-                serde_json::json!({ "filters": group })
-            })
-            .collect()
-    } else {
-        // AND: all tags in one filter group
-        let mut group = shared;
-        for tag in tags {
-            group.push(serde_json::json!({
-                "propertyName": "tags",
-                "operator": "CONTAINS_TOKEN",
-                "value": tag
-            }));
-        }
-        vec![serde_json::json!({ "filters": group })]
-    }
-}
 
 #[tauri::command]
 async fn search_clips(
@@ -979,20 +906,6 @@ async fn order_clips(
     }))
 }
 
-/// Find a file in a directory whose name contains the given ID prefix
-fn find_file_by_id(dir: &PathBuf, id_prefix: &str) -> Option<PathBuf> {
-    if id_prefix.is_empty() { return None; }
-    let entries = fs::read_dir(dir).ok()?;
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().to_string();
-        // Strip our prefixes to find the underlying ID
-        let clean = strip_prefix(&name);
-        if clean.starts_with(id_prefix) {
-            return Some(entry.path());
-        }
-    }
-    None
-}
 
 /// Generate a CSV file matching the HubSpot workspace report format.
 /// The frontend passes pre-merged clip+creator data as JSON objects.
@@ -1162,22 +1075,6 @@ async fn order_and_zip_clips(
     }))
 }
 
-/// Strip existing prefixes: "3 - ", "unused_", or both
-fn strip_prefix(name: &str) -> String {
-    let mut s = name.to_string();
-    // Strip "unused_"
-    if let Some(rest) = s.strip_prefix("unused_") {
-        s = rest.to_string();
-    }
-    // Strip "N - " (digit(s) + " - ")
-    if let Some(pos) = s.find(" - ") {
-        let prefix = &s[..pos];
-        if prefix.chars().all(|c| c.is_ascii_digit()) {
-            s = s[pos + 3..].to_string();
-        }
-    }
-    s
-}
 
 /// Import a local file as a clip: copies it into the project's clips/ folder
 /// with the HubSpot clip ID prefix. Returns the relative path.
@@ -1517,39 +1414,9 @@ fn apply_windows_cookie_workaround(args: &mut Vec<String>) {
     args[browser_idx + 1] = format!("{}:{}", browser_name, temp_profile.display());
 }
 
-/// macOS .app bundles don't inherit the user's shell PATH. Build an augmented
-/// PATH that includes well-known Homebrew directories so that yt-dlp (and any
-/// runtimes it spawns, like deno for YouTube's n-challenge) can be found.
 #[cfg(target_os = "macos")]
-fn augmented_path() -> String {
-    let extra = ["/opt/homebrew/bin", "/usr/local/bin"];
-    let current = std::env::var("PATH").unwrap_or_default();
-    let mut parts: Vec<&str> = extra.to_vec();
-    if !current.is_empty() {
-        parts.push(&current);
-    }
-    parts.join(":")
-}
-
-/// Resolve the system-installed yt-dlp path, checking common locations that may
-/// not be in PATH when launched as a macOS .app bundle.
-fn find_system_ytdlp() -> Option<std::path::PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        let extra_paths = [
-            "/opt/homebrew/bin/yt-dlp",
-            "/usr/local/bin/yt-dlp",
-        ];
-        for p in &extra_paths {
-            let path = std::path::PathBuf::from(p);
-            if path.exists() {
-                return Some(path);
-            }
-        }
-    }
-
-    which::which("yt-dlp").ok()
-}
+use helpers::augmented_path;
+use helpers::find_system_ytdlp;
 
 /// Run yt-dlp with args, trying bundled sidecar first then system PATH as fallback
 async fn run_ytdlp(app: &AppHandle, args: &[String]) -> Result<YtDlpOutput, String> {
@@ -1866,16 +1733,6 @@ async fn update_clip_property(
     Ok(())
 }
 
-/// Detect platform name from URL for user-friendly error messages
-fn detect_platform(url: &str) -> &str {
-    if url.contains("instagram.com") { "Instagram" }
-    else if url.contains("tiktok.com") { "TikTok" }
-    else if url.contains("douyin.com") { "Douyin" }
-    else if url.contains("youtube.com") || url.contains("youtu.be") { "YouTube" }
-    else if url.contains("bilibili.com") { "Bilibili" }
-    else if url.contains("xiaohongshu.com") { "Xiaohongshu" }
-    else { "this platform" }
-}
 
 // ── Project Commands ────────────────────────────────────────────────────────
 
@@ -2035,9 +1892,10 @@ async fn run_ytdlp_download(
     cookies_browser: &Option<String>,
     cookies_file: &Option<String>,
 ) -> Result<(bool, Vec<u8>), String> {
+    let fmt = format_selection_for_url(url);
     let mut args = vec![
         "--no-warnings".to_string(),
-        "-f".to_string(), "bestvideo+bestaudio/best".to_string(),
+        "-f".to_string(), fmt.to_string(),
         "--merge-output-format".to_string(), "mp4".to_string(),
         "-o".to_string(), output_template.to_string(),
         "--newline".to_string(),
@@ -2066,60 +1924,6 @@ async fn run_ytdlp_download(
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Translate raw yt-dlp stderr into user-friendly error messages
-fn friendly_download_error(stderr: &str, url: &str, cookies_browser: &Option<String>) -> String {
-    let lower = stderr.to_lowercase();
-    let platform = detect_platform(url);
-    let browser = cookies_browser.as_deref().unwrap_or("your browser");
-
-    // Douyin extractor is broken in yt-dlp (known upstream bug)
-    if lower.contains("[douyin]") && lower.contains("fresh cookies") {
-        return "Douyin downloads are temporarily broken in yt-dlp (known bug). Check for yt-dlp updates.".into();
-    }
-
-    if lower.contains("not granting access") || lower.contains("empty media response") {
-        return format!(
-            "Login required. Open {} and log into {}, then close it and retry.",
-            browser, platform
-        );
-    }
-    if lower.contains("could not find") && lower.contains("cookie") {
-        return format!(
-            "Could not read cookies from {}. Make sure it's installed. Try closing {} before downloading.",
-            browser, browser
-        );
-    }
-    if lower.contains("could not copy") && lower.contains("cookie") {
-        return format!(
-            "Could not copy {} cookie database. Close {} completely and retry.",
-            browser, browser
-        );
-    }
-    if lower.contains("failed to decrypt") && lower.contains("cookie") {
-        return format!(
-            "Cannot decrypt {} cookies. Try closing {} completely and retry.",
-            browser, browser
-        );
-    }
-    if lower.contains("video is unavailable") || lower.contains("removed") {
-        return format!("This {} video is no longer available.", platform);
-    }
-    if lower.contains("private video") {
-        return format!("This {} video is private. Log into {} first.", platform, browser);
-    }
-    if lower.contains("urlopen error") || lower.contains("connection") {
-        return "Network error. Check your internet connection.".into();
-    }
-
-    // Fallback: show the last meaningful line of stderr
-    stderr
-        .lines()
-        .rev()
-        .find(|l| !l.trim().is_empty())
-        .unwrap_or(stderr)
-        .trim()
-        .to_string()
-}
 
 fn save_project(folder: &PathBuf, project: &Project) -> Result<(), String> {
     let json = serde_json::to_string_pretty(project)
@@ -2128,39 +1932,7 @@ fn save_project(folder: &PathBuf, project: &Project) -> Result<(), String> {
         .map_err(|e| format!("Failed to write project: {e}"))
 }
 
-/// Get duration of a local video file by reading MP4 headers (no external binary needed).
-fn probe_duration(path: &str) -> Option<f64> {
-    let file = match fs::File::open(path) {
-        Ok(f) => f,
-        Err(e) => {
-            eprintln!("[probe_duration] cannot open {path}: {e}");
-            return None;
-        }
-    };
-    let size = file.metadata().ok()?.len();
-    let reader = BufReader::new(file);
-    match mp4::Mp4Reader::read_header(reader, size) {
-        Ok(mp4) => Some(mp4.duration().as_secs_f64()),
-        Err(e) => {
-            eprintln!("[probe_duration] failed to parse MP4 headers for {path}: {e}");
-            None
-        }
-    }
-}
 
-/// Find a downloaded file by clip ID prefix. Returns a **relative** path like "clips/ID_title.mp4".
-fn find_downloaded_file(clips_dir: &PathBuf, clip_id: &str) -> Option<String> {
-    if let Ok(entries) = fs::read_dir(clips_dir) {
-        for entry in entries.flatten() {
-            let name = entry.file_name().to_string_lossy().to_string();
-            if name.starts_with(&format!("{clip_id}_")) {
-                // Return relative path: "clips/<filename>"
-                return Some(format!("clips/{}", name));
-            }
-        }
-    }
-    None
-}
 
 fn chrono_now() -> String {
     // Simple ISO timestamp without chrono dependency
