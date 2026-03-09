@@ -21,6 +21,7 @@ import { SettingsDialog } from "@/components/SettingsDialog";
 import { FeedbackDialog } from "@/components/FeedbackDialog";
 import { SearchTab } from "@/components/SearchTab";
 import { ArrangeTab } from "@/components/ArrangeTab";
+import { DEFAULT_DOWNLOAD_PROVIDERS } from "@/types";
 import type { AppSettings, Clip, Project, ProjectClip } from "@/types";
 import logo from "@/assets/logotipo-quantastic.png";
 import "./App.css";
@@ -65,6 +66,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   cookiesBrowser: "chrome",
   cookiesFile: "",
   preferHubSpotPreview: true,
+  evil0ctalApiUrl: "",
+  downloadProviders: DEFAULT_DOWNLOAD_PROVIDERS,
 };
 
 function App() {
@@ -247,6 +250,8 @@ function App() {
         cookiesBrowser: settings.cookiesBrowser || null,
         cookiesFile: settings.cookiesFile || null,
         hubspotUrl: clip.originalClip || null,
+        evil0ctalApiUrl: settings.evil0ctalApiUrl || null,
+        downloadProviders: JSON.stringify(settings.downloadProviders ?? DEFAULT_DOWNLOAD_PROVIDERS),
       }).catch(() => {});
       const delay = hasHubSpotVideo ? 500 : 2500;
       downloadQueueRef.current = setTimeout(downloadNext, delay);
@@ -384,6 +389,8 @@ function App() {
           cookiesBrowser: settings.cookiesBrowser || null,
           cookiesFile: settings.cookiesFile || null,
           hubspotUrl: clip.originalClip || null,
+          evil0ctalApiUrl: settings.evil0ctalApiUrl || null,
+          downloadProviders: JSON.stringify(settings.downloadProviders ?? DEFAULT_DOWNLOAD_PROVIDERS),
         }).catch(() => {});
       }
     } catch (e) {
@@ -449,6 +456,8 @@ function App() {
       cookiesBrowser: settings.cookiesBrowser || null,
       cookiesFile: settings.cookiesFile || null,
       hubspotUrl: clip.originalClip || null,
+      evil0ctalApiUrl: settings.evil0ctalApiUrl || null,
+      downloadProviders: JSON.stringify(settings.downloadProviders ?? DEFAULT_DOWNLOAD_PROVIDERS),
     }).catch(() => {});
   };
 

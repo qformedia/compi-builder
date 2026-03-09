@@ -90,6 +90,7 @@ export interface ClipCardData {
   // Project-specific fields (optional)
   downloadStatus?: "pending" | "downloading" | "complete" | "failed";
   downloadError?: string;
+  localFile?: string;
 }
 
 export interface ClipCardProps {
@@ -98,6 +99,10 @@ export interface ClipCardProps {
   thumbCache: React.RefObject<Map<string, string | null>>;
   cookiesBrowser: string;
   cookiesFile: string;
+  evil0ctalApiUrl?: string;
+  /** rootFolder + projectName needed to resolve localFile for thumbnail extraction */
+  rootFolder?: string;
+  projectName?: string;
   onCookieError?: (msg: string) => void;
   // Preview
   isActive?: boolean;
@@ -136,6 +141,9 @@ export function ClipCard({
   thumbCache,
   cookiesBrowser,
   cookiesFile,
+  evil0ctalApiUrl,
+  rootFolder,
+  projectName,
   onCookieError,
   isActive = false,
   onTogglePreview,
@@ -218,6 +226,7 @@ export function ClipCard({
         url: clip.link,
         cookiesBrowser: cookiesBrowser || null,
         cookiesFile: cookiesFile || null,
+        evil0ctalApiUrl: evil0ctalApiUrl || null,
       });
 
       if (url) {
@@ -243,6 +252,28 @@ export function ClipCard({
           thumbCache.current?.set(clip.link, url);
           persistThumb(clip.link, url);
         }
+      } else if (clip.localFile && rootFolder && projectName) {
+        // Last resort: extract a frame from the downloaded video via ffmpeg
+        try {
+          const absPath = clip.localFile.startsWith("/") || clip.localFile.includes(":\\")
+            ? clip.localFile
+            : `${rootFolder}/${projectName}/${clip.localFile}`;
+          const b64 = await invoke<string | null>("extract_video_thumbnail", { videoPath: absPath });
+          if (b64) {
+            const dataUrl = `data:image/jpeg;base64,${b64}`;
+            setThumb(dataUrl);
+            thumbCache.current?.set(clip.link, dataUrl);
+            persistThumb(clip.link, dataUrl);
+          } else {
+            thumbCache.current?.set(clip.link, null);
+            setThumbError(true);
+            setThumbErrorMsg("No thumbnail found");
+          }
+        } catch {
+          thumbCache.current?.set(clip.link, null);
+          setThumbError(true);
+          setThumbErrorMsg("No thumbnail found");
+        }
       } else {
         thumbCache.current?.set(clip.link, null);
         setThumbError(true);
@@ -259,7 +290,7 @@ export function ClipCard({
     } finally {
       setThumbLoading(false);
     }
-  }, [clip.link, clip.fetchedThumbnail, clip.id, thumbCache, cookiesBrowser, cookiesFile, onCookieError, hubspotToken]);
+  }, [clip.link, clip.localFile, clip.fetchedThumbnail, clip.id, thumbCache, cookiesBrowser, cookiesFile, evil0ctalApiUrl, rootFolder, projectName, onCookieError, hubspotToken]);
 
   // Initial load via IntersectionObserver
   useEffect(() => {
@@ -876,6 +907,28 @@ export function getPlatform(url: string): string {
   if (url.includes("xiaohongshu.com")) return "Xiaohongshu";
   if (url.includes("kuaishou.com")) return "Kuaishou";
   return "Video";
+}
+
+/** Returns a warning string if the URL looks like a profile/page rather than
+ *  a video link, or null if it seems fine. */
+export function getNonVideoUrlWarning(url: string): string | null {
+  const lower = url.toLowerCase();
+  const platform = getPlatform(url);
+
+  // Known video URL patterns -- these are always valid
+  if (/\/(video|reel|p|shorts|watch)\b/i.test(lower)) return null;
+  // Xiaohongshu /explore/{id} is a video link (has an alphanumeric ID after /explore/)
+  if (lower.includes("xiaohongshu.com/explore/") && /\/explore\/[a-z0-9]+/.test(lower)) return null;
+  // Bilibili /video/BVxxx is already caught by /video/ above
+  // Kuaishou /short-video/{id} is a video link
+  if (lower.includes("kuaishou.com/short-video/")) return null;
+
+  const nonVideoPatterns = ["/user/", "/profile/", "/hashtag/", "/search", "/explore", "/@"];
+  const isNonVideo = nonVideoPatterns.some((p) => lower.includes(p));
+  if (isNonVideo) {
+    return `This looks like a ${platform} profile or page, not a video link. Download may fail.`;
+  }
+  return null;
 }
 
 export function getEmbedUrl(url: string): string | null {

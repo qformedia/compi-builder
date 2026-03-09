@@ -181,48 +181,77 @@ export function SettingsDialog({ open, onOpenChange, settings, onSave, onCheckUp
             </button>
           </div>
 
-          {/* Manual Cookies File (advanced) */}
+          {/* Advanced settings */}
           <details className="group">
             <summary className="cursor-pointer text-xs font-medium text-muted-foreground hover:text-foreground">
-              Advanced: Manual cookies.txt file
+              Advanced settings
             </summary>
-            <div className="mt-2 grid gap-2">
-              <div className="flex gap-2">
+            <div className="mt-2 grid gap-4">
+              {/* Evil0ctal API for Chinese platforms */}
+              <div className="grid gap-2">
+                <Label htmlFor="evil0ctal-url">Douyin/Kuaishou/Bilibili API URL</Label>
                 <Input
-                  id="cookies"
-                  value={draft.cookiesFile}
+                  id="evil0ctal-url"
+                  value={draft.evil0ctalApiUrl}
                   onChange={(e) =>
-                    setDraft({ ...draft, cookiesFile: e.target.value })
+                    setDraft({ ...draft, evil0ctalApiUrl: e.target.value })
                   }
-                  placeholder="Optional: path to cookies.txt"
+                  placeholder="https://your-app.railway.app"
                 />
-                <Button
-                  variant="outline"
-                  size="icon"
-                  onClick={async () => {
-                    const selected = await openDialog({
-                      filters: [{ name: "Cookies", extensions: ["txt"] }],
-                    });
-                    if (selected) {
-                      setDraft({ ...draft, cookiesFile: selected });
-                    }
-                  }}
-                >
-                  <FileText className="h-4 w-4" />
-                </Button>
+                <p className="text-xs text-muted-foreground">
+                  Self-hosted{" "}
+                  <a
+                    href="https://github.com/Evil0ctal/Douyin_TikTok_Download_API"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline"
+                  >
+                    Douyin/TikTok Download API
+                  </a>{" "}
+                  for Douyin, Kuaishou, and Bilibili. Falls back to yt-dlp if empty or unavailable.
+                </p>
               </div>
-              <p className="text-xs text-muted-foreground">
-                Only needed if browser cookies above don't work. Export with the{" "}
-                <a
-                  href="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc"
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  className="underline"
-                >
-                  Get cookies.txt LOCALLY
-                </a>{" "}
-                extension.
-              </p>
+
+              {/* Manual Cookies File */}
+              <div className="grid gap-2">
+                <Label htmlFor="cookies">Manual cookies.txt file</Label>
+                <div className="flex gap-2">
+                  <Input
+                    id="cookies"
+                    value={draft.cookiesFile}
+                    onChange={(e) =>
+                      setDraft({ ...draft, cookiesFile: e.target.value })
+                    }
+                    placeholder="Optional: path to cookies.txt"
+                  />
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    onClick={async () => {
+                      const selected = await openDialog({
+                        filters: [{ name: "Cookies", extensions: ["txt"] }],
+                      });
+                      if (selected) {
+                        setDraft({ ...draft, cookiesFile: selected });
+                      }
+                    }}
+                  >
+                    <FileText className="h-4 w-4" />
+                  </Button>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  Only needed if browser cookies above don't work. Export with the{" "}
+                  <a
+                    href="https://chromewebstore.google.com/detail/get-cookiestxt-locally/cclelndahbckbenkjhflpdbgdldlbecc"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="underline"
+                  >
+                    Get cookies.txt LOCALLY
+                  </a>{" "}
+                  extension.
+                </p>
+              </div>
             </div>
           </details>
         </div>

@@ -95,6 +95,7 @@ vi.mock("@/lib/supabase", () => ({
 // ---------------------------------------------------------------------------
 
 import { ArrangeTab } from "@/components/ArrangeTab";
+import { DEFAULT_DOWNLOAD_PROVIDERS } from "@/types";
 import type { AppSettings, Project } from "@/types";
 
 // ---------------------------------------------------------------------------
@@ -107,6 +108,8 @@ const settings: AppSettings = {
   cookiesBrowser: "chrome",
   cookiesFile: "",
   preferHubSpotPreview: true,
+  evil0ctalApiUrl: "",
+  downloadProviders: DEFAULT_DOWNLOAD_PROVIDERS,
 };
 
 const projectWithDownloadedClip: Project = {

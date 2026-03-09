@@ -187,16 +187,52 @@ pub(crate) fn probe_duration(path: &str) -> Option<f64> {
 
 // ── Download Helpers ─────────────────────────────────────────────────────────
 
-/// Detect platform name from URL for user-friendly error messages.
+/// Lowercase platform key used for provider cascade lookups.
+pub(crate) fn platform_key(url: &str) -> &str {
+    if url.contains("instagram.com") { "instagram" }
+    else if url.contains("tiktok.com") { "tiktok" }
+    else if url.contains("douyin.com") { "douyin" }
+    else if url.contains("youtube.com") || url.contains("youtu.be") { "youtube" }
+    else if url.contains("bilibili.com") { "bilibili" }
+    else if url.contains("xiaohongshu.com") { "xiaohongshu" }
+    else if url.contains("kuaishou.com") { "kuaishou" }
+    else { "default" }
+}
+
+/// Display-friendly platform name from URL, derived from `platform_key`.
 pub(crate) fn detect_platform(url: &str) -> &str {
-    if url.contains("instagram.com") { "Instagram" }
-    else if url.contains("tiktok.com") { "TikTok" }
-    else if url.contains("douyin.com") { "Douyin" }
-    else if url.contains("youtube.com") || url.contains("youtu.be") { "YouTube" }
-    else if url.contains("bilibili.com") { "Bilibili" }
-    else if url.contains("xiaohongshu.com") { "Xiaohongshu" }
-    else if url.contains("kuaishou.com") { "Kuaishou" }
-    else { "this platform" }
+    match platform_key(url) {
+        "instagram" => "Instagram",
+        "tiktok" => "TikTok",
+        "douyin" => "Douyin",
+        "youtube" => "YouTube",
+        "bilibili" => "Bilibili",
+        "xiaohongshu" => "Xiaohongshu",
+        "kuaishou" => "Kuaishou",
+        _ => "this platform",
+    }
+}
+
+/// Resolve the ordered list of download providers for a URL.
+/// `providers_json` is the JSON-serialised `DownloadProviders` map from settings.
+/// Falls back to the `"default"` key, then to `["ytdlp"]`.
+pub(crate) fn providers_for_url(url: &str, providers_json: &Option<String>) -> Vec<String> {
+    let key = platform_key(url);
+    if let Some(json) = providers_json {
+        if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, Vec<String>>>(json) {
+            if let Some(list) = map.get(key) {
+                if !list.is_empty() {
+                    return list.clone();
+                }
+            }
+            if let Some(list) = map.get("default") {
+                if !list.is_empty() {
+                    return list.clone();
+                }
+            }
+        }
+    }
+    vec!["ytdlp".to_string()]
 }
 
 /// Translate raw yt-dlp stderr into user-friendly error messages.
@@ -345,6 +381,21 @@ mod tests {
         assert_eq!(strip_prefix(""), "");
     }
 
+    // ── platform_key ──────────────────────────────────────────────────────
+
+    #[test]
+    fn platform_key_returns_lowercase_keys() {
+        assert_eq!(platform_key("https://www.instagram.com/reel/ABC/"), "instagram");
+        assert_eq!(platform_key("https://www.tiktok.com/@user/video/123"), "tiktok");
+        assert_eq!(platform_key("https://www.douyin.com/video/123"), "douyin");
+        assert_eq!(platform_key("https://www.youtube.com/watch?v=abc"), "youtube");
+        assert_eq!(platform_key("https://youtu.be/abc"), "youtube");
+        assert_eq!(platform_key("https://www.bilibili.com/video/BV123"), "bilibili");
+        assert_eq!(platform_key("https://www.xiaohongshu.com/explore/abc"), "xiaohongshu");
+        assert_eq!(platform_key("https://www.kuaishou.com/short-video/abc"), "kuaishou");
+        assert_eq!(platform_key("https://example.com/video"), "default");
+    }
+
     // ── detect_platform ──────────────────────────────────────────────────
 
     #[test]
@@ -382,6 +433,41 @@ mod tests {
     #[test]
     fn detect_platform_unknown() {
         assert_eq!(detect_platform("https://example.com/video"), "this platform");
+    }
+
+    // ── providers_for_url ───────────────────────────────────────────────
+
+    #[test]
+    fn providers_for_url_douyin_uses_evil0ctal_first() {
+        let json = r#"{"douyin":["evil0ctal","ytdlp"],"default":["ytdlp"]}"#;
+        let result = providers_for_url("https://www.douyin.com/video/123", &Some(json.into()));
+        assert_eq!(result, vec!["evil0ctal", "ytdlp"]);
+    }
+
+    #[test]
+    fn providers_for_url_youtube_falls_back_to_default() {
+        let json = r#"{"douyin":["evil0ctal","ytdlp"],"default":["ytdlp"]}"#;
+        let result = providers_for_url("https://youtube.com/watch?v=abc", &Some(json.into()));
+        assert_eq!(result, vec!["ytdlp"]);
+    }
+
+    #[test]
+    fn providers_for_url_no_json_returns_ytdlp() {
+        let result = providers_for_url("https://www.douyin.com/video/123", &None);
+        assert_eq!(result, vec!["ytdlp"]);
+    }
+
+    #[test]
+    fn providers_for_url_invalid_json_returns_ytdlp() {
+        let result = providers_for_url("https://www.douyin.com/video/123", &Some("not json".into()));
+        assert_eq!(result, vec!["ytdlp"]);
+    }
+
+    #[test]
+    fn providers_for_url_empty_list_falls_back_to_default() {
+        let json = r#"{"douyin":[],"default":["ytdlp"]}"#;
+        let result = providers_for_url("https://www.douyin.com/video/123", &Some(json.into()));
+        assert_eq!(result, vec!["ytdlp"]);
     }
 
     // ── friendly_download_error ──────────────────────────────────────────

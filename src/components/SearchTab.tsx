@@ -728,6 +728,7 @@ function CreatorRow({
             thumbCache={thumbCache}
             cookiesBrowser={settings.cookiesBrowser}
             cookiesFile={settings.cookiesFile}
+            evil0ctalApiUrl={settings.evil0ctalApiUrl}
             onCookieError={onCookieError}
             isActive={activePreviewId === clip.id}
             onTogglePreview={() =>

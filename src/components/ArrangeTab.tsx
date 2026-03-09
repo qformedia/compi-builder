@@ -21,7 +21,7 @@ import { MediaPlayer, MediaProvider, type MediaPlayerInstance } from "@vidstack/
 import { defaultLayoutIcons, DefaultVideoLayout } from "@vidstack/react/player/layouts/default";
 import "@vidstack/react/player/styles/default/theme.css";
 import "@vidstack/react/player/styles/default/layouts/video.css";
-import { ClipCard, SCORE_COLORS, getPlatform } from "@/components/ClipCard";
+import { ClipCard, SCORE_COLORS, getPlatform, getNonVideoUrlWarning } from "@/components/ClipCard";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   Dialog,
@@ -33,7 +33,7 @@ import {
 } from "@/components/ui/dialog";
 import { Button } from "@/components/ui/button";
 import { isSupabaseConfigured, reportDownloadIssue } from "@/lib/supabase";
-import { resolveClipPath } from "@/types";
+import { resolveClipPath, DEFAULT_DOWNLOAD_PROVIDERS } from "@/types";
 import type { AppSettings, Project, ProjectClip } from "@/types";
 import type { ClipCardData } from "@/components/ClipCard";
 
@@ -63,6 +63,7 @@ function toCardData(clip: ProjectClip): ClipCardData {
     notes: clip.notes,
     fetchedThumbnail: clip.fetchedThumbnail,
     editingNotes: clip.editingNotes,
+    localFile: clip.localFile,
   };
 }
 
@@ -312,6 +313,8 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
         cookiesBrowser: settings.cookiesBrowser || null,
         cookiesFile: settings.cookiesFile || null,
         force,
+        evil0ctalApiUrl: settings.evil0ctalApiUrl || null,
+        downloadProviders: JSON.stringify(settings.downloadProviders ?? DEFAULT_DOWNLOAD_PROVIDERS),
       });
     } catch { /* handled via event listener */ }
   }, [project, settings, updateClipField]);
@@ -564,10 +567,18 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
           const isChinese = ["Douyin", "Bilibili", "Xiaohongshu", "Kuaishou"].includes(platform);
           const isXiaohongshu = platform === "Xiaohongshu";
           const retried = (selectedClip.retryCount ?? 0) >= 1;
+          const urlWarning = getNonVideoUrlWarning(selectedClip.link);
           const btnClass = "flex items-center gap-1 rounded px-1.5 py-0.5 text-[11px] text-muted-foreground hover:bg-muted cursor-pointer transition-colors";
 
           return (
             <div className="flex flex-col gap-0.5 border-b py-1">
+              {/* Warning for non-video URLs */}
+              {urlWarning && (
+                <p className="flex items-center gap-1 px-2 text-[10px] text-orange-600 leading-snug">
+                  <AlertTriangle className="h-3 w-3 flex-shrink-0" /> {urlWarning}
+                </p>
+              )}
+
               {/* Error message (failed clips only) */}
               {ds === "failed" && (
                 <p className="px-2 text-[10px] text-destructive leading-snug">
@@ -865,6 +876,9 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
                       thumbCache={thumbCache}
                       cookiesBrowser={settings.cookiesBrowser}
                       cookiesFile={settings.cookiesFile}
+                      evil0ctalApiUrl={settings.evil0ctalApiUrl}
+                      rootFolder={settings.rootFolder}
+                      projectName={project?.name}
                       thumbRetryKey={thumbRetryKey}
                       hubspotToken={settings.hubspotToken}
                       minuteMarker={minuteMarker}
@@ -980,6 +994,9 @@ function SortableCard({
   thumbCache,
   cookiesBrowser,
   cookiesFile,
+  evil0ctalApiUrl,
+  rootFolder,
+  projectName,
   thumbRetryKey,
   hubspotToken,
   minuteMarker,
@@ -991,6 +1008,9 @@ function SortableCard({
   thumbCache: React.RefObject<Map<string, string | null>>;
   cookiesBrowser: string;
   cookiesFile: string;
+  evil0ctalApiUrl?: string;
+  rootFolder?: string;
+  projectName?: string;
   thumbRetryKey?: number;
   hubspotToken?: string;
   minuteMarker?: number | null;
@@ -1046,6 +1066,9 @@ function SortableCard({
         thumbCache={thumbCache}
         cookiesBrowser={cookiesBrowser}
         cookiesFile={cookiesFile}
+        evil0ctalApiUrl={evil0ctalApiUrl}
+        rootFolder={rootFolder}
+        projectName={projectName}
         compact
         thumbRetryKey={thumbRetryKey}
         hubspotToken={hubspotToken}

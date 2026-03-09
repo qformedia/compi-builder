@@ -65,6 +65,17 @@ export function resolveClipPath(rootFolder: string, projectName: string, relativ
   return `${rootFolder}/${projectName}/${relativePath}`;
 }
 
+/** Ordered list of download provider IDs per platform key.
+ *  The "default" key is used for platforms not explicitly listed. */
+export type DownloadProviders = Record<string, string[]>;
+
+export const DEFAULT_DOWNLOAD_PROVIDERS: DownloadProviders = {
+  douyin:   ["evil0ctal", "ytdlp"],
+  kuaishou: ["evil0ctal", "ytdlp"],
+  bilibili: ["evil0ctal", "ytdlp"],
+  default:  ["ytdlp"],
+};
+
 /** App settings persisted locally */
 export interface AppSettings {
   hubspotToken: string;
@@ -72,6 +83,8 @@ export interface AppSettings {
   cookiesBrowser: string; // "chrome" | "firefox" | "safari" | "edge" | "brave" | "opera" | "chromium" | ""
   cookiesFile: string;    // manual cookies.txt fallback
   preferHubSpotPreview: boolean;
+  evil0ctalApiUrl: string;
+  downloadProviders: DownloadProviders;
 }
 
 export type FeedbackType = "bug" | "feature";

@@ -11,7 +11,7 @@ use tokio::sync::Semaphore;
 use helpers::{
     build_filter_groups, strip_prefix, find_file_by_id, find_downloaded_file,
     probe_duration, friendly_download_error, format_selection_for_url,
-    remove_existing_clip_files,
+    remove_existing_clip_files, providers_for_url, detect_platform,
 };
 
 /// Rate limiter: max 1 concurrent Instagram yt-dlp request
@@ -1173,13 +1173,25 @@ async fn import_clip_file(
     }))
 }
 
-/// Resolve a thumbnail URL for a video link via oEmbed, URL patterns, or yt-dlp fallback
+/// Resolve a thumbnail URL for a video link via oEmbed, URL patterns, Evil0ctal API, or yt-dlp fallback
 #[tauri::command]
-async fn fetch_thumbnail(app: AppHandle, url: String, cookies_browser: Option<String>, cookies_file: Option<String>) -> Result<Option<String>, String> {
+async fn fetch_thumbnail(app: AppHandle, url: String, cookies_browser: Option<String>, cookies_file: Option<String>, evil0ctal_api_url: Option<String>) -> Result<Option<String>, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| e.to_string())?;
+
+    // Douyin / Kuaishou / Bilibili: use Evil0ctal API if configured (fast, no cookies needed)
+    let is_chinese_platform = url.contains("douyin.com") || url.contains("kuaishou.com") || url.contains("bilibili.com");
+    if is_chinese_platform {
+        if let Some(ref base_url) = evil0ctal_api_url {
+            if !base_url.is_empty() {
+                if let Some(thumb) = evil0ctal_thumbnail(&client, base_url, &url).await {
+                    return Ok(Some(thumb));
+                }
+            }
+        }
+    }
 
     // YouTube: construct thumbnail directly (instant, no API call)
     if url.contains("youtube.com") || url.contains("youtu.be") {
@@ -1262,6 +1274,86 @@ async fn fetch_thumbnail(app: AppHandle, url: String, cookies_browser: Option<St
     }
 
     Ok(None)
+}
+
+/// Extract a thumbnail frame from a local video file using ffmpeg.
+/// Returns a base64-encoded JPEG string, or None if ffmpeg is not available.
+#[tauri::command]
+async fn extract_video_thumbnail(video_path: String) -> Result<Option<String>, String> {
+    let path = PathBuf::from(&video_path);
+    if !path.exists() {
+        return Err(format!("Video file not found: {video_path}"));
+    }
+
+    let ffmpeg = which::which("ffmpeg")
+        .or_else(|_| which::which("/opt/homebrew/bin/ffmpeg"))
+        .or_else(|_| which::which("/usr/local/bin/ffmpeg"));
+
+    let ffmpeg_path = match ffmpeg {
+        Ok(p) => p,
+        Err(_) => {
+            eprintln!("[extract_video_thumbnail] ffmpeg not found");
+            return Ok(None);
+        }
+    };
+
+    let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let out_path = dir.path().join("thumb.jpg");
+
+    // Extract a single frame at 1 second into the video
+    let mut cmd = tokio::process::Command::new(&ffmpeg_path);
+    cmd.args([
+        "-ss", "1",
+        "-i", &video_path,
+        "-vframes", "1",
+        "-q:v", "3",
+        "-vf", "scale=480:-1",
+        "-y",
+    ]);
+    cmd.arg(out_path.as_os_str());
+    cmd.stdout(std::process::Stdio::null());
+    cmd.stderr(std::process::Stdio::null());
+
+    #[cfg(target_os = "windows")]
+    { cmd.creation_flags(0x08000000); }
+
+    #[cfg(target_os = "macos")]
+    {
+        let aug = helpers::augmented_path();
+        cmd.env("PATH", &aug);
+    }
+
+    let status = cmd.status().await.map_err(|e| format!("ffmpeg failed: {e}"))?;
+    if !status.success() || !out_path.exists() {
+        eprintln!("[extract_video_thumbnail] ffmpeg exited with {}", status);
+        return Ok(None);
+    }
+
+    use base64::Engine;
+    let bytes = fs::read(&out_path).map_err(|e| format!("Failed to read thumbnail: {e}"))?;
+    Ok(Some(base64::engine::general_purpose::STANDARD.encode(&bytes)))
+}
+
+/// Fetch thumbnail URL for Chinese platforms via Evil0ctal API metadata endpoint.
+async fn evil0ctal_thumbnail(client: &reqwest::Client, api_base_url: &str, video_url: &str) -> Option<String> {
+    let base = api_base_url.trim_end_matches('/');
+    let api_url = format!("{}/api/hybrid/video_data?url={}&minimal=true",
+        base, urlencoding::encode(video_url));
+
+    let resp = client.get(&api_url).send().await.ok()?;
+    if !resp.status().is_success() { return None; }
+    let body: serde_json::Value = resp.json().await.ok()?;
+    let data = body.get("data").unwrap_or(&body);
+
+    // Try cover URLs in order of quality
+    data.pointer("/cover_data/cover/url_list/0")
+        .or_else(|| data.pointer("/cover_data/origin_cover/url_list/0"))
+        .or_else(|| data.pointer("/cover_data/dynamic_cover/url_list/0"))
+        .or_else(|| data.pointer("/video/cover/url_list/0"))
+        .or_else(|| data.pointer("/video/origin_cover/url_list/0"))
+        .and_then(|v| v.as_str())
+        .filter(|s| s.starts_with("http"))
+        .map(|s| s.to_string())
 }
 
 /// Try to extract Instagram thumbnail without cookies, using multiple strategies
@@ -1977,14 +2069,13 @@ async fn download_clip(
     #[allow(unused_variables)]
     force: Option<bool>,
     hubspot_url: Option<String>,
+    evil0ctal_api_url: Option<String>,
+    download_providers: Option<String>,
 ) -> Result<(), String> {
     let clips_dir = PathBuf::from(&root_folder)
         .join(&project_name)
         .join("clips");
 
-    // When force-redownloading, remove old files so stale/broken files
-    // (e.g. audio-only .m4a from a previous failed format selection)
-    // don't get picked up by find_downloaded_file afterwards.
     if force.unwrap_or(false) {
         let removed = remove_existing_clip_files(&clips_dir, &clip_id);
         if !removed.is_empty() {
@@ -2030,86 +2121,196 @@ async fn download_clip(
                     }
                 }
                 _ => {
-                    eprintln!("[download_clip] HubSpot CDN download failed for {}, falling back to yt-dlp", clip_id);
+                    eprintln!("[download_clip] HubSpot CDN download failed for {}, falling back to providers", clip_id);
                 }
             }
         }
     }
 
+    // Provider cascade: try each configured provider in order
+    let providers = providers_for_url(&url, &download_providers);
+    let mut errors: Vec<String> = Vec::new();
+
+    for provider in &providers {
+        let result = match provider.as_str() {
+            "evil0ctal" => {
+                let base_url = evil0ctal_api_url.as_deref().unwrap_or("");
+                if base_url.is_empty() {
+                    eprintln!("[download_clip] evil0ctal provider skipped: no API URL configured");
+                    errors.push(format!("{}: not configured (set API URL in Settings)", provider));
+                    continue;
+                }
+                run_evil0ctal_download(base_url, &url, &clips_dir, &clip_id).await
+            }
+            _ => {
+                run_ytdlp_with_cookie_cascade(
+                    &app, &url, &clips_dir, &clip_id,
+                    &cookies_browser, &cookies_file,
+                ).await
+            }
+        };
+
+        match result {
+            Ok(()) => {
+                let local_file = find_downloaded_file(&clips_dir, &clip_id);
+                let project_dir = PathBuf::from(&root_folder).join(&project_name);
+                let local_duration = local_file.as_ref().and_then(|rel| {
+                    let abs = project_dir.join(rel);
+                    probe_duration(&abs.to_string_lossy())
+                });
+                let _ = app.emit("download-progress", DownloadProgress {
+                    clip_id,
+                    status: "complete".into(),
+                    progress: Some(100.0),
+                    local_file,
+                    local_duration,
+                    error: None,
+                });
+                return Ok(());
+            }
+            Err(e) => {
+                eprintln!("[download_clip] provider '{}' failed for {}: {}", provider, clip_id, e);
+                errors.push(format!("{}: {}", provider, e));
+            }
+        }
+    }
+
+    let friendly = if errors.len() == 1 {
+        errors.into_iter().next().unwrap()
+    } else {
+        errors.join(" | ")
+    };
+    let _ = app.emit("download-progress", DownloadProgress {
+        clip_id,
+        status: "failed".into(),
+        progress: None,
+        local_file: None,
+        local_duration: None,
+        error: Some(friendly.clone()),
+    });
+    Err(friendly)
+}
+
+/// Run yt-dlp with the cookie retry cascade. Returns Ok(()) on success.
+async fn run_ytdlp_with_cookie_cascade(
+    app: &AppHandle,
+    url: &str,
+    clips_dir: &PathBuf,
+    clip_id: &str,
+    cookies_browser: &Option<String>,
+    cookies_file: &Option<String>,
+) -> Result<(), String> {
     let output_template = clips_dir
-        .join(format!("{}_%(title).50s.%(ext)s", &clip_id))
+        .join(format!("{}_%(title).50s.%(ext)s", clip_id))
         .to_string_lossy()
         .to_string();
 
     let has_browser = cookies_browser.as_ref().map_or(false, |b| !b.is_empty());
     let has_file = cookies_file.as_ref().map_or(false, |f| !f.is_empty() && PathBuf::from(f).exists());
 
-    // Try browser cookies first
     let result = run_ytdlp_download(
-        &app, &url, &output_template,
-        if has_browser { &cookies_browser } else { &None },
-        if has_browser { &None } else { &cookies_file },
+        app, url, &output_template,
+        if has_browser { cookies_browser } else { &None },
+        if has_browser { &None } else { cookies_file },
     ).await;
 
-    // If browser cookies failed and we have a cookies file, retry with file
     let result = match &result {
         Ok((success, _)) if !success && has_browser && has_file => {
-            run_ytdlp_download(&app, &url, &output_template, &None, &cookies_file).await
+            run_ytdlp_download(app, url, &output_template, &None, cookies_file).await
         }
         _ => result,
     };
 
-    // Last resort: retry without any cookies (works for YouTube, TikTok, etc.)
     let result = match &result {
         Ok((success, _)) if !success && (has_browser || has_file) => {
-            run_ytdlp_download(&app, &url, &output_template, &None, &None).await
+            run_ytdlp_download(app, url, &output_template, &None, &None).await
         }
         _ => result,
     };
 
     match result {
-        Ok((true, _)) => {
-            let local_file = find_downloaded_file(&clips_dir, &clip_id);
-            let project_dir = PathBuf::from(&root_folder).join(&project_name);
-            let local_duration = local_file.as_ref().and_then(|rel| {
-                let abs = project_dir.join(rel);
-                probe_duration(&abs.to_string_lossy())
-            });
-            let _ = app.emit("download-progress", DownloadProgress {
-                clip_id,
-                status: "complete".into(),
-                progress: Some(100.0),
-                local_file,
-                local_duration,
-                error: None,
-            });
-            Ok(())
-        }
+        Ok((true, _)) => Ok(()),
         Ok((false, stderr_bytes)) => {
             let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
-            let friendly = friendly_download_error(&stderr, &url, &cookies_browser);
-            let _ = app.emit("download-progress", DownloadProgress {
-                clip_id,
-                status: "failed".into(),
-                progress: None,
-                local_file: None,
-                local_duration: None,
-                error: Some(friendly.clone()),
-            });
-            Err(friendly)
+            Err(friendly_download_error(&stderr, url, cookies_browser))
         }
-        Err(msg) => {
-            let _ = app.emit("download-progress", DownloadProgress {
-                clip_id,
-                status: "failed".into(),
-                progress: None,
-                local_file: None,
-                local_duration: None,
-                error: Some(msg.clone()),
-            });
-            Err(msg)
-        }
+        Err(msg) => Err(msg),
     }
+}
+
+/// Download a video via the Evil0ctal Douyin/TikTok API.
+/// Uses the `/api/download` endpoint which proxies the download through the
+/// server, avoiding geo-blocking issues with Chinese CDNs (Douyin, Kuaishou).
+async fn run_evil0ctal_download(
+    api_base_url: &str,
+    video_url: &str,
+    clips_dir: &std::path::Path,
+    clip_id: &str,
+) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
+
+    let base = api_base_url.trim_end_matches('/');
+    let platform = detect_platform(video_url);
+
+    // Quick pre-check: the /api/download endpoint only handles video URLs,
+    // not user profiles or other page types. Fail fast for obvious non-video URLs.
+    let url_lower = video_url.to_lowercase();
+    let is_likely_non_video = url_lower.contains("/user/")
+        || url_lower.contains("/profile/")
+        || url_lower.contains("/hashtag/")
+        || url_lower.contains("/search");
+    if is_likely_non_video {
+        return Err(format!("{} URL is a profile/page, not a video link", platform));
+    }
+
+    let download_url = format!("{}/api/download?url={}&prefix=false&with_watermark=false",
+        base, urlencoding::encode(video_url));
+
+    eprintln!("[evil0ctal] downloading {} via {}", clip_id, download_url);
+
+    let resp = client.get(&download_url).send().await
+        .map_err(|e| format!("{} API unreachable: {e}", platform))?;
+
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await.unwrap_or_default();
+        let detail = if body.len() > 200 { &body[..200] } else { &body };
+        return Err(format!("{} API returned HTTP {} — {}", platform, status, detail));
+    }
+
+    let content_type = resp.headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+
+    // The /api/download endpoint returns the video binary directly.
+    // If it returns JSON instead, the request likely failed with an error payload.
+    if content_type.contains("application/json") {
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("{} API error: {}", platform,
+            body.chars().take(200).collect::<String>()));
+    }
+
+    let bytes = resp.bytes().await
+        .map_err(|e| format!("{} video download incomplete: {e}", platform))?;
+
+    if bytes.len() < 1024 {
+        return Err(format!("{} API returned a suspiciously small file ({} bytes)", platform, bytes.len()));
+    }
+
+    let _ = fs::create_dir_all(clips_dir);
+    let dest = clips_dir.join(format!("{}_evil0ctal.mp4", clip_id));
+
+    fs::write(&dest, &bytes)
+        .map_err(|e| format!("Failed to save video: {e}"))?;
+
+    eprintln!("[evil0ctal] saved {} ({} bytes)", dest.display(), bytes.len());
+    Ok(())
 }
 
 /// Run yt-dlp download with a specific cookie method
@@ -2295,6 +2496,7 @@ pub fn run() {
             order_clips,
             import_clip_file,
             fetch_thumbnail,
+            extract_video_thumbnail,
             upload_clip_thumbnail,
             upload_clip_thumbnail_base64,
             read_file_base64,

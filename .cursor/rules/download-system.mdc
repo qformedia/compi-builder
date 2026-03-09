@@ -16,8 +16,13 @@ invariants.
   with `pub(crate)` visibility. Tests are in `#[cfg(test)] mod tests` at the
   bottom of the file. Run `cargo test` in `src-tauri/` to verify.
 - **`src-tauri/src/lib.rs`**: Tauri commands and wiring only. Imports helpers.
+- **Provider cascade**: `download_clip()` loops through providers from
+  `providers_for_url()`. Providers: `"ytdlp"` (default) and `"evil0ctal"`
+  (Douyin/Kuaishou/Bilibili). See `DEFAULT_DOWNLOAD_PROVIDERS` in `src/types.ts`.
 
 When adding new helper logic, put it in `helpers.rs` and add tests.
+When adding a new download provider, add a `run_{name}_download()` fn and
+a match arm in `download_clip()`'s provider loop.
 
 ## Cross-Platform Checklist
 
@@ -31,7 +36,8 @@ Before finishing any change to download-related code, verify:
 - [ ] **Windows cookie workaround**: `apply_windows_cookie_workaround` runs before yt-dlp on Windows
 - [ ] **Windows CREATE_NO_WINDOW**: system fallback uses `creation_flags(0x08000000)`
 - [ ] **Cookie cascade**: retry order is browser → file → none (never skip the no-cookies fallback)
-- [ ] **File discovery**: output template prefix matches what `find_downloaded_file` expects
+- [ ] **Provider cascade**: `providers_for_url()` returns valid list; providers with missing config are skipped
+- [ ] **File discovery**: all providers use `{clipId}_` prefix so `find_downloaded_file` can find them
 - [ ] **Range support**: `localfile://` protocol serves correct `Content-Range` headers
 - [ ] **OS gates**: all platform-specific code uses `#[cfg(target_os = "...")]`
 - [ ] **Tests pass**: run `cargo test` in `src-tauri/` and verify all pass

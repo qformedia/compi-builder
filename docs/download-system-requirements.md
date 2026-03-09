@@ -8,9 +8,13 @@ up-to-date when the functionality changes.
 
 ## 1. Overview
 
-CompiFlow downloads video clips via **yt-dlp** (bundled as a Tauri sidecar
-binary). Downloads are triggered from the frontend, executed in Rust, and
-progress is reported back via Tauri events.
+CompiFlow downloads video clips via a **provider cascade** system. Each
+platform has an ordered list of download providers to try. The primary
+provider is **yt-dlp** (bundled as a Tauri sidecar binary). For Chinese
+platforms (Douyin, Kuaishou, Bilibili), an optional **Evil0ctal API**
+provider is tried first, falling back to yt-dlp. Downloads are triggered
+from the frontend, executed in Rust, and progress is reported back via
+Tauri events.
 
 ## 2. Supported Platforms
 
@@ -25,34 +29,34 @@ Both platforms must produce identical, playable MP4 output.
 ## 3. Download Flow
 
 ```
-Frontend invoke("download_clip", { rootFolder, projectName, clipId, url, cookiesBrowser, cookiesFile })
+Frontend invoke("download_clip", { rootFolder, projectName, clipId, url,
+    cookiesBrowser, cookiesFile, hubspotUrl, evil0ctalApiUrl, downloadProviders })
     │
     ▼
 Rust: download_clip()
     ├─ emit download-progress { status: "downloading", progress: 0 }
-    ├─ build output template: {clips_dir}/{clipId}_%(title).50s.%(ext)s
-    ├─ cookie retry cascade:
-    │     1. Try with browser cookies (if configured)
-    │     2. Try with cookies file (if configured and step 1 failed)
-    │     3. Try without any cookies (if previous steps failed)
-    ├─ run_ytdlp_download()
-    │     ├─ run_ytdlp() → try sidecar first, fallback to system yt-dlp
-    │     └─ yt-dlp args:
-    │           --no-warnings
-    │           -f bestvideo+bestaudio/best
-    │           --merge-output-format mp4
-    │           -o {output_template}
-    │           --newline
-    │           --progress-template %(progress._percent_str)s
-    │           [--cookies-from-browser {browser}]
-    │           [--cookies {file}]
-    │           {url}
-    ├─ on success:
+    ├─ (Optional) Fast path: HubSpot CDN if hubspot_url available
+    ├─ Resolve provider cascade: providers_for_url(url, downloadProviders)
+    │     e.g. Douyin → ["evil0ctal", "ytdlp"], YouTube → ["ytdlp"]
+    ├─ For each provider in order:
+    │     ├─ "evil0ctal" → run_evil0ctal_download()
+    │     │     ├─ GET {apiUrl}/api/hybrid/video_data?url={url}&minimal=true
+    │     │     ├─ Extract no-watermark video URL from response
+    │     │     └─ Download video to {clips_dir}/{clipId}_evil0ctal.mp4
+    │     └─ "ytdlp" → run_ytdlp_with_cookie_cascade()
+    │           ├─ cookie retry cascade:
+    │           │     1. Try with browser cookies (if configured)
+    │           │     2. Try with cookies file (if configured and step 1 failed)
+    │           │     3. Try without any cookies (if previous steps failed)
+    │           └─ run_ytdlp_download()
+    │                 ├─ run_ytdlp() → try sidecar first, fallback to system yt-dlp
+    │                 └─ yt-dlp args: -f {format} --merge-output-format mp4 ...
+    ├─ On first provider success:
     │     ├─ find_downloaded_file() → scan clips_dir for {clipId}_*
     │     ├─ probe_duration() → read MP4 headers (mp4 crate)
     │     └─ emit download-progress { status: "complete", localFile, localDuration }
-    └─ on failure:
-          ├─ friendly_download_error() → user-facing message
+    └─ On all providers failed:
+          ├─ Aggregate error messages from each provider
           └─ emit download-progress { status: "failed", error }
 ```
 
@@ -168,7 +172,53 @@ This logic lives in `helpers::format_selection_for_url()` and is tested.
 - yt-dlp on Windows may produce different default codecs/containers;
   `--merge-output-format mp4` is critical.
 
-## 11. Known Limitations
+## 11. Download Provider Cascade
+
+### Provider config
+
+The `downloadProviders` setting is a JSON map of platform keys to ordered
+provider ID arrays. Default config:
+
+```json
+{
+  "douyin":   ["evil0ctal", "ytdlp"],
+  "kuaishou": ["evil0ctal", "ytdlp"],
+  "bilibili": ["evil0ctal", "ytdlp"],
+  "default":  ["ytdlp"]
+}
+```
+
+Platform keys are resolved by `platform_key()` in `helpers.rs` (lowercase
+hostname-based detection). If a platform isn't in the map, the `"default"`
+key is used. If that's also missing, `["ytdlp"]` is the hardcoded fallback.
+
+### Available providers
+
+| Provider | ID | Requires | Platforms |
+|----------|----|----------|-----------|
+| yt-dlp | `ytdlp` | Bundled sidecar | All |
+| Evil0ctal API | `evil0ctal` | `evil0ctalApiUrl` in settings | Douyin, Kuaishou, Bilibili |
+
+### Evil0ctal API
+
+Self-hosted instance of [Evil0ctal/Douyin_TikTok_Download_API](https://github.com/Evil0ctal/Douyin_TikTok_Download_API).
+Deploy to Railway or any Docker host. The base URL is configured in
+Settings → Advanced → "Douyin/Kuaishou/Bilibili API URL".
+
+- API endpoint used: `GET /api/download?url={url}&prefix=false&with_watermark=false`
+- The server proxies the download from the Chinese CDN, avoiding geo-blocking
+- Downloaded file saved as `{clips_dir}/{clipId}_evil0ctal.mp4`
+- Provider is silently skipped if URL is not configured
+- Timeout: 300s (video proxy can be slow depending on CDN)
+
+### Adding new providers
+
+1. Add the provider ID to `DEFAULT_DOWNLOAD_PROVIDERS` in `src/types.ts`
+2. Add a `run_{provider}_download()` async function in `lib.rs`
+3. Add a match arm in `download_clip()`'s provider loop
+4. Update this doc
+
+## 12. Known Limitations
 
 1. **No real-time progress**: Progress is only 0% or 100%. The
    `--progress-template` output is not streamed.
@@ -176,33 +226,46 @@ This logic lives in `helpers::format_selection_for_url()` and is tested.
 3. **Single file match**: `find_downloaded_file` returns the first match;
    multiple files with the same clip ID prefix could cause issues.
 4. **Xiaohongshu**: Cannot be auto-downloaded; must be imported manually.
-5. **Douyin**: Known upstream yt-dlp bug with cookie handling.
+5. **Douyin**: Known upstream yt-dlp bug with cookie handling (mitigated
+   by Evil0ctal provider when configured).
 
-## 12. Code Structure
+## 13. Code Structure
 
 Testable helper functions live in `src-tauri/src/helpers.rs` with
 `pub(crate)` visibility. Tests are in the same file under
 `#[cfg(test)] mod tests`. Run with `cargo test` in `src-tauri/`.
 
 Key helpers:
+- `platform_key()` — URL → lowercase platform key for provider lookups
+- `detect_platform()` — URL → display-friendly platform name (uses `platform_key`)
+- `providers_for_url()` — resolve provider cascade for a URL
 - `format_selection_for_url()` — platform-dependent `-f` argument
 - `friendly_download_error()` — stderr → user message mapping
-- `detect_platform()` — URL → platform name
 - `strip_prefix()` — file rename prefix stripping
 - `find_downloaded_file()` / `find_file_by_id()` — file discovery
 - `probe_duration()` — MP4 duration via headers
 - `build_filter_groups()` — HubSpot query construction
 - `augmented_path()` (macOS) / `find_system_ytdlp()` — PATH resolution
 
-## 13. Invariants (Must Always Hold)
+Key download functions in `lib.rs`:
+- `download_clip()` — Tauri command, orchestrates provider cascade
+- `run_evil0ctal_download()` — Evil0ctal API provider
+- `run_ytdlp_with_cookie_cascade()` — yt-dlp provider with cookie retry
+- `run_ytdlp_download()` — single yt-dlp invocation with specific cookie method
+
+## 14. Invariants (Must Always Hold)
 
 1. Downloaded files MUST be playable MP4 with both video and audio streams.
 2. `format_selection_for_url()` MUST return `best` for Instagram and
    `bestvideo+bestaudio/best` for all other platforms.
-3. `--merge-output-format mp4` MUST always be present in download commands.
+3. `--merge-output-format mp4` MUST always be present in yt-dlp commands.
 4. The cookie retry cascade MUST always end with a no-cookies attempt.
 5. `find_downloaded_file` MUST be able to find any file downloaded by
-   `run_ytdlp_download` using the same clip ID.
+   any provider using the same clip ID prefix (`{clipId}_`).
+6. The provider cascade MUST always have at least one provider. If the
+   config is missing or invalid, fall back to `["ytdlp"]`.
+7. Providers with missing configuration (e.g. evil0ctal without URL)
+   MUST be silently skipped, not cause a hard failure.
 6. The `localfile://` protocol MUST serve video with Range support on all
    platforms.
 7. All OS-specific code MUST be gated behind `#[cfg(target_os = "...")]`.
