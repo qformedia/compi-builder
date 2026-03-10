@@ -117,6 +117,10 @@ function App() {
     try {
       await pendingUpdate.downloadAndInstall();
       setUpdateStatus("installed");
+      // On macOS, relaunch immediately after install to avoid the Tauri v2 race
+      // condition where the app exits before the new process launches.
+      // We add a short delay so the UI can show "installed" briefly.
+      setTimeout(() => relaunch(), 1500);
     } catch (e) {
       console.error("Update install failed:", e);
       setUpdateStatus("idle");
@@ -695,33 +699,42 @@ function App() {
 
       {/* Update notification banner */}
       {pendingUpdate && !updateDismissed && (
-        <div className="flex items-center justify-between gap-3 border-b bg-primary/5 px-4 py-1.5 text-sm">
+        <div className={`flex items-center justify-between gap-3 border-b px-4 py-2 text-sm font-medium ${
+          updateStatus === "installed"
+            ? "bg-green-500 text-white"
+            : updateStatus === "downloading"
+            ? "bg-primary text-primary-foreground"
+            : "bg-gradient-to-r from-amber-400 to-orange-400 text-white"
+        }`}>
           {updateStatus === "installed" ? (
             <span className="flex items-center gap-2">
-              <CheckCircle className="h-3.5 w-3.5 text-green-500" />
-              Update v{pendingUpdate.version} installed.
+              <CheckCircle className="h-4 w-4" />
+              Update v{pendingUpdate.version} installed — restarting...
             </span>
           ) : updateStatus === "downloading" ? (
             <span className="flex items-center gap-2">
-              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              <Loader2 className="h-4 w-4 animate-spin" />
               Installing v{pendingUpdate.version}...
             </span>
           ) : (
-            <span>Version {pendingUpdate.version} is available.</span>
+            <span className="flex items-center gap-2">
+              <Sparkles className="h-4 w-4" />
+              Version {pendingUpdate.version} is available!
+            </span>
           )}
           <div className="flex items-center gap-1.5">
             {updateStatus === "idle" && (
-              <Button size="sm" variant="default" className="h-6 px-2 text-xs cursor-pointer" onClick={installUpdate}>
-                Install
+              <Button size="sm" className="h-6 px-3 text-xs bg-white text-orange-600 hover:bg-white/90 cursor-pointer font-bold" onClick={installUpdate}>
+                Install now
               </Button>
             )}
             {updateStatus === "installed" && (
-              <Button size="sm" variant="default" className="h-6 px-2 text-xs cursor-pointer" onClick={() => relaunch()}>
-                Restart Now
+              <Button size="sm" className="h-6 px-3 text-xs bg-white text-green-700 hover:bg-white/90 cursor-pointer font-bold" onClick={() => relaunch()}>
+                Restart now
               </Button>
             )}
-            <button onClick={() => setUpdateDismissed(true)} className="rounded p-0.5 text-muted-foreground hover:text-foreground cursor-pointer">
-              <X className="h-3.5 w-3.5" />
+            <button onClick={() => setUpdateDismissed(true)} className="rounded p-0.5 text-white/70 hover:text-white cursor-pointer">
+              <X className="h-4 w-4" />
             </button>
           </div>
         </div>
