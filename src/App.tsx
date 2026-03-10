@@ -20,7 +20,7 @@ import {
 import { SettingsDialog } from "@/components/SettingsDialog";
 import { FeedbackDialog } from "@/components/FeedbackDialog";
 import { SearchTab } from "@/components/SearchTab";
-import { ArrangeTab } from "@/components/ArrangeTab";
+import { ArrangeTab, decodeEditingNotes } from "@/components/ArrangeTab";
 import { DEFAULT_DOWNLOAD_PROVIDERS } from "@/types";
 import type { AppSettings, Clip, Project, ProjectClip } from "@/types";
 import logo from "@/assets/logotipo-quantastic.png";
@@ -66,7 +66,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   cookiesBrowser: "chrome",
   cookiesFile: "",
   preferHubSpotPreview: true,
-  evil0ctalApiUrl: "",
+  evil0ctalApiUrl: "https://web-production-04050.up.railway.app",
   downloadProviders: DEFAULT_DOWNLOAD_PROVIDERS,
 };
 
@@ -307,7 +307,7 @@ function App() {
         ),
       ]);
 
-      // Parse clips_order from the VP record
+      // Parse clips_order and editing_notes from the VP record
       const vpRecord = vpData.results?.[0];
       const clipsOrderStr = vpRecord?.properties?.clips_order;
       const orderMap = new Map<string, number>();
@@ -317,6 +317,8 @@ function App() {
           ids.forEach((id, i) => orderMap.set(id, i));
         } catch { /* invalid JSON, keep local order */ }
       }
+      const editingNotesStr = vpRecord?.properties?.editing_notes;
+      const notesMap = editingNotesStr ? decodeEditingNotes(editingNotesStr) : {};
 
       const hsClipIds = new Set(hsClips.map((c) => c.id));
       const localClipIds = new Set(project.clips.map((c) => c.hubspotId));
@@ -334,6 +336,7 @@ function App() {
           order: orderMap.get(c.id) ?? project.clips.length + i,
           licenseType: c.licenseType,
           notes: c.notes,
+          editingNotes: notesMap[c.id] ?? undefined,
           fetchedThumbnail: c.fetchedThumbnail,
           originalClip: c.originalClip,
           creatorId: c.creatorId,
@@ -349,15 +352,21 @@ function App() {
         .map((c) => {
           const hs = hsClipMap.get(c.hubspotId);
           if (!hs) return c;
+          const newOriginalClip = hs.originalClip ?? c.originalClip;
+          // If a clip failed but now has a CDN URL from a teammate, retry via CDN
+          const shouldRetry = c.downloadStatus === "failed" && !c.originalClip && newOriginalClip;
           return {
             ...c,
+            downloadStatus: shouldRetry ? "pending" as const : c.downloadStatus,
+            downloadError: shouldRetry ? undefined : c.downloadError,
             tags: hs.tags,
             score: hs.score,
             editedDuration: hs.editedDuration,
             licenseType: hs.licenseType,
             notes: hs.notes,
+            editingNotes: c.editingNotes || notesMap[c.hubspotId] || undefined,
             fetchedThumbnail: hs.fetchedThumbnail,
-            originalClip: hs.originalClip ?? c.originalClip,
+            originalClip: newOriginalClip,
             creatorId: hs.creatorId,
             creatorStatus: hs.creatorStatus,
             clipMixLinks: hs.clipMixLinks,

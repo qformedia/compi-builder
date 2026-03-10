@@ -71,7 +71,6 @@ export type DownloadProviders = Record<string, string[]>;
 
 export const DEFAULT_DOWNLOAD_PROVIDERS: DownloadProviders = {
   douyin:   ["evil0ctal", "ytdlp"],
-  kuaishou: ["evil0ctal", "ytdlp"],
   bilibili: ["evil0ctal", "ytdlp"],
   default:  ["ytdlp"],
 };

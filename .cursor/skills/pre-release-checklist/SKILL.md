@@ -7,13 +7,38 @@ description: Run all tests locally and verify cross-platform compatibility befor
 
 Before tagging or pushing any release tag, ALWAYS run these steps in order. Do not skip any step even if the user asks to release quickly.
 
+## Step 0 — Review changes and assess test coverage
+
+Before running tests, review all changes since the last release:
+
+```bash
+git log --oneline $(git describe --tags --abbrev=0)..HEAD
+git diff --stat $(git describe --tags --abbrev=0)..HEAD
+```
+
+For each changed file, ask:
+- Does this change affect behavior that existing tests cover? If so, the tests may need updating.
+- Does this introduce new logic (new functions, new branches, new user flows) that should have tests?
+- Is this a pure UI change (styling, layout) that doesn't need new tests?
+
+**Write new tests when**:
+- New pure/helper functions are added (especially in `helpers.rs`, utility functions in `.tsx`)
+- New Tauri commands are added
+- New user-facing flows are added (e.g. a new sync mechanism, a new download provider)
+
+**Do NOT write tests just to increase count** — every test must assert meaningful behavior.
+
 ## Step 1 — Run Rust tests
 
 ```bash
 cd src-tauri && cargo test
 ```
 
-All tests must pass. If any fail, fix them first.
+All tests must pass. If any fail, diagnose carefully:
+
+**Is the test catching a real bug?** Fix the bug, not the test. Then consider: could a cursor rule or skill have prevented this? If so, create or update one.
+
+**Is the test broken by a valid change?** The test was too tightly coupled to implementation details. Fix the test to be more resilient, then update this skill's "Common failures" section with the pattern.
 
 ## Step 2 — Run frontend tests
 
@@ -21,7 +46,10 @@ All tests must pass. If any fail, fix them first.
 npx tsc --noEmit && npx vitest run
 ```
 
-Both must succeed. If `tsc` fails, there are type errors. If `vitest` fails, update tests to match any UI/API changes made since the last release (common causes: renamed `title` attributes, changed button labels, new required props on fixtures).
+Same diagnosis approach as Step 1. Common frontend test issues:
+
+- Tests that query by `title` or text content break when labels change. Prefer querying by `data-testid` for structural elements and `title` for interactive buttons (since `title` doubles as the tooltip).
+- Tests that check exact element counts break when layout changes add/remove wrappers. Prefer semantic queries (`getByRole`, `getByTitle`) over structural ones.
 
 ## Step 3 — Bump version in all three files
 
@@ -57,6 +85,7 @@ git push origin vX.Y.Z
 
 ## Common test failures after UI changes
 
-- **`getByTitle("...")`** — button titles changed. Update both the component (`title="..."` on the button) and the test assertion.
+- **`getByTitle("...")`** — button titles changed. Update both the component (`title="..."` on the button) and the test assertion. Always keep `title` on interactive buttons even when using `<Tip>` tooltips.
 - **`AppSettings` fixture missing fields** — new fields added to `AppSettings` in `types.ts`. Add them to the `settings` fixture in the test file with sensible defaults.
 - **`ClipCardData` fixture missing fields** — new fields added to `ClipCardData`. Add them to `toCardData()` in `ArrangeTab.tsx`.
+- **Guard conditions removed** — e.g. `!isXiaohongshu` guard was removed, changing which buttons render. Tests checking for absence of buttons need updating.

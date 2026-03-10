@@ -71,6 +71,19 @@ function Tip({ label, children }: { label: string; children: React.ReactNode }) 
   );
 }
 
+export function encodeEditingNotes(clips: ProjectClip[]): string {
+  const map: Record<string, string> = {};
+  for (const c of clips) {
+    if (c.editingNotes?.trim()) map[c.hubspotId] = c.editingNotes.trim();
+  }
+  return JSON.stringify(map);
+}
+
+export function decodeEditingNotes(raw: string): Record<string, string> {
+  try { return JSON.parse(raw) ?? {}; }
+  catch { return {}; }
+}
+
 function toCardData(clip: ProjectClip): ClipCardData {
   return {
     id: clip.hubspotId,
@@ -228,8 +241,16 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
       rootFolder: settings.rootFolder,
       project: updated,
     }).catch(() => {});
+    if (project.hubspotVideoProjectId && settings.hubspotToken) {
+      invoke("update_video_project_property", {
+        token: settings.hubspotToken,
+        projectId: project.hubspotVideoProjectId,
+        propertyName: "editing_notes",
+        propertyValue: encodeEditingNotes(updatedClips),
+      }).catch((e) => console.warn("Editing notes sync failed:", e));
+    }
     setNotesSaved(true);
-  }, [project, setProject, settings.rootFolder]);
+  }, [project, setProject, settings.rootFolder, settings.hubspotToken]);
 
   const handleNotesChange = useCallback((text: string) => {
     setNotesText(text);
@@ -375,6 +396,18 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
         rootFolder: settings.rootFolder,
         project: updated,
       }).catch(() => {});
+
+      // Upload manually imported file to HubSpot so teammates can download via CDN
+      if (!clip.originalClip && settings.hubspotToken) {
+        const absPath = `${settings.rootFolder}/${project.name}/${result.localFile}`;
+        invoke("upload_clip_video", {
+          token: settings.hubspotToken,
+          clipId: clip.hubspotId,
+          filePath: absPath,
+        }).then((hubspotUrl) => {
+          updateClipField(clip.hubspotId, { originalClip: hubspotUrl as string });
+        }).catch((e) => console.warn("Upload after import failed:", e));
+      }
     } catch (e) {
       console.error("Import failed:", e);
     }
@@ -593,7 +626,6 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
           const ds = selectedClip.downloadStatus;
           const platform = getPlatform(selectedClip.link);
           const isChinese = ["Douyin", "Bilibili", "Xiaohongshu", "Kuaishou"].includes(platform);
-          const isXiaohongshu = platform === "Xiaohongshu";
           const retried = (selectedClip.retryCount ?? 0) >= 1;
           const urlWarning = getNonVideoUrlWarning(selectedClip.link);
           const iconBtn = "flex items-center justify-center rounded p-1.5 text-muted-foreground hover:bg-muted cursor-pointer transition-colors";
@@ -611,9 +643,7 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
                   )}
                   {ds === "failed" && (
                     <p className="text-[10px] text-destructive leading-snug">
-                      {isXiaohongshu
-                        ? "Xiaohongshu can't be auto-downloaded — import manually"
-                        : (selectedClip.downloadError ?? "Download failed")}
+                      {selectedClip.downloadError ?? "Download failed"}
                     </p>
                   )}
                 </div>
@@ -626,11 +656,9 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
                     <Loader2 className="h-3.5 w-3.5 animate-spin" /> Downloading...
                   </span>
                 ) : ds === "failed" ? (
-                  !isXiaohongshu && (
-                    <Tip label="Retry download"><button onClick={() => downloadClip(selectedClip)} className={iconBtn} title="Retry download">
-                      <RefreshCw className="h-3.5 w-3.5" />
-                    </button></Tip>
-                  )
+                  <Tip label="Retry download"><button onClick={() => downloadClip(selectedClip)} className={iconBtn} title="Retry download">
+                    <RefreshCw className="h-3.5 w-3.5" />
+                  </button></Tip>
                 ) : isPlayable(selectedClip) ? (
                   <Tip label="Re-download"><button onClick={() => downloadClip(selectedClip, true)} className={iconBtn} title="Re-download">
                     <RefreshCw className="h-3.5 w-3.5" />
@@ -710,6 +738,11 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
 
                 {isChinese && (
                   <button onClick={() => openUrl("https://dy.kukutool.com/en")} className="flex items-center gap-0.5 rounded px-1.5 py-1 text-[10px] font-medium text-blue-600 hover:bg-blue-50 cursor-pointer transition-colors">
+                    KuKuTool ↗
+                  </button>
+                )}
+                {(platform === "Instagram" || platform === "TikTok") && ds === "failed" && (
+                  <button onClick={() => openUrl("https://dy.kukutool.com/instagram-downloader")} className="flex items-center gap-0.5 rounded px-1.5 py-1 text-[10px] font-medium text-blue-600 hover:bg-blue-50 cursor-pointer transition-colors">
                     KuKuTool ↗
                   </button>
                 )}

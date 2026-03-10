@@ -96,6 +96,7 @@ export interface VideoProjectSummary {
   tag: string;
   pubDate: string;
   clipsOrder?: string;
+  editingNotes?: string;
 }
 
 export async function searchVideoProjects(
@@ -113,6 +114,7 @@ export async function searchVideoProjects(
     tag: r.properties.tag ?? "",
     pubDate: r.properties.pub_date ?? "",
     clipsOrder: r.properties.clips_order ?? undefined,
+    editingNotes: r.properties.editing_notes ?? undefined,
   }));
 }
 

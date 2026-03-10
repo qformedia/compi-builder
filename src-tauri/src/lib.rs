@@ -378,7 +378,7 @@ async fn fetch_clip_video_projects(
     );
 
     let batch_body = serde_json::json!({
-        "properties": ["name", "tag", "pub_date", "youtube_video_id", "status", "clips_order"],
+        "properties": ["name", "tag", "pub_date", "youtube_video_id", "status", "clips_order", "editing_notes"],
         "inputs": project_ids.iter().map(|id| serde_json::json!({ "id": id })).collect::<Vec<_>>()
     });
 
@@ -443,7 +443,7 @@ async fn search_video_projects(
                 "value": query
             }]
         }],
-        "properties": ["name", "tag", "pub_date", "youtube_video_id", "status", "clips_order"],
+        "properties": ["name", "tag", "pub_date", "youtube_video_id", "status", "clips_order", "editing_notes"],
         "sorts": [{ "propertyName": "hs_lastmodifieddate", "direction": "DESCENDING" }],
         "limit": 20
     });
@@ -646,7 +646,7 @@ async fn fetch_video_projects_by_ids(
         VIDEO_PROJECTS_OBJECT_ID
     );
     let batch_body = serde_json::json!({
-        "properties": ["name"],
+        "properties": ["name", "clips_order", "editing_notes"],
         "inputs": project_ids.iter().map(|id| serde_json::json!({ "id": id })).collect::<Vec<_>>()
     });
 

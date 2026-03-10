@@ -7,6 +7,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { TagPicker } from "@/components/TagPicker";
 import { CreatorPicker } from "@/components/CreatorPicker";
 import { ClipCard, SCORE_COLORS } from "@/components/ClipCard";
+import { decodeEditingNotes } from "@/components/ArrangeTab";
 import { searchClipsByTags, searchCreatorClips, searchVideoProjects, fetchVideoProjectClips } from "@/lib/hubspot";
 import type { CreatorOption, VideoProjectSummary } from "@/lib/hubspot";
 import { fetchTagOptions } from "@/lib/tags";
@@ -138,7 +139,7 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
         name: vp.name,
       }).catch(() => {});
 
-      // Use clips_order from HubSpot to restore the correct arrangement
+      // Use clips_order and editing_notes from HubSpot VP
       const orderMap = new Map<string, number>();
       if (vp.clipsOrder) {
         try {
@@ -146,6 +147,7 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
           ids.forEach((id, i) => orderMap.set(id, i));
         } catch { /* invalid JSON, fall back to association order */ }
       }
+      const notesMap = vp.editingNotes ? decodeEditingNotes(vp.editingNotes) : {};
 
       const projectClips: ProjectClip[] = clips.map((clip, i) => ({
         hubspotId: clip.id,
@@ -160,6 +162,7 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
         originalClip: clip.originalClip,
         licenseType: clip.licenseType,
         notes: clip.notes,
+        editingNotes: notesMap[clip.id] ?? undefined,
         creatorId: clip.creatorId,
         creatorStatus: clip.creatorStatus,
         clipMixLinks: clip.clipMixLinks,
