@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
   Dialog,
@@ -57,14 +58,46 @@ interface Props {
 export function SettingsDialog({ open, onOpenChange, settings, onSave, onCheckUpdate }: Props) {
   const [draft, setDraft] = useState(settings);
   const [updateCheck, setUpdateCheck] = useState<"idle" | "checking" | "up-to-date" | "available" | { error: string }>("idle");
+  const [saving, setSaving] = useState(false);
+  const [emailError, setEmailError] = useState<string | null>(null);
 
   // Reset draft when dialog opens
   const handleOpenChange = (next: boolean) => {
-    if (next) setDraft(settings);
-    onOpenChange(next);
+    if (next) { setDraft(settings); setEmailError(null); }
+    if (!saving) onOpenChange(next);
   };
 
-  const handleSave = () => {
+  const handleSave = async () => {
+    const emailChanged = draft.ownerEmail.trim() !== settings.ownerEmail;
+    const emailCleared = !draft.ownerEmail.trim();
+
+    // If email was cleared, reset ownerId too
+    if (emailCleared) {
+      onSave({ ...draft, ownerEmail: "", ownerId: "" });
+      onOpenChange(false);
+      return;
+    }
+
+    // If email changed, resolve the owner ID
+    if (emailChanged && draft.ownerEmail.trim()) {
+      setSaving(true);
+      setEmailError(null);
+      try {
+        const id = await invoke<string>("resolve_owner_id", {
+          token: draft.hubspotToken,
+          email: draft.ownerEmail.trim(),
+        });
+        onSave({ ...draft, ownerEmail: draft.ownerEmail.trim(), ownerId: id });
+        onOpenChange(false);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setEmailError(msg);
+      } finally {
+        setSaving(false);
+      }
+      return;
+    }
+
     onSave(draft);
     onOpenChange(false);
   };
@@ -154,6 +187,32 @@ export function SettingsDialog({ open, onOpenChange, settings, onSave, onCheckUp
                 Keep Chrome closed while downloading if you get cookie errors.
               </p>
             </div>
+          </div>
+
+          {/* Owner Email */}
+          <div className="grid gap-2">
+            <Label htmlFor="owner-email">Your Email (for HubSpot ownership)</Label>
+            <Input
+              id="owner-email"
+              type="email"
+              value={draft.ownerEmail}
+              onChange={(e) => {
+                setDraft({ ...draft, ownerEmail: e.target.value, ownerId: "" });
+                setEmailError(null);
+              }}
+              placeholder="you@company.com"
+            />
+            {emailError && (
+              <p className="text-xs text-destructive">{emailError}</p>
+            )}
+            {draft.ownerId && (
+              <p className="text-xs text-green-600 flex items-center gap-1">
+                <CheckCircle className="h-3 w-3" /> Verified
+              </p>
+            )}
+            <p className="text-xs text-muted-foreground">
+              Used as the Owner when creating clips via General Search. Verified against HubSpot on save.
+            </p>
           </div>
 
           {/* HubSpot Preview */}
@@ -290,7 +349,10 @@ export function SettingsDialog({ open, onOpenChange, settings, onSave, onCheckUp
               </>
             )}
           </div>
-          <Button onClick={handleSave} className="cursor-pointer">Save</Button>
+          <Button onClick={handleSave} disabled={saving} className="cursor-pointer">
+            {saving && <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" />}
+            {saving ? "Verifying..." : "Save"}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

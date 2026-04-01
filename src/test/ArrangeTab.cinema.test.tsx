@@ -110,6 +110,8 @@ const settings: AppSettings = {
   preferHubSpotPreview: true,
   evil0ctalApiUrl: "",
   downloadProviders: DEFAULT_DOWNLOAD_PROVIDERS,
+  ownerEmail: "",
+  ownerId: "",
 };
 
 const projectWithDownloadedClip: Project = {

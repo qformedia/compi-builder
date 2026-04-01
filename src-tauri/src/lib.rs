@@ -12,6 +12,9 @@ use helpers::{
     build_filter_groups, strip_prefix, find_file_by_id, find_downloaded_file,
     probe_duration, friendly_download_error, format_selection_for_url,
     remove_existing_clip_files, providers_for_url, detect_platform,
+    parse_social_urls, extract_instagram_shortcode, extract_instagram_username_from_html,
+    extract_instagram_caption_from_html, extract_meta_content_text,
+    SocialPlatform,
 };
 
 /// Rate limiter: max 1 concurrent Instagram yt-dlp request
@@ -142,6 +145,57 @@ async fn fetch_tag_options(
     Ok(serde_json::json!(options))
 }
 
+#[tauri::command]
+async fn create_tag_option(token: String, label: String, value: String) -> Result<(), String> {
+    let client = reqwest::Client::new();
+    let url = format!(
+        "https://api.hubapi.com/crm/v3/properties/{}/tags",
+        EXTERNAL_CLIPS_OBJECT_ID
+    );
+
+    let get_res = client
+        .get(&url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if !get_res.status().is_success() {
+        let status = get_res.status();
+        let text = get_res.text().await.unwrap_or_default();
+        return Err(format!("HubSpot property fetch error ({}): {}", status, text));
+    }
+
+    let mut body: serde_json::Value = get_res.json().await
+        .map_err(|e| format!("Failed to parse property: {e}"))?;
+
+    let options = body.get_mut("options")
+        .and_then(|o| o.as_array_mut())
+        .ok_or("No options array in property")?;
+
+    options.push(serde_json::json!({
+        "label": label,
+        "value": value,
+        "hidden": false,
+        "displayOrder": -1
+    }));
+
+    let patch_res = client
+        .patch(&url)
+        .bearer_auth(&token)
+        .json(&serde_json::json!({ "options": options }))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if !patch_res.status().is_success() {
+        let status = patch_res.status();
+        let text = patch_res.text().await.unwrap_or_default();
+        return Err(format!("HubSpot create tag error ({}): {}", status, text));
+    }
+
+    Ok(())
+}
 
 #[tauri::command]
 async fn search_clips(
@@ -2375,6 +2429,636 @@ fn chrono_now() -> String {
     format!("{}", duration.as_secs())
 }
 
+// ── General Search Commands ──────────────────────────────────────────────────
+
+/// Parse a block of pasted URLs into structured entries with platform detection
+#[tauri::command]
+fn parse_clip_urls(raw: String) -> Vec<serde_json::Value> {
+    parse_social_urls(&raw)
+        .into_iter()
+        .map(|p| {
+            serde_json::json!({
+                "url": p.url,
+                "platform": match p.platform {
+                    SocialPlatform::Instagram => "instagram",
+                    SocialPlatform::TikTok => "tiktok",
+                },
+                "handle": p.handle,
+                "profileUrl": p.profile_url,
+            })
+        })
+        .collect()
+}
+
+/// Unified Instagram info extraction: handle + caption + thumbnail from a single call cascade.
+/// Strategy 1: oEmbed -> Strategy 2: embed page -> Strategy 3: yt-dlp --dump-json
+#[tauri::command]
+async fn resolve_instagram_info(
+    app: AppHandle,
+    url: String,
+    cookies_browser: Option<String>,
+    cookies_file: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let shortcode = extract_instagram_shortcode(&url);
+
+    // Strategy 1: oEmbed API
+    let oembed_url = format!(
+        "https://www.instagram.com/api/v1/oembed/?url={}",
+        urlencoding::encode(&url)
+    );
+    if let Ok(res) = client
+        .get(&oembed_url)
+        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        .send()
+        .await
+    {
+        if res.status().is_success() {
+            if let Ok(json) = res.json::<serde_json::Value>().await {
+                let author_name = json.get("author_name").and_then(|v| v.as_str()).map(String::from);
+                let thumbnail = json.get("thumbnail_url").and_then(|v| v.as_str()).map(String::from);
+                // Extract username from the HTML embed field if author_name is gone
+                let html = json.get("html").and_then(|v| v.as_str()).unwrap_or("");
+                let handle = author_name
+                    .or_else(|| extract_instagram_username_from_html(html));
+                // Caption may be in the title field
+                let caption = json.get("title").and_then(|v| v.as_str()).map(String::from);
+
+                if let Some(ref h) = handle {
+                    return Ok(serde_json::json!({
+                        "handle": h,
+                        "profileUrl": format!("https://www.instagram.com/{}/", h),
+                        "caption": caption,
+                        "thumbnail": thumbnail,
+                        "source": "oembed",
+                    }));
+                }
+            }
+        }
+    }
+
+    // Strategy 2: Embed page scraping
+    if let Some(ref code) = shortcode {
+        let embed_url = format!("https://www.instagram.com/reel/{}/embed/captioned/", code);
+        if let Ok(res) = client
+            .get(&embed_url)
+            .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15")
+            .header("Accept", "text/html,application/xhtml+xml")
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .send()
+            .await
+        {
+            if res.status().is_success() {
+                if let Ok(html) = res.text().await {
+                    let handle = extract_instagram_username_from_html(&html);
+                    let caption = extract_instagram_caption_from_html(&html);
+                    let thumbnail = extract_meta_content_text(&html, "og:image")
+                        .filter(|u| u.starts_with("http"));
+
+                    if let Some(ref h) = handle {
+                        return Ok(serde_json::json!({
+                            "handle": h,
+                            "profileUrl": format!("https://www.instagram.com/{}/", h),
+                            "caption": caption,
+                            "thumbnail": thumbnail,
+                            "source": "embed",
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    // Strategy 3: yt-dlp --dump-json (most reliable, slowest)
+    let _permit = INSTAGRAM_SEMAPHORE.acquire().await.map_err(|e| e.to_string())?;
+    let result = ytdlp_dump_json(&app, &url, &cookies_browser, &cookies_file).await;
+    instagram_delay().await;
+
+    if let Ok(json) = result {
+        let handle = json.get("uploader_id").and_then(|v| v.as_str())
+            .or_else(|| json.get("uploader").and_then(|v| v.as_str()))
+            .map(String::from);
+        let caption = json.get("description").and_then(|v| v.as_str()).map(String::from);
+        let thumbnail = json.get("thumbnail").and_then(|v| v.as_str()).map(String::from);
+        let likes = json.get("like_count").and_then(|v| v.as_i64());
+        let comments = json.get("comment_count").and_then(|v| v.as_i64());
+        let views = json.get("view_count").and_then(|v| v.as_i64());
+        let timestamp = json.get("timestamp").and_then(|v| v.as_i64());
+
+        if let Some(ref h) = handle {
+            return Ok(serde_json::json!({
+                "handle": h,
+                "profileUrl": format!("https://www.instagram.com/{}/", h),
+                "caption": caption,
+                "thumbnail": thumbnail,
+                "source": "ytdlp",
+                "likes": likes,
+                "comments": comments,
+                "views": views,
+                "timestamp": timestamp,
+            }));
+        }
+    }
+
+    Err("Could not resolve Instagram author from any source".into())
+}
+
+/// Run yt-dlp --dump-json to get metadata without downloading
+async fn ytdlp_dump_json(
+    app: &AppHandle,
+    url: &str,
+    cookies_browser: &Option<String>,
+    cookies_file: &Option<String>,
+) -> Result<serde_json::Value, String> {
+    let shell = app.shell();
+
+    // Try sidecar first, then system yt-dlp
+    let ytdlp_cmd = if let Ok(cmd) = shell.sidecar("yt-dlp") {
+        cmd
+    } else if let Some(sys) = helpers::find_system_ytdlp() {
+        shell.command(sys.to_string_lossy().to_string())
+    } else {
+        return Err("yt-dlp not found".into());
+    };
+
+    let mut args = vec!["--dump-json".to_string(), "--no-download".to_string()];
+
+    let has_browser = cookies_browser.as_ref().map_or(false, |b| !b.is_empty());
+    let has_file = cookies_file.as_ref().map_or(false, |f| !f.is_empty() && PathBuf::from(f).exists());
+
+    if has_browser {
+        args.push("--cookies-from-browser".into());
+        args.push(cookies_browser.clone().unwrap());
+    } else if has_file {
+        args.push("--cookies".into());
+        args.push(cookies_file.clone().unwrap());
+    }
+
+    args.push(url.to_string());
+
+    let output = ytdlp_cmd
+        .args(args)
+        .output()
+        .await
+        .map_err(|e| format!("yt-dlp spawn error: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("yt-dlp failed: {}", stderr.trim()));
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str(&stdout)
+        .map_err(|e| format!("Failed to parse yt-dlp JSON: {e}"))
+}
+
+/// Fetch metrics for a clip via yt-dlp --dump-json (used for TikTok and IG when metrics weren't obtained during handle resolution)
+#[tauri::command]
+async fn fetch_clip_metrics(
+    app: AppHandle,
+    url: String,
+    cookies_browser: Option<String>,
+    cookies_file: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let is_instagram = url.contains("instagram.com");
+
+    if is_instagram {
+        let _permit = INSTAGRAM_SEMAPHORE.acquire().await.map_err(|e| e.to_string())?;
+        let result = ytdlp_dump_json(&app, &url, &cookies_browser, &cookies_file).await;
+        instagram_delay().await;
+        let json = result?;
+
+        return Ok(serde_json::json!({
+            "caption": json.get("description").and_then(|v| v.as_str()),
+            "thumbnail": json.get("thumbnail").and_then(|v| v.as_str()),
+            "likes": json.get("like_count").and_then(|v| v.as_i64()),
+            "comments": json.get("comment_count").and_then(|v| v.as_i64()),
+            "views": json.get("view_count").and_then(|v| v.as_i64()),
+            "shares": json.get("repost_count").and_then(|v| v.as_i64()),
+            "timestamp": json.get("timestamp").and_then(|v| v.as_i64()),
+        }));
+    }
+
+    // TikTok or other
+    let json = ytdlp_dump_json(&app, &url, &cookies_browser, &cookies_file).await?;
+    Ok(serde_json::json!({
+        "caption": json.get("description").and_then(|v| v.as_str()),
+        "thumbnail": json.get("thumbnail").and_then(|v| v.as_str()),
+        "likes": json.get("like_count").and_then(|v| v.as_i64()),
+        "comments": json.get("comment_count").and_then(|v| v.as_i64()),
+        "views": json.get("view_count").and_then(|v| v.as_i64()),
+        "shares": json.get("repost_count").and_then(|v| v.as_i64()),
+        "timestamp": json.get("timestamp").and_then(|v| v.as_i64()),
+    }))
+}
+
+/// Lookup creators in HubSpot by their instagram or tiktok property value
+#[tauri::command]
+async fn lookup_creators_by_social(
+    token: String,
+    platform: String,
+    profile_urls: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let search_url = format!(
+        "https://api.hubapi.com/crm/v3/objects/{}/search",
+        CREATORS_OBJECT_ID
+    );
+
+    let property_name = match platform.as_str() {
+        "instagram" => "instagram",
+        "tiktok" => "tiktok",
+        _ => return Err(format!("Unsupported platform: {}", platform)),
+    };
+
+    let mut results = Vec::new();
+
+    // Search one at a time to get precise matches
+    for profile_url in &profile_urls {
+        let body = serde_json::json!({
+            "filterGroups": [{
+                "filters": [{
+                    "propertyName": property_name,
+                    "operator": "EQ",
+                    "value": profile_url
+                }]
+            }],
+            "properties": ["name", "instagram", "tiktok", "main_link", "main_account", "status"],
+            "limit": 1
+        });
+
+        let res = client
+            .post(&search_url)
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Creator lookup failed: {e}"))?;
+
+        if res.status().is_success() {
+            let data: serde_json::Value = res.json().await
+                .map_err(|e| format!("Failed to parse creator search: {e}"))?;
+
+            if let Some(first) = data.get("results")
+                .and_then(|r| r.as_array())
+                .and_then(|arr| arr.first())
+            {
+                results.push(serde_json::json!({
+                    "profileUrl": profile_url,
+                    "found": true,
+                    "creatorId": first.get("id").and_then(|v| v.as_str()),
+                    "name": first.get("properties").and_then(|p| p.get("name")).and_then(|v| v.as_str()),
+                    "status": first.get("properties").and_then(|p| p.get("status")).and_then(|v| v.as_str()),
+                }));
+            } else {
+                results.push(serde_json::json!({
+                    "profileUrl": profile_url,
+                    "found": false,
+                }));
+            }
+        } else {
+            results.push(serde_json::json!({
+                "profileUrl": profile_url,
+                "found": false,
+                "error": format!("Search failed ({})", res.status()),
+            }));
+        }
+
+        // Small delay to respect rate limits
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    Ok(serde_json::json!({ "results": results }))
+}
+
+/// Create a new Creator in HubSpot
+#[tauri::command]
+async fn create_creator(
+    token: String,
+    name: String,
+    platform: String,
+    profile_url: String,
+    owner_id: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let url = format!(
+        "https://api.hubapi.com/crm/v3/objects/{}",
+        CREATORS_OBJECT_ID
+    );
+
+    let platform_display = match platform.as_str() {
+        "instagram" => "Instagram",
+        "tiktok" => "TikTok",
+        _ => return Err(format!("Unsupported platform: {}", platform)),
+    };
+
+    let mut properties = serde_json::json!({
+        "name": name,
+        "main_account": platform_display,
+        "status": "To Contact",
+    });
+
+    properties[&platform] = serde_json::Value::String(profile_url);
+
+    if let Some(ref oid) = owner_id {
+        if !oid.is_empty() {
+            properties["hubspot_owner_id"] = serde_json::Value::String(oid.clone());
+        }
+    }
+
+    let body = serde_json::json!({ "properties": properties });
+
+    let res = client
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to create creator: {e}"))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("HubSpot create creator error ({}): {}", status, text));
+    }
+
+    let created: serde_json::Value = res.json().await
+        .map_err(|e| format!("Failed to parse create response: {e}"))?;
+
+    Ok(serde_json::json!({
+        "id": created.get("id").and_then(|v| v.as_str()),
+        "name": name,
+    }))
+}
+
+/// Resolve a HubSpot user email to a numeric owner ID
+#[tauri::command]
+async fn resolve_owner_id(
+    token: String,
+    email: String,
+) -> Result<String, String> {
+    let client = reqwest::Client::new();
+    let res = client
+        .get("https://api.hubapi.com/crm/v3/owners")
+        .bearer_auth(&token)
+        .query(&[("email", &email), ("limit", &"1".to_string())])
+        .send()
+        .await
+        .map_err(|e| format!("Owner lookup failed: {e}"))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("Owner lookup error ({}): {}", status, text));
+    }
+
+    let data: serde_json::Value = res.json().await
+        .map_err(|e| format!("Failed to parse owner response: {e}"))?;
+
+    data.get("results")
+        .and_then(|r| r.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|owner| owner.get("id"))
+        .and_then(|id| id.as_str())
+        .map(String::from)
+        .ok_or_else(|| format!("No HubSpot owner found for email: {}", email))
+}
+
+/// Search for an existing External Clip by its link URL. Returns the clip ID if found.
+#[tauri::command]
+async fn find_clip_by_link(
+    token: String,
+    link: String,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let search_url = format!(
+        "https://api.hubapi.com/crm/v3/objects/{}/search",
+        EXTERNAL_CLIPS_OBJECT_ID
+    );
+
+    let body = serde_json::json!({
+        "filterGroups": [{
+            "filters": [{
+                "propertyName": "link",
+                "operator": "EQ",
+                "value": link
+            }]
+        }],
+        "properties": ["link"],
+        "limit": 1
+    });
+
+    let res = client
+        .post(&search_url)
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Clip search failed: {e}"))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("HubSpot search error ({}): {}", status, text));
+    }
+
+    let data: serde_json::Value = res.json().await
+        .map_err(|e| format!("Failed to parse search response: {e}"))?;
+
+    let found = data.get("results")
+        .and_then(|r| r.as_array())
+        .and_then(|arr| arr.first())
+        .and_then(|clip| clip.get("id"))
+        .and_then(|id| id.as_str())
+        .map(String::from);
+
+    Ok(serde_json::json!({
+        "found": found.is_some(),
+        "id": found,
+    }))
+}
+
+/// Create a new External Clip in HubSpot (only link + owner, creator fields are synced via association)
+#[tauri::command]
+async fn create_external_clip(
+    token: String,
+    link: String,
+    owner_id: String,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let url = format!(
+        "https://api.hubapi.com/crm/v3/objects/{}",
+        EXTERNAL_CLIPS_OBJECT_ID
+    );
+
+    let body = serde_json::json!({
+        "properties": {
+            "link": link,
+            "hubspot_owner_id": owner_id,
+        }
+    });
+
+    let res = client
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Failed to create external clip: {e}"))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("HubSpot create clip error ({}): {}", status, text));
+    }
+
+    let created: serde_json::Value = res.json().await
+        .map_err(|e| format!("Failed to parse create response: {e}"))?;
+
+    Ok(serde_json::json!({
+        "id": created.get("id").and_then(|v| v.as_str()),
+        "link": link,
+    }))
+}
+
+/// Associate an External Clip to a Creator
+#[tauri::command]
+async fn associate_clip_to_creator(
+    token: String,
+    clip_id: String,
+    creator_id: String,
+) -> Result<(), String> {
+    let client = reqwest::Client::new();
+
+    // Use default association (no custom label needed)
+    let assoc_url = format!(
+        "https://api.hubapi.com/crm/v4/objects/{}/{}/associations/default/{}/{}",
+        EXTERNAL_CLIPS_OBJECT_ID, clip_id, CREATORS_OBJECT_ID, creator_id
+    );
+
+    let res = client
+        .put(&assoc_url)
+        .bearer_auth(&token)
+        .header("Content-Type", "application/json")
+        .send()
+        .await
+        .map_err(|e| format!("Association request failed: {e}"))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!(
+            "Failed to associate clip {} with creator {} ({}): {}",
+            clip_id, creator_id, status, text
+        ));
+    }
+
+    Ok(())
+}
+
+/// Search for External Clips that have no tags, sorted by creation date (most recent first)
+#[tauri::command]
+async fn search_untagged_clips(
+    token: String,
+    after: Option<String>,
+    creator_status: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let search_url = format!(
+        "https://api.hubapi.com/crm/v3/objects/{}/search",
+        EXTERNAL_CLIPS_OBJECT_ID
+    );
+
+    let mut filters = vec![serde_json::json!({
+        "propertyName": "tags",
+        "operator": "NOT_HAS_PROPERTY"
+    })];
+
+    if let Some(ref status) = creator_status {
+        if !status.is_empty() {
+            filters.push(serde_json::json!({
+                "propertyName": "creator_status",
+                "operator": "EQ",
+                "value": status
+            }));
+        }
+    }
+
+    let mut body = serde_json::json!({
+        "filterGroups": [{
+            "filters": filters
+        }],
+        "properties": [
+            "link", "tags", "creator_name", "creator_status", "creator_main_link",
+            "creator_id", "date_found", "createdate", "social_media_caption",
+            "social_media_tags", "fetched_social_thumbnail", "score"
+        ],
+        "sorts": [
+            { "propertyName": "date_found", "direction": "DESCENDING" }
+        ],
+        "limit": 200
+    });
+
+    if let Some(cursor) = after {
+        body["after"] = serde_json::Value::String(cursor);
+    }
+
+    let res = client
+        .post(&search_url)
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Untagged clips search failed: {e}"))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("HubSpot search error ({}): {}", status, text));
+    }
+
+    res.json().await
+        .map_err(|e| format!("Failed to parse search response: {e}"))
+}
+
+/// Update multiple properties on an External Clip in one call
+#[tauri::command]
+async fn update_clip_properties(
+    token: String,
+    clip_id: String,
+    properties: serde_json::Value,
+) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let body = serde_json::json!({ "properties": properties });
+
+    let res = client
+        .patch(&format!(
+            "https://api.hubapi.com/crm/v3/objects/{}/{}",
+            EXTERNAL_CLIPS_OBJECT_ID, clip_id
+        ))
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Update clip properties failed: {e}"))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("HubSpot update error ({}): {}", status, text));
+    }
+
+    Ok(())
+}
+
 // ── App entry ───────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -2485,6 +3169,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             fetch_tag_options,
+            create_tag_option,
             search_clips,
             search_creator_clips,
             search_creators,
@@ -2513,6 +3198,17 @@ pub fn run() {
             save_project_data,
             list_projects,
             download_clip,
+            parse_clip_urls,
+            resolve_instagram_info,
+            fetch_clip_metrics,
+            lookup_creators_by_social,
+            create_creator,
+            resolve_owner_id,
+            find_clip_by_link,
+            create_external_clip,
+            associate_clip_to_creator,
+            search_untagged_clips,
+            update_clip_properties,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

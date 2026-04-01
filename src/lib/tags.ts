@@ -23,6 +23,11 @@ export async function fetchTagOptions(token: string): Promise<TagOption[]> {
   return cachedOptions;
 }
 
+/** Invalidate the cached tag options so the next fetchTagOptions call re-fetches */
+export function invalidateTagCache() {
+  cachedOptions = null;
+}
+
 /** Build a value→label map for display purposes */
 export function buildLabelMap(options: TagOption[]): Map<string, string> {
   const map = new Map<string, string>();

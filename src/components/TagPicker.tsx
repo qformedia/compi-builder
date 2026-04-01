@@ -22,9 +22,11 @@ interface Props {
   /** Selected internal values */
   selected: string[];
   onChange: (values: string[]) => void;
+  /** Hide the selected badges below the trigger */
+  hideBadges?: boolean;
 }
 
-export function TagPicker({ options, selected, onChange }: Props) {
+export function TagPicker({ options, selected, onChange, hideBadges }: Props) {
   const [open, setOpen] = useState(false);
 
   const toggle = (value: string) => {
@@ -80,7 +82,7 @@ export function TagPicker({ options, selected, onChange }: Props) {
         </PopoverContent>
       </Popover>
 
-      {selected.length > 0 && (
+      {!hideBadges && selected.length > 0 && (
         <div className="flex flex-wrap gap-1">
           {selected.map((value) => (
             <Badge key={value} variant="secondary" className="gap-1">

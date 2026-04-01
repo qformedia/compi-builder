@@ -84,6 +84,9 @@ export interface AppSettings {
   preferHubSpotPreview: boolean;
   evil0ctalApiUrl: string;
   downloadProviders: DownloadProviders;
+  ownerEmail: string;
+  /** Cached HubSpot numeric owner ID resolved from ownerEmail */
+  ownerId: string;
 }
 
 export type FeedbackType = "bug" | "feature";

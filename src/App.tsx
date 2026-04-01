@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { Clock, Film, CheckCircle, Loader2, Sparkles, RefreshCw, X, RulerDimensionLine, AlertTriangle, Settings, Search, ListOrdered, MessageSquarePlus } from "lucide-react";
+import { Clock, Film, CheckCircle, Loader2, Sparkles, RefreshCw, X, RulerDimensionLine, AlertTriangle, Settings, Search, ListOrdered, MessageSquarePlus, Globe, Tags } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { HubSpotIcon } from "@/components/ClipCard";
 import { fetchVideoProjectClips } from "@/lib/hubspot";
@@ -21,6 +21,10 @@ import { SettingsDialog } from "@/components/SettingsDialog";
 import { FeedbackDialog } from "@/components/FeedbackDialog";
 import { SearchTab } from "@/components/SearchTab";
 import { ArrangeTab, decodeEditingNotes } from "@/components/ArrangeTab";
+import { GeneralSearchTab } from "@/components/GeneralSearchTab";
+import { TagClipsTab } from "@/components/TagClipsTab";
+import { fetchTagOptions, invalidateTagCache } from "@/lib/tags";
+import type { TagOption } from "@/lib/tags";
 import { DEFAULT_DOWNLOAD_PROVIDERS } from "@/types";
 import type { AppSettings, Clip, Project, ProjectClip } from "@/types";
 import logo from "@/assets/logotipo-quantastic.png";
@@ -68,6 +72,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   preferHubSpotPreview: true,
   evil0ctalApiUrl: "https://web-production-04050.up.railway.app",
   downloadProviders: DEFAULT_DOWNLOAD_PROVIDERS,
+  ownerEmail: "",
+  ownerId: "",
 };
 
 function App() {
@@ -80,6 +86,14 @@ function App() {
   const [project, setProject] = useState<Project | null>(null);
   const [activeTab, setActiveTab] = useState("search");
   const [thumbWidth, setThumbWidth] = useState(110);
+
+  // Tag options for TagClipsTab (loaded from HubSpot, cached)
+  const [appTagOptions, setAppTagOptions] = useState<TagOption[]>([]);
+  useEffect(() => {
+    if (settings.hubspotToken) {
+      fetchTagOptions(settings.hubspotToken).then(setAppTagOptions).catch(() => {});
+    }
+  }, [settings.hubspotToken]);
 
   // Finish video flow
   type StepStatus = "pending" | "working" | "done" | "error";
@@ -777,6 +791,14 @@ function App() {
                 <ListOrdered className="mr-1.5 h-4 w-4" />
                 Arrange
               </TabsTrigger>
+              <TabsTrigger value="general-search">
+                <Globe className="mr-1.5 h-4 w-4" />
+                General Search
+              </TabsTrigger>
+              <TabsTrigger value="tag-clips">
+                <Tags className="mr-1.5 h-4 w-4" />
+                Tag Clips
+              </TabsTrigger>
             </TabsList>
 
             {activeTab === "arrange" && arrangeStats && (
@@ -869,6 +891,27 @@ function App() {
                 removeClip={removeClipFromProject}
                 thumbWidth={thumbWidth}
                 suppressAutoPlay={finishDialogOpen}
+              />
+            </TabErrorBoundary>
+          </div>
+          <div className={`flex-1 overflow-hidden ${activeTab === "general-search" ? "" : "hidden"}`}>
+            <TabErrorBoundary name="General Search">
+              <GeneralSearchTab
+                settings={settings}
+                onSettingsChange={saveSettings}
+              />
+            </TabErrorBoundary>
+          </div>
+          <div className={`flex-1 overflow-hidden ${activeTab === "tag-clips" ? "" : "hidden"}`}>
+            <TabErrorBoundary name="Tag Clips">
+              <TagClipsTab
+                token={settings.hubspotToken}
+                tagOptions={appTagOptions}
+                settings={settings}
+                onTagsCreated={() => {
+                  invalidateTagCache();
+                  fetchTagOptions(settings.hubspotToken).then(setAppTagOptions).catch(() => {});
+                }}
               />
             </TabErrorBoundary>
           </div>

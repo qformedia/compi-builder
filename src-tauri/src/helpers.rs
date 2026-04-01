@@ -342,6 +342,148 @@ pub(crate) fn find_system_ytdlp() -> Option<std::path::PathBuf> {
     which::which("yt-dlp").ok()
 }
 
+// ── General Search Helpers ───────────────────────────────────────────────────
+
+/// Supported social platforms for General Search
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub(crate) enum SocialPlatform {
+    Instagram,
+    TikTok,
+}
+
+/// A parsed social media clip URL
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct ParsedSocialUrl {
+    pub url: String,
+    pub platform: SocialPlatform,
+    /// TikTok: extracted from URL; Instagram: None (needs network resolution)
+    pub handle: Option<String>,
+    /// Full profile URL (constructed from handle when available)
+    pub profile_url: Option<String>,
+}
+
+/// Parse a raw text block of URLs into structured entries.
+/// Filters out empty lines, non-Instagram/TikTok URLs, and deduplicates.
+pub(crate) fn parse_social_urls(raw: &str) -> Vec<ParsedSocialUrl> {
+    let mut seen = std::collections::HashSet::new();
+    raw.lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .filter_map(|line| {
+            let url = line.to_string();
+            if !seen.insert(url.clone()) {
+                return None;
+            }
+
+            if url.contains("tiktok.com") {
+                let handle = extract_tiktok_handle(&url);
+                let profile_url = handle.as_ref().map(|h| format!("https://www.tiktok.com/@{}", h));
+                Some(ParsedSocialUrl {
+                    url,
+                    platform: SocialPlatform::TikTok,
+                    handle,
+                    profile_url,
+                })
+            } else if url.contains("instagram.com") {
+                Some(ParsedSocialUrl {
+                    url,
+                    platform: SocialPlatform::Instagram,
+                    handle: None,
+                    profile_url: None,
+                })
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Extract the TikTok handle from a URL like `tiktok.com/@handle/video/123`
+pub(crate) fn extract_tiktok_handle(url: &str) -> Option<String> {
+    let re = regex::Regex::new(r"tiktok\.com/@([^/?]+)").ok()?;
+    let caps = re.captures(url)?;
+    Some(caps.get(1)?.as_str().to_string())
+}
+
+/// Extract the Instagram shortcode from a reel/post URL
+pub(crate) fn extract_instagram_shortcode(url: &str) -> Option<String> {
+    let re = regex::Regex::new(r"/(reel|reels|p)/([^/?]+)").ok()?;
+    let caps = re.captures(url)?;
+    Some(caps.get(2)?.as_str().to_string())
+}
+
+/// Extract a username from Instagram embed/oEmbed HTML.
+/// Looks for profile links like `href="/username/"` or `instagram.com/username/`
+pub(crate) fn extract_instagram_username_from_html(html: &str) -> Option<String> {
+    // Pattern 1: href="https://www.instagram.com/username/" in embed HTML
+    let re1 = regex::Regex::new(r#"instagram\.com/([a-zA-Z0-9._]+)/?"#).ok()?;
+    for caps in re1.captures_iter(html) {
+        let candidate = caps.get(1)?.as_str();
+        let skip = ["reel", "reels", "p", "explore", "accounts", "api",
+                     "embed", "developer", "about", "legal", "tags", "tv", "stories"];
+        if !skip.contains(&candidate) && !candidate.starts_with("reel") {
+            return Some(candidate.to_string());
+        }
+    }
+    None
+}
+
+/// Extract caption text from Instagram embed HTML
+pub(crate) fn extract_instagram_caption_from_html(html: &str) -> Option<String> {
+    // The captioned embed page has the caption in a <div class="Caption"> or in og:description
+    if let Some(desc) = extract_meta_content_text(html, "og:description") {
+        if !desc.is_empty() {
+            return Some(desc);
+        }
+    }
+    // Fallback: look for the caption container
+    let re = regex::Regex::new(r#"class="Caption"[^>]*>(.*?)</div>"#).ok()?;
+    let caps = re.captures(html)?;
+    let raw = caps.get(1)?.as_str();
+    let text = raw.replace("<br>", "\n")
+        .replace("<br/>", "\n")
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">");
+    // Strip remaining HTML tags
+    let stripped = regex::Regex::new(r"<[^>]+>").ok()?.replace_all(&text, "");
+    let result = stripped.trim().to_string();
+    if result.is_empty() { None } else { Some(result) }
+}
+
+/// Extract text content from a meta property tag (not just URLs)
+pub(crate) fn extract_meta_content_text(html: &str, property: &str) -> Option<String> {
+    let search = format!("property=\"{}\"", property);
+    let pos = html.find(&search).or_else(|| {
+        let alt = format!("name=\"{}\"", property);
+        html.find(&alt)
+    })?;
+
+    let region = &html[pos.saturating_sub(200)..std::cmp::min(pos + 2000, html.len())];
+    let content_re = regex::Regex::new(r#"content="([^"]*?)""#).ok()?;
+    let caps = content_re.captures(region)?;
+    let value = caps.get(1)?.as_str().to_string();
+    let decoded = value
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&#039;", "'")
+        .replace("&quot;", "\"");
+    Some(decoded)
+}
+
+/// Extract hashtags from a social media caption and return them semicolon-separated.
+/// Handles both `#tag` and adjacent `#tag1#tag2` patterns.
+/// Returns None if no hashtags are found.
+#[allow(dead_code)]
+pub(crate) fn extract_hashtags(caption: &str) -> Option<String> {
+    let re = regex::Regex::new(r"#([A-Za-z0-9_]+)").ok()?;
+    let tags: Vec<String> = re.captures_iter(caption)
+        .map(|c| c.get(1).unwrap().as_str().to_string())
+        .collect();
+    if tags.is_empty() { None } else { Some(tags.join(";")) }
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -826,5 +968,159 @@ mod tests {
             let augmented = augmented_path();
             assert!(augmented.contains(&original), "original PATH not preserved");
         }
+    }
+
+    // ── General Search: parse_social_urls ────────────────────────────────
+
+    #[test]
+    fn parse_social_urls_mixed_input() {
+        let input = "https://www.tiktok.com/@dancepro/video/123456\nhttps://www.instagram.com/reel/ABC123/\nhttps://example.com/not-social\n\n";
+        let results = parse_social_urls(input);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].platform, SocialPlatform::TikTok);
+        assert_eq!(results[0].handle.as_deref(), Some("dancepro"));
+        assert_eq!(results[0].profile_url.as_deref(), Some("https://www.tiktok.com/@dancepro"));
+        assert_eq!(results[1].platform, SocialPlatform::Instagram);
+        assert!(results[1].handle.is_none());
+    }
+
+    #[test]
+    fn parse_social_urls_deduplicates() {
+        let input = "https://www.tiktok.com/@user/video/1\nhttps://www.tiktok.com/@user/video/1\n";
+        let results = parse_social_urls(input);
+        assert_eq!(results.len(), 1);
+    }
+
+    #[test]
+    fn parse_social_urls_empty_input() {
+        assert!(parse_social_urls("").is_empty());
+        assert!(parse_social_urls("   \n  \n  ").is_empty());
+    }
+
+    // ── extract_tiktok_handle ────────────────────────────────────────────
+
+    #[test]
+    fn tiktok_handle_standard_url() {
+        assert_eq!(
+            extract_tiktok_handle("https://www.tiktok.com/@cooluser/video/7123456"),
+            Some("cooluser".into())
+        );
+    }
+
+    #[test]
+    fn tiktok_handle_with_dots() {
+        assert_eq!(
+            extract_tiktok_handle("https://tiktok.com/@user.name/video/1"),
+            Some("user.name".into())
+        );
+    }
+
+    #[test]
+    fn tiktok_handle_no_at_sign() {
+        assert_eq!(
+            extract_tiktok_handle("https://tiktok.com/t/ZTR123/"),
+            None
+        );
+    }
+
+    // ── extract_instagram_shortcode ──────────────────────────────────────
+
+    #[test]
+    fn ig_shortcode_reel() {
+        assert_eq!(
+            extract_instagram_shortcode("https://www.instagram.com/reel/CxYz123/"),
+            Some("CxYz123".into())
+        );
+    }
+
+    #[test]
+    fn ig_shortcode_reels() {
+        assert_eq!(
+            extract_instagram_shortcode("https://www.instagram.com/reels/AbC456/"),
+            Some("AbC456".into())
+        );
+    }
+
+    #[test]
+    fn ig_shortcode_post() {
+        assert_eq!(
+            extract_instagram_shortcode("https://instagram.com/p/XyZ789/"),
+            Some("XyZ789".into())
+        );
+    }
+
+    #[test]
+    fn ig_shortcode_with_query() {
+        assert_eq!(
+            extract_instagram_shortcode("https://www.instagram.com/reel/ABC/?igsh=123"),
+            Some("ABC".into())
+        );
+    }
+
+    // ── extract_instagram_username_from_html ─────────────────────────────
+
+    #[test]
+    fn ig_username_from_embed_html() {
+        let html = r#"<a href="https://www.instagram.com/theartist/" target="_blank">@theartist</a>"#;
+        assert_eq!(
+            extract_instagram_username_from_html(html),
+            Some("theartist".into())
+        );
+    }
+
+    #[test]
+    fn ig_username_skips_reel_paths() {
+        let html = r#"<a href="https://www.instagram.com/reel/ABC123/">Reel</a>
+                       <a href="https://www.instagram.com/coolcreator/">Profile</a>"#;
+        assert_eq!(
+            extract_instagram_username_from_html(html),
+            Some("coolcreator".into())
+        );
+    }
+
+    #[test]
+    fn ig_username_none_when_only_system_paths() {
+        let html = r#"<a href="https://www.instagram.com/reel/ABC/">X</a>
+                       <a href="https://www.instagram.com/explore/">E</a>"#;
+        assert_eq!(extract_instagram_username_from_html(html), None);
+    }
+
+    // ── extract_hashtags ─────────────────────────────────────────────────
+
+    #[test]
+    fn hashtags_from_caption_with_adjacent_tags() {
+        let caption = "Sunlight through leaves ✨\n#AcrylicMarkerArt#PlantShadowArt#stationery #markerart #markplanplus";
+        assert_eq!(
+            extract_hashtags(caption),
+            Some("AcrylicMarkerArt;PlantShadowArt;stationery;markerart;markplanplus".into())
+        );
+    }
+
+    #[test]
+    fn hashtags_from_caption_spaced() {
+        let caption = "Check this out! #dance #music #viral";
+        assert_eq!(
+            extract_hashtags(caption),
+            Some("dance;music;viral".into())
+        );
+    }
+
+    #[test]
+    fn hashtags_none_when_no_hashtags() {
+        assert_eq!(extract_hashtags("Just a regular caption with no tags"), None);
+    }
+
+    #[test]
+    fn hashtags_empty_string() {
+        assert_eq!(extract_hashtags(""), None);
+    }
+
+    #[test]
+    fn hashtags_with_underscores() {
+        let caption = "#cool_art #my_video_123";
+        assert_eq!(
+            extract_hashtags(caption),
+            Some("cool_art;my_video_123".into())
+        );
     }
 }
