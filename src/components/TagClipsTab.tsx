@@ -18,6 +18,11 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import { TagPicker } from "@/components/TagPicker";
 import { getEmbedUrl } from "@/components/ClipCard";
 import { resolveTagLabel } from "@/lib/tags";
@@ -34,6 +39,9 @@ import {
   X,
   Image as ImageIcon,
   AlertTriangle,
+  BarChart3,
+  Pause,
+  RotateCw,
 } from "lucide-react";
 import type { TagOption } from "@/lib/tags";
 import type { AppSettings } from "@/types";
@@ -51,6 +59,7 @@ interface UntaggedClip {
   socialMediaTags: string | null;
   score: string | null;
   tags: string[];
+  metricStatus: "idle" | "fetching" | "done" | "failed";
   platform: "instagram" | "tiktok" | "other";
   pendingTags: string[];
   pendingScore: string;
@@ -81,6 +90,13 @@ interface Props {
   onTagsCreated?: () => void;
 }
 
+interface Owner {
+  id: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+}
+
 export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Props) {
   const [clips, setClips] = useState<UntaggedClip[]>([]);
   const [loading, setLoading] = useState(false);
@@ -89,12 +105,300 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
   const [previewId, setPreviewId] = useState<string | null>(null);
   const [savingId, setSavingId] = useState<string | null>(null);
   const [statusFilter, setStatusFilter] = useState("_all");
+  const [ownerFilter, setOwnerFilter] = useState("_all");
+  const [owners, setOwners] = useState<Owner[]>([]);
   const [socialTagModal, setSocialTagModal] = useState<SocialTagModal | null>(null);
   const [creatingTag, setCreatingTag] = useState(false);
   const thumbFetchedRef = useRef(new Set<string>());
   const thumbQueueRef = useRef<string[]>([]);
   const thumbActiveRef = useRef(0);
   const MAX_CONCURRENT_THUMBS = 3;
+
+  // ── Social metrics backfill queue ──────────────────────────────────
+  interface MetricsQueueItem { clipId: string; link: string; platform: "instagram" | "tiktok" | "other" }
+  interface MetricsFailure { clipId: string; link: string; error: string }
+  const [metricsRunning, setMetricsRunning] = useState(false);
+  const [metricsPaused, setMetricsPaused] = useState(false);
+  const [metricsAutoPaused, setMetricsAutoPaused] = useState(false);
+  const [metricsProgress, setMetricsProgress] = useState({ current: 0, total: 0, ok: 0, failed: 0 });
+  const [metricsFailures, setMetricsFailures] = useState<MetricsFailure[]>([]);
+  const metricsQueueRef = useRef<MetricsQueueItem[]>([]);
+  const metricsPausedRef = useRef(false);
+  const metricsCancelledRef = useRef(false);
+  const consecutiveFailsRef = useRef(0);
+  const metricsNextAfterRef = useRef<string | null>(null);
+  const metricsPhaseRef = useRef<"granted" | "all" | "done">("granted");
+  const metricsProcessedRef = useRef(new Set<string>());
+
+  const detectPlatformForMetrics = (url: string): "instagram" | "tiktok" | "other" => {
+    if (url.includes("instagram.com")) return "instagram";
+    if (url.includes("tiktok.com")) return "tiktok";
+    return "other";
+  };
+
+  const loadMetricsPage = useCallback(async (after: string | null, creatorStatus: string | null): Promise<{ items: MetricsQueueItem[]; nextAfter: string | null; total: number }> => {
+    const data: {
+      total: number;
+      results: Array<{ id: string; properties: Record<string, string | null> }>;
+      paging?: { next?: { after: string } };
+    } = await invoke("search_clips_missing_metrics", {
+      token,
+      after,
+      creatorStatus,
+    });
+
+    const items: MetricsQueueItem[] = data.results
+      .filter((r) => {
+        const link = r.properties.link;
+        if (!link) return false;
+        const broken = r.properties.link_not_working_anymore;
+        if (broken && broken !== "false") return false;
+        if (!link.includes("instagram.com") && !link.includes("tiktok.com")) return false;
+        return true;
+      })
+      .map((r) => ({
+        clipId: r.id,
+        link: r.properties.link!,
+        platform: detectPlatformForMetrics(r.properties.link!),
+      }));
+
+    return { items, nextAfter: data.paging?.next?.after ?? null, total: data.total };
+  }, [token]);
+
+  const processMetricsQueue = useCallback(async () => {
+    const statusForPhase = () => metricsPhaseRef.current === "granted" ? "Granted" : null;
+
+    while (true) {
+      if (metricsCancelledRef.current) break;
+      if (metricsPausedRef.current) break;
+
+      // Refill queue if empty
+      if (metricsQueueRef.current.length === 0) {
+        if (metricsPhaseRef.current === "done") break;
+
+        try {
+          const { items, nextAfter } = await loadMetricsPage(
+            metricsNextAfterRef.current,
+            statusForPhase(),
+          );
+          metricsNextAfterRef.current = nextAfter;
+
+          const newItems = items.filter((it) => !metricsProcessedRef.current.has(it.clipId));
+          if (newItems.length > 0) {
+            metricsQueueRef.current.push(...newItems);
+            setMetricsProgress((p) => ({ ...p, total: p.total + newItems.length }));
+          }
+
+          // No more pages in this phase -> advance
+          if (!nextAfter && items.length === 0) {
+            if (metricsPhaseRef.current === "granted") {
+              metricsPhaseRef.current = "all";
+              metricsNextAfterRef.current = null;
+              continue;
+            } else {
+              metricsPhaseRef.current = "done";
+              break;
+            }
+          }
+          if (!nextAfter && items.length > 0) {
+            // Last page of this phase; after processing these, advance
+          }
+        } catch (err) {
+          console.error("Failed to load metrics page:", err);
+          break;
+        }
+
+        continue;
+      }
+
+      const item = metricsQueueRef.current.shift()!;
+      metricsProcessedRef.current.add(item.clipId);
+      setClips((prev) => prev.map((c) => c.id === item.clipId ? { ...c, metricStatus: "fetching" as const } : c));
+
+      try {
+        const metrics: {
+          caption?: string;
+          likes?: number;
+          comments?: number;
+          views?: number;
+          shares?: number;
+          timestamp?: number;
+          thumbnail?: string;
+        } | null = await invoke("fetch_clip_metrics", {
+          url: item.link,
+          cookiesBrowser: settings.cookiesBrowser || null,
+          cookiesFile: settings.cookiesFile || null,
+        });
+
+        if (metrics) {
+          const props: Record<string, string> = {};
+          if (metrics.caption) props.social_media_caption = metrics.caption;
+          if (metrics.likes != null) props.likes = String(metrics.likes);
+          if (metrics.comments != null) props.comments = String(metrics.comments);
+          if (metrics.views != null) props.plays = String(metrics.views);
+          if (metrics.shares != null) props.shares = String(metrics.shares);
+          if (metrics.timestamp) {
+            props.posted_date = new Date(metrics.timestamp * 1000).toISOString().split("T")[0];
+          }
+
+          const captionForTags = props.social_media_caption;
+          if (captionForTags) {
+            const hashtags = [...captionForTags.matchAll(/#([A-Za-z0-9_]+)/g)].map((m) => m[1]);
+            if (hashtags.length > 0) props.social_media_tags = hashtags.join(";");
+          }
+
+          if (Object.keys(props).length > 0) {
+            await invoke("update_clip_properties", { token, clipId: item.clipId, properties: props });
+          }
+
+          setClips((prev) => prev.map((c) =>
+            c.id === item.clipId
+              ? { ...c, metricStatus: "done" as const, caption: props.social_media_caption ?? c.caption, socialMediaTags: props.social_media_tags ?? c.socialMediaTags }
+              : c
+          ));
+        } else {
+          setClips((prev) => prev.map((c) => c.id === item.clipId ? { ...c, metricStatus: "done" as const } : c));
+        }
+
+        consecutiveFailsRef.current = 0;
+        setMetricsProgress((p) => ({ ...p, current: p.current + 1, ok: p.ok + 1 }));
+      } catch (err) {
+        consecutiveFailsRef.current++;
+        setMetricsProgress((p) => ({ ...p, current: p.current + 1, failed: p.failed + 1 }));
+        setClips((prev) => prev.map((c) => c.id === item.clipId ? { ...c, metricStatus: "failed" as const } : c));
+        setMetricsFailures((prev) => [...prev, {
+          clipId: item.clipId,
+          link: item.link,
+          error: err instanceof Error ? err.message : String(err),
+        }]);
+
+        if (consecutiveFailsRef.current >= 5) {
+          setMetricsAutoPaused(true);
+          metricsPausedRef.current = true;
+          setMetricsPaused(true);
+          return;
+        }
+      }
+
+      // Randomized platform-aware delay
+      const randomBetween = (min: number, max: number) => Math.floor(Math.random() * (max - min + 1)) + min;
+      const delay = item.platform === "instagram" ? randomBetween(1_000, 10_000) : item.platform === "tiktok" ? randomBetween(1_000, 3_000) : 500;
+      await new Promise((r) => setTimeout(r, delay));
+
+      // Advance phase if queue drained and no next page
+      if (metricsQueueRef.current.length === 0 && !metricsNextAfterRef.current) {
+        if (metricsPhaseRef.current === "granted") {
+          metricsPhaseRef.current = "all";
+          metricsNextAfterRef.current = null;
+        } else if (metricsPhaseRef.current === "all") {
+          metricsPhaseRef.current = "done";
+        }
+      }
+    }
+
+    if (!metricsPausedRef.current) {
+      setMetricsRunning(false);
+    }
+  }, [token, settings, loadMetricsPage]);
+
+  const startMetricsFetch = useCallback(async () => {
+    // Seed queue with visible clips that need metrics (IG/TikTok only, no caption yet)
+    const visibleItems: MetricsQueueItem[] = clips
+      .filter((c) =>
+        !c.caption &&
+        (c.link.includes("instagram.com") || c.link.includes("tiktok.com"))
+      )
+      .map((c) => ({ clipId: c.id, link: c.link, platform: c.platform }));
+
+    metricsQueueRef.current = visibleItems;
+    metricsProcessedRef.current = new Set(visibleItems.map((it) => it.clipId));
+    metricsNextAfterRef.current = null;
+    metricsPhaseRef.current = "granted";
+    consecutiveFailsRef.current = 0;
+    metricsCancelledRef.current = false;
+    metricsPausedRef.current = false;
+    setMetricsPaused(false);
+    setMetricsAutoPaused(false);
+    setMetricsProgress({ current: 0, total: visibleItems.length, ok: 0, failed: 0 });
+    setMetricsFailures([]);
+    setMetricsRunning(true);
+    processMetricsQueue();
+  }, [processMetricsQueue, clips]);
+
+  const toggleMetricsPause = useCallback(() => {
+    if (metricsPausedRef.current) {
+      metricsPausedRef.current = false;
+      consecutiveFailsRef.current = 0;
+      setMetricsPaused(false);
+      setMetricsAutoPaused(false);
+      processMetricsQueue();
+    } else {
+      metricsPausedRef.current = true;
+      setMetricsPaused(true);
+    }
+  }, [processMetricsQueue]);
+
+  const stopMetricsFetch = useCallback(() => {
+    metricsCancelledRef.current = true;
+    metricsPausedRef.current = false;
+    setMetricsRunning(false);
+    setMetricsPaused(false);
+    setMetricsAutoPaused(false);
+  }, []);
+
+  const fetchSingleClipMetrics = useCallback(async (clipId: string) => {
+    const clip = clips.find((c) => c.id === clipId);
+    if (!clip) return;
+
+    setClips((prev) => prev.map((c) => c.id === clipId ? { ...c, metricStatus: "fetching" as const } : c));
+
+    try {
+      const metrics: {
+        caption?: string; likes?: number; comments?: number;
+        views?: number; shares?: number; timestamp?: number; thumbnail?: string;
+      } | null = await invoke("fetch_clip_metrics", {
+        url: clip.link,
+        cookiesBrowser: settings.cookiesBrowser || null,
+        cookiesFile: settings.cookiesFile || null,
+      });
+
+      if (metrics) {
+        const props: Record<string, string> = {};
+        if (metrics.caption) props.social_media_caption = metrics.caption;
+        if (metrics.likes != null) props.likes = String(metrics.likes);
+        if (metrics.comments != null) props.comments = String(metrics.comments);
+        if (metrics.views != null) props.plays = String(metrics.views);
+        if (metrics.shares != null) props.shares = String(metrics.shares);
+        if (metrics.timestamp) {
+          props.posted_date = new Date(metrics.timestamp * 1000).toISOString().split("T")[0];
+        }
+        const captionForTags = props.social_media_caption;
+        if (captionForTags) {
+          const hashtags = [...captionForTags.matchAll(/#([A-Za-z0-9_]+)/g)].map((m) => m[1]);
+          if (hashtags.length > 0) props.social_media_tags = hashtags.join(";");
+        }
+
+        if (Object.keys(props).length > 0) {
+          await invoke("update_clip_properties", { token, clipId, properties: props });
+        }
+
+        setClips((prev) => prev.map((c) =>
+          c.id === clipId
+            ? { ...c, metricStatus: "done" as const, caption: props.social_media_caption ?? c.caption, socialMediaTags: props.social_media_tags ?? c.socialMediaTags }
+            : c
+        ));
+      } else {
+        setClips((prev) => prev.map((c) => c.id === clipId ? { ...c, metricStatus: "done" as const } : c));
+      }
+    } catch {
+      setClips((prev) => prev.map((c) => c.id === clipId ? { ...c, metricStatus: "failed" as const } : c));
+    }
+  }, [clips, token, settings]);
+
+  useEffect(() => {
+    if (!token) return;
+    invoke<Owner[]>("list_owners", { token }).then(setOwners).catch(() => {});
+  }, [token]);
 
   const detectPlatform = (url: string): "instagram" | "tiktok" | "other" => {
     if (url.includes("instagram.com")) return "instagram";
@@ -122,6 +426,7 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
         score: p.score ?? null,
         tags: p.tags ? p.tags.split(";").map((t) => resolveTagLabel(t.trim())) : [],
         platform: detectPlatform(link),
+        metricStatus: p.social_media_caption ? "done" as const : "idle" as const,
         pendingTags: [],
         pendingScore: "",
         thumbLoading: false,
@@ -141,6 +446,7 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
         token,
         after: after ?? null,
         creatorStatus: statusFilter === "_all" ? null : statusFilter,
+        ownerId: ownerFilter === "_all" ? null : ownerFilter,
       });
 
       const parsed = parseResults(data.results);
@@ -164,7 +470,7 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
     } finally {
       setLoading(false);
     }
-  }, [token, statusFilter]);
+  }, [token, statusFilter, ownerFilter]);
 
   useEffect(() => {
     thumbFetchedRef.current.clear();
@@ -172,42 +478,41 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
     fetchClips();
   }, [fetchClips]);
 
-  const processThumbQueue = useCallback(async () => {
+  const drainThumbQueue = useRef<() => void>(() => {});
+  drainThumbQueue.current = () => {
     while (thumbQueueRef.current.length > 0 && thumbActiveRef.current < MAX_CONCURRENT_THUMBS) {
       const clipId = thumbQueueRef.current.shift();
       if (!clipId) continue;
       thumbActiveRef.current++;
 
       (async () => {
-        let clipLink = "";
-        setClips((prev) => {
-          const c = prev.find((x) => x.id === clipId);
-          if (c) clipLink = c.link;
-          return prev.map((x) => (x.id === clipId ? { ...x, thumbLoading: true } : x));
-        });
-
-        if (!clipLink) { thumbActiveRef.current--; processThumbQueue(); return; }
-
-        // 1. Check localStorage cache first
-        const persisted = getPersistedThumb(clipLink);
-        if (persisted) {
-          setClips((prev) => prev.map((c) => (c.id === clipId ? { ...c, thumbnail: persisted, thumbLoading: false } : c)));
-          thumbActiveRef.current--;
-          processThumbQueue();
-          return;
-        }
-
-        // 2. Fetch from backend (oEmbed / yt-dlp)
         try {
-          const thumbUrl: string | null = await invoke("fetch_thumbnail", {
+          let clipLink = "";
+          setClips((prev) => {
+            const c = prev.find((x) => x.id === clipId);
+            if (c) clipLink = c.link;
+            return prev.map((x) => (x.id === clipId ? { ...x, thumbLoading: true } : x));
+          });
+
+          if (!clipLink) return;
+
+          const persisted = getPersistedThumb(clipLink);
+          if (persisted) {
+            setClips((prev) => prev.map((c) => (c.id === clipId ? { ...c, thumbnail: persisted, thumbLoading: false } : c)));
+            return;
+          }
+
+          const thumbPromise = invoke<string | null>("fetch_thumbnail", {
             url: clipLink,
             cookiesBrowser: settings.cookiesBrowser || null,
             cookiesFile: settings.cookiesFile || null,
             evil0ctalApiUrl: settings.evil0ctalApiUrl || null,
           });
+          const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 20000));
+          const thumbUrl = await Promise.race([thumbPromise, timeoutPromise]);
+
           if (thumbUrl) {
             let finalUrl = thumbUrl;
-            // 3. Upload to HubSpot so it persists across sessions
             if (token) {
               try {
                 const hubspotUrl: string = await invoke("upload_clip_thumbnail", { token, clipId, thumbnailUrl: thumbUrl });
@@ -221,19 +526,20 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
           }
         } catch {
           setClips((prev) => prev.map((c) => (c.id === clipId ? { ...c, thumbLoading: false, thumbFailed: true } : c)));
+        } finally {
+          thumbActiveRef.current--;
+          drainThumbQueue.current();
         }
-        thumbActiveRef.current--;
-        processThumbQueue();
       })();
     }
-  }, [token, settings.cookiesBrowser, settings.cookiesFile, settings.evil0ctalApiUrl]);
+  };
 
   const enqueueThumbFetch = useCallback((clipId: string) => {
     if (thumbFetchedRef.current.has(clipId)) return;
     thumbFetchedRef.current.add(clipId);
     thumbQueueRef.current.push(clipId);
-    processThumbQueue();
-  }, [processThumbQueue]);
+    drainThumbQueue.current();
+  }, []);
 
   const handlePendingTagChange = (clipId: string, newTags: string[]) => {
     setClips((prev) => prev.map((c) => (c.id === clipId ? { ...c, pendingTags: newTags } : c)));
@@ -431,17 +737,124 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
                 ))}
               </SelectContent>
             </Select>
+            <Select value={ownerFilter} onValueChange={setOwnerFilter}>
+              <SelectTrigger className="h-7 w-40 text-xs">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="_all">All owners</SelectItem>
+                {owners.map((o) => (
+                  <SelectItem key={o.id} value={o.id}>
+                    {o.firstName && o.lastName ? `${o.firstName} ${o.lastName}` : o.email}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => { setPreviewId(null); fetchClips(); }}
-            disabled={loading}
-            className="cursor-pointer"
-          >
-            <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${loading ? "animate-spin" : ""}`} />
-            Refresh
-          </Button>
+          <div className="flex items-center gap-2">
+            {/* Social metrics backfill controls */}
+            {metricsRunning ? (
+              <div className="flex items-center gap-2">
+                <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  {!metricsPaused && <Loader2 className="h-3 w-3 animate-spin" />}
+                  <span>{metricsProgress.current} fetched</span>
+                  {(metricsProgress.ok > 0 || metricsProgress.failed > 0) && (
+                    <span>
+                      (
+                      {metricsProgress.ok > 0 && <span className="text-green-600 dark:text-green-400">{metricsProgress.ok} ok</span>}
+                      {metricsProgress.failed > 0 && (
+                        <>
+                          {metricsProgress.ok > 0 && ", "}
+                          <Popover>
+                            <PopoverTrigger asChild>
+                              <button className="text-red-500 hover:text-red-600 underline decoration-dotted cursor-pointer">
+                                {metricsProgress.failed} failed
+                              </button>
+                            </PopoverTrigger>
+                            <PopoverContent className="w-96 max-h-72 overflow-y-auto p-0" align="end">
+                              <div className="px-3 py-2 border-b">
+                                <p className="text-xs font-medium">Failed clips ({metricsFailures.length})</p>
+                              </div>
+                              <div className="divide-y">
+                                {metricsFailures.map((f, idx) => (
+                                  <div key={`${f.clipId}-${idx}`} className="px-3 py-2 space-y-0.5">
+                                    <div className="flex items-center gap-1.5">
+                                      <button
+                                        onClick={() => openUrl(f.link)}
+                                        className="text-[11px] text-foreground hover:underline cursor-pointer truncate min-w-0 text-left"
+                                        title={f.link}
+                                      >
+                                        {f.link}
+                                      </button>
+                                      <button
+                                        onClick={() => openUrl(`https://app-eu1.hubspot.com/contacts/146859718/record/2-192287471/${f.clipId}`)}
+                                        className="text-muted-foreground hover:text-foreground cursor-pointer flex-shrink-0"
+                                        title="Open in HubSpot"
+                                      >
+                                        <ExternalLink className="h-3 w-3" />
+                                      </button>
+                                    </div>
+                                    <p className="text-[10px] text-red-500 dark:text-red-400 break-words leading-3.5">{f.error}</p>
+                                  </div>
+                                ))}
+                              </div>
+                            </PopoverContent>
+                          </Popover>
+                        </>
+                      )}
+                      )
+                    </span>
+                  )}
+                </div>
+                {metricsAutoPaused && (
+                  <Badge variant="destructive" className="text-[10px] h-5 px-1.5 gap-1">
+                    <AlertTriangle className="h-3 w-3" />
+                    Auto-paused
+                  </Badge>
+                )}
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={toggleMetricsPause}
+                  className="cursor-pointer h-7 px-2 text-xs"
+                >
+                  {metricsPaused ? <RotateCw className="h-3 w-3 mr-1" /> : <Pause className="h-3 w-3 mr-1" />}
+                  {metricsPaused ? "Resume" : "Pause"}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={stopMetricsFetch}
+                  className="cursor-pointer h-7 px-2 text-xs text-muted-foreground"
+                >
+                  <X className="h-3 w-3 mr-1" />
+                  Stop
+                </Button>
+              </div>
+            ) : (
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={startMetricsFetch}
+                disabled={!token}
+                className="cursor-pointer"
+              >
+                <BarChart3 className="h-3.5 w-3.5 mr-1.5" />
+                Fetch Social Metrics
+              </Button>
+            )}
+
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => { setPreviewId(null); fetchClips(); }}
+              disabled={loading}
+              className="cursor-pointer"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 mr-1.5 ${loading ? "animate-spin" : ""}`} />
+              Refresh
+            </Button>
+          </div>
         </div>
 
         {loading && clips.length === 0 ? (
@@ -509,6 +922,26 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
                           >
                             <ExternalLink className="h-3 w-3" />
                           </button>
+                          {(clip.platform === "instagram" || clip.platform === "tiktok") && clip.metricStatus !== "done" && (
+                            clip.metricStatus === "fetching" ? (
+                              <span className="flex-shrink-0" title="Fetching metrics...">
+                                <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+                              </span>
+                            ) : (
+                              <button
+                                onClick={() => fetchSingleClipMetrics(clip.id)}
+                                className={`flex-shrink-0 cursor-pointer ${clip.metricStatus === "failed" ? "text-red-500 hover:text-red-600" : "text-muted-foreground hover:text-foreground"}`}
+                                title={clip.metricStatus === "failed" ? "Retry fetching social metrics" : "Fetch social metrics"}
+                              >
+                                <BarChart3 className="h-3 w-3" />
+                              </button>
+                            )
+                          )}
+                          {clip.metricStatus === "done" && !clip.caption && (
+                            <span className="flex-shrink-0" title="Metrics fetched">
+                              <Check className="h-3 w-3 text-green-500" />
+                            </span>
+                          )}
                         </div>
 
                         {/* Creator + date */}

@@ -2828,6 +2828,40 @@ async fn resolve_owner_id(
         .ok_or_else(|| format!("No HubSpot owner found for email: {}", email))
 }
 
+/// List all HubSpot owners (id, email, firstName, lastName)
+#[tauri::command]
+async fn list_owners(token: String) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let res = client
+        .get("https://api.hubapi.com/crm/v3/owners")
+        .bearer_auth(&token)
+        .query(&[("limit", "100")])
+        .send()
+        .await
+        .map_err(|e| format!("Owners list failed: {e}"))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("Owners list error ({}): {}", status, text));
+    }
+
+    let data: serde_json::Value = res.json().await
+        .map_err(|e| format!("Failed to parse owners: {e}"))?;
+
+    let owners = data.get("results")
+        .and_then(|r| r.as_array())
+        .map(|arr| arr.iter().map(|o| serde_json::json!({
+            "id": o.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+            "email": o.get("email").and_then(|v| v.as_str()).unwrap_or(""),
+            "firstName": o.get("firstName").and_then(|v| v.as_str()).unwrap_or(""),
+            "lastName": o.get("lastName").and_then(|v| v.as_str()).unwrap_or(""),
+        })).collect::<Vec<_>>())
+        .unwrap_or_default();
+
+    Ok(serde_json::json!(owners))
+}
+
 /// Search for an existing External Clip by its link URL. Returns the clip ID if found.
 #[tauri::command]
 async fn find_clip_by_link(
@@ -2966,6 +3000,7 @@ async fn search_untagged_clips(
     token: String,
     after: Option<String>,
     creator_status: Option<String>,
+    owner_id: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
     let search_url = format!(
@@ -2973,10 +3008,10 @@ async fn search_untagged_clips(
         EXTERNAL_CLIPS_OBJECT_ID
     );
 
-    let mut filters = vec![serde_json::json!({
-        "propertyName": "tags",
-        "operator": "NOT_HAS_PROPERTY"
-    })];
+    let mut filters = vec![
+        serde_json::json!({ "propertyName": "tags", "operator": "NOT_HAS_PROPERTY" }),
+        serde_json::json!({ "propertyName": "link_not_working_anymore", "operator": "NEQ", "value": "true" }),
+    ];
 
     if let Some(ref status) = creator_status {
         if !status.is_empty() {
@@ -2988,6 +3023,16 @@ async fn search_untagged_clips(
         }
     }
 
+    if let Some(ref oid) = owner_id {
+        if !oid.is_empty() {
+            filters.push(serde_json::json!({
+                "propertyName": "hubspot_owner_id",
+                "operator": "EQ",
+                "value": oid
+            }));
+        }
+    }
+
     let mut body = serde_json::json!({
         "filterGroups": [{
             "filters": filters
@@ -2995,7 +3040,7 @@ async fn search_untagged_clips(
         "properties": [
             "link", "tags", "creator_name", "creator_status", "creator_main_link",
             "creator_id", "date_found", "createdate", "social_media_caption",
-            "social_media_tags", "fetched_social_thumbnail", "score"
+            "social_media_tags", "fetched_social_thumbnail", "score", "hubspot_owner_id"
         ],
         "sorts": [
             { "propertyName": "date_found", "direction": "DESCENDING" }
@@ -3014,6 +3059,69 @@ async fn search_untagged_clips(
         .send()
         .await
         .map_err(|e| format!("Untagged clips search failed: {e}"))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("HubSpot search error ({}): {}", status, text));
+    }
+
+    res.json().await
+        .map_err(|e| format!("Failed to parse search response: {e}"))
+}
+
+/// Search for External Clips that have a link but are missing social media metrics
+#[tauri::command]
+async fn search_clips_missing_metrics(
+    token: String,
+    after: Option<String>,
+    creator_status: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let search_url = format!(
+        "https://api.hubapi.com/crm/v3/objects/{}/search",
+        EXTERNAL_CLIPS_OBJECT_ID
+    );
+
+    let mut filters = vec![
+        serde_json::json!({ "propertyName": "social_media_caption", "operator": "NOT_HAS_PROPERTY" }),
+        serde_json::json!({ "propertyName": "link", "operator": "HAS_PROPERTY" }),
+    ];
+
+    if let Some(ref status) = creator_status {
+        if !status.is_empty() {
+            filters.push(serde_json::json!({
+                "propertyName": "creator_status",
+                "operator": "EQ",
+                "value": status
+            }));
+        }
+    }
+
+    let mut body = serde_json::json!({
+        "filterGroups": [{ "filters": filters }],
+        "properties": [
+            "link", "creator_status", "date_found",
+            "social_media_caption", "likes", "plays",
+            "fetched_social_thumbnail", "link_not_working_anymore"
+        ],
+        "sorts": [
+            { "propertyName": "date_found", "direction": "DESCENDING" }
+        ],
+        "limit": 100
+    });
+
+    if let Some(cursor) = after {
+        body["after"] = serde_json::Value::String(cursor);
+    }
+
+    let res = client
+        .post(&search_url)
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Missing-metrics search failed: {e}"))?;
 
     if !res.status().is_success() {
         let status = res.status();
@@ -3204,10 +3312,12 @@ pub fn run() {
             lookup_creators_by_social,
             create_creator,
             resolve_owner_id,
+            list_owners,
             find_clip_by_link,
             create_external_clip,
             associate_clip_to_creator,
             search_untagged_clips,
+            search_clips_missing_metrics,
             update_clip_properties,
         ])
         .run(tauri::generate_context!())

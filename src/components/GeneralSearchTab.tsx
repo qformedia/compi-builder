@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Button } from "@/components/ui/button";
@@ -6,7 +6,13 @@ import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Badge } from "@/components/ui/badge";
-import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Dialog,
   DialogContent,
@@ -94,8 +100,21 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
   const [emailDraft, setEmailDraft] = useState("");
   const [emailResolving, setEmailResolving] = useState(false);
   const [emailError, setEmailError] = useState<string | null>(null);
+  const [owners, setOwners] = useState<Array<{ id: string; email: string; firstName: string; lastName: string }>>([]);
+  const [selectedOwnerId, setSelectedOwnerId] = useState(settings.ownerId || "");
 
   const token = settings.hubspotToken;
+
+  useEffect(() => {
+    if (!token) return;
+    invoke<Array<{ id: string; email: string; firstName: string; lastName: string }>>("list_owners", { token })
+      .then(setOwners)
+      .catch(() => {});
+  }, [token]);
+
+  useEffect(() => {
+    if (settings.ownerId) setSelectedOwnerId(settings.ownerId);
+  }, [settings.ownerId]);
 
   const handleParse = useCallback(async () => {
     if (!rawUrls.trim()) return;
@@ -357,13 +376,13 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
   };
 
   const handleCreateAll = () => {
-    if (!settings.ownerId) {
+    if (!selectedOwnerId) {
       setEmailDraft(settings.ownerEmail);
       setEmailError(null);
       setEmailModalOpen(true);
       return;
     }
-    runCreateAll(settings.ownerId);
+    runCreateAll(selectedOwnerId);
   };
 
   const handleEmailConfirm = async () => {
@@ -374,6 +393,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
     try {
       const id = await invoke<string>("resolve_owner_id", { token, email });
       onSettingsChange({ ...settings, ownerEmail: email, ownerId: id });
+      setSelectedOwnerId(id);
       setEmailModalOpen(false);
       runCreateAll(id);
     } catch (err) {
@@ -652,7 +672,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
       )}
 
       {(phase === "review" || phase === "creating" || phase === "done") && (
-        <>
+        <div className="flex flex-col flex-1 min-h-0 gap-4">
           {/* Summary bar */}
           <div className="flex items-center justify-between flex-shrink-0">
             <div className="flex items-center gap-2">
@@ -730,10 +750,24 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
             </div>
 
             <div className="flex items-center gap-2">
+              {phase === "review" && owners.length > 0 && (
+                <Select value={selectedOwnerId} onValueChange={setSelectedOwnerId}>
+                  <SelectTrigger className="h-8 w-44 text-xs">
+                    <SelectValue placeholder="Select owner..." />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {owners.map((o) => (
+                      <SelectItem key={o.id} value={o.id}>
+                        {o.firstName && o.lastName ? `${o.firstName} ${o.lastName}` : o.email}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
               {phase === "review" && (
                 <Button
                   onClick={handleCreateAll}
-                  disabled={!readyToCreate || creating}
+                  disabled={!readyToCreate || creating || !selectedOwnerId}
                   size="sm"
                   className="cursor-pointer"
                 >
@@ -748,7 +782,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
           </div>
 
           {/* Entries table */}
-          <ScrollArea className="flex-1 -mx-4 px-4">
+          <div className="flex-1 overflow-y-auto -mx-4 px-4">
             <div className="space-y-1.5">
               {entries.map((entry, i) => (
                 <div
@@ -891,8 +925,8 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
                 </div>
               ))}
             </div>
-          </ScrollArea>
-        </>
+          </div>
+        </div>
       )}
 
       <Dialog open={existingClipsModalOpen} onOpenChange={setExistingClipsModalOpen}>
