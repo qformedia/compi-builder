@@ -119,7 +119,7 @@ The built app will be in `src-tauri/target/release/bundle/`.
 ## Releasing a New Version
 
 ```bash
-npm run release -- 0.1.17
+npm run release -- 0.X.XX
 ```
 
 This bumps the version in `package.json`, `tauri.conf.json`, and `Cargo.toml`, commits, creates a git tag, and pushes. GitHub Actions will then build the release artifacts.
