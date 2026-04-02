@@ -2,6 +2,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { saveSession, getSessions, type ClipSessionRecord } from "@/lib/clip-sessions";
+import { checkAllUrls, type UrlComplianceResult } from "@/lib/url-compliance";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
@@ -22,6 +23,11 @@ import {
   DialogFooter,
   DialogDescription,
 } from "@/components/ui/dialog";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
 import {
   Loader2,
   ExternalLink,
@@ -56,6 +62,7 @@ interface ClipEntry {
   url: string;
   platform: "instagram" | "tiktok";
   handle: string | null;
+  displayName: string | null;
   profileUrl: string | null;
   creatorStatus: CreatorStatus;
   creatorId: string | null;
@@ -80,6 +87,7 @@ interface ClipEntry {
   createError: string | null;
   // Metrics fetch status
   metricStatus: "idle" | "fetching" | "done" | "failed";
+  metricError: string | null;
 }
 
 type Phase = "input" | "review" | "creating" | "done";
@@ -102,6 +110,9 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
   const [emailModalOpen, setEmailModalOpen] = useState(false);
   const [existingClipsModalOpen, setExistingClipsModalOpen] = useState(false);
   const [pendingResolve, setPendingResolve] = useState<ClipEntry[] | null>(null);
+  const [complianceModalOpen, setComplianceModalOpen] = useState(false);
+  const [complianceResults, setComplianceResults] = useState<{ fixed: UrlComplianceResult[]; invalid: UrlComplianceResult[] } | null>(null);
+  const [complianceFixedRaw, setComplianceFixedRaw] = useState<string | null>(null);
   const [emailDraft, setEmailDraft] = useState("");
   const [emailResolving, setEmailResolving] = useState(false);
   const [emailError, setEmailError] = useState<string | null>(null);
@@ -112,6 +123,20 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
   const [historyVisible, setHistoryVisible] = useState(5);
   const [expandedSession, setExpandedSession] = useState<string | null>(null);
   const historyLoaded = useRef(false);
+
+  interface LatestClip {
+    id: string;
+    link: string;
+    creatorName: string | null;
+    dateFound: string | null;
+    thumbnail: string | null;
+    caption: string | null;
+    likes: string | null;
+    views: string | null;
+  }
+  const [latestInsta, setLatestInsta] = useState<LatestClip | null>(null);
+  const [latestTiktok, setLatestTiktok] = useState<LatestClip | null>(null);
+  const [latestLoading, setLatestLoading] = useState(false);
 
   const token = settings.hubspotToken;
 
@@ -133,16 +158,49 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
     }
   }, []);
 
-  const handleParse = useCallback(async () => {
-    if (!rawUrls.trim()) return;
+  useEffect(() => {
+    if (!token) return;
+    setLatestLoading(true);
 
-    const parsed: ParsedEntry[] = await invoke("parse_clip_urls", { raw: rawUrls });
+    const parseClip = (data: { results?: Array<{ id: string; properties: Record<string, string | null> }> }): LatestClip | null => {
+      const r = data.results?.[0];
+      if (!r) return null;
+      const p = r.properties;
+      return {
+        id: r.id,
+        link: p.link ?? "",
+        creatorName: p.creator_name ?? null,
+        dateFound: p.date_found ?? null,
+        thumbnail: p.fetched_social_thumbnail ?? null,
+        caption: p.social_media_caption ?? null,
+        likes: p.likes ?? null,
+        views: p.plays ?? null,
+      };
+    };
+
+    Promise.all([
+      invoke<{ results?: Array<{ id: string; properties: Record<string, string | null> }> }>("search_latest_clips_by_platform", {
+        token, foundIn: "General Search", linkContains: "instagram",
+      }).then(parseClip).catch(() => null),
+      invoke<{ results?: Array<{ id: string; properties: Record<string, string | null> }> }>("search_latest_clips_by_platform", {
+        token, foundIn: "General Search", linkContains: "tiktok",
+      }).then(parseClip).catch(() => null),
+    ]).then(([insta, tiktok]) => {
+      setLatestInsta(insta);
+      setLatestTiktok(tiktok);
+      setLatestLoading(false);
+    });
+  }, [token]);
+
+  const continueAfterCompliance = useCallback(async (urlText: string) => {
+    const parsed: ParsedEntry[] = await invoke("parse_clip_urls", { raw: urlText });
     if (parsed.length === 0) return;
 
     const newEntries: ClipEntry[] = parsed.map((p) => ({
       url: p.url,
       platform: p.platform,
       handle: p.handle,
+      displayName: null,
       profileUrl: p.profileUrl,
       creatorStatus: "pending",
       creatorId: null,
@@ -161,12 +219,12 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
       created: false,
       createError: null,
       metricStatus: "idle",
+      metricError: null,
     }));
 
     setEntries(newEntries);
     setPhase("review");
 
-    // Start resolving: first check for existing clips
     setResolving(true);
     const checked = await checkExistingClips(newEntries);
     const existingCount = checked.filter((e) => e.existingClipId).length;
@@ -181,7 +239,48 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
 
     await resolveHandlesAndCreators(checked);
     setResolving(false);
-  }, [rawUrls, token, settings]);
+  }, [token, settings]);
+
+  const handleParse = useCallback(async () => {
+    if (!rawUrls.trim()) return;
+
+    const lines = rawUrls.split("\n").map((l) => l.trim()).filter((l) => l.length > 0);
+    const results = checkAllUrls(lines);
+
+    const fixed = results.filter((r) => r.status === "fixed");
+    const invalid = results.filter((r) => r.status === "invalid");
+
+    const validLines = results
+      .filter((r) => r.status === "ok" || r.status === "fixed")
+      .map((r) => r.fixedUrl);
+
+    if (validLines.length === 0 && invalid.length > 0) {
+      setComplianceResults({ fixed, invalid });
+      setComplianceFixedRaw(null);
+      setComplianceModalOpen(true);
+      return;
+    }
+
+    const fixedRaw = validLines.join("\n");
+
+    if (fixed.length > 0 || invalid.length > 0) {
+      setComplianceResults({ fixed, invalid });
+      setComplianceFixedRaw(fixedRaw);
+      setComplianceModalOpen(true);
+      return;
+    }
+
+    await continueAfterCompliance(fixedRaw);
+  }, [rawUrls, continueAfterCompliance]);
+
+  const handleComplianceContinue = useCallback(async () => {
+    setComplianceModalOpen(false);
+    if (complianceFixedRaw) {
+      await continueAfterCompliance(complianceFixedRaw);
+    }
+    setComplianceResults(null);
+    setComplianceFixedRaw(null);
+  }, [complianceFixedRaw, continueAfterCompliance]);
 
   const checkExistingClips = async (items: ClipEntry[]): Promise<ClipEntry[]> => {
     const updated = [...items];
@@ -243,6 +342,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
           const info: {
             handle: string;
             profileUrl: string;
+            displayName?: string;
             caption?: string;
             thumbnail?: string;
             source: string;
@@ -259,6 +359,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
           updated[i] = {
             ...updated[i],
             handle: info.handle,
+            displayName: info.displayName ?? null,
             profileUrl: info.profileUrl,
             caption: info.caption ?? null,
             thumbnail: info.thumbnail ?? null,
@@ -447,10 +548,10 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
         if (!creatorId && entry.creatorStatus === "new" && entry.profileUrl && entry.handle) {
           const created: { id: string; name: string } = await invoke("create_creator", {
             token,
-            name: entry.handle,
+            name: entry.displayName || entry.handle,
             platform: entry.platform,
             profileUrl: entry.profileUrl,
-            ownerId,
+            ownerId: null,
           });
           creatorId = created.id;
           creatorMap.set(entry.profileUrl, creatorId);
@@ -526,7 +627,16 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
       setEntries([...updated]);
 
       try {
-        let metrics = entry.metricsSource === "ytdlp"
+        let metrics: {
+          displayName?: string | null;
+          caption?: string | null;
+          thumbnail?: string | null;
+          likes?: number | null;
+          comments?: number | null;
+          views?: number | null;
+          shares?: number | null;
+          timestamp?: number | null;
+        } | null = entry.metricsSource === "ytdlp"
           ? {
               caption: entry.caption,
               thumbnail: entry.thumbnail,
@@ -578,8 +688,19 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
             });
           }
 
+          if (metrics.displayName && !entry.displayName && entry.creatorId && entry.creatorStatus === "new") {
+            try {
+              await invoke("update_creator_properties", {
+                token,
+                creatorId: entry.creatorId,
+                properties: { name: metrics.displayName },
+              });
+            } catch { /* best-effort update */ }
+          }
+
           updated[i] = {
             ...updated[i],
+            displayName: metrics.displayName ?? entry.displayName,
             caption: metrics.caption ?? entry.caption,
             likes: metrics.likes ?? entry.likes,
             comments: metrics.comments ?? entry.comments,
@@ -590,8 +711,8 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
         } else {
           updated[i] = { ...updated[i], metricStatus: "done" };
         }
-      } catch {
-        updated[i] = { ...updated[i], metricStatus: "failed" };
+      } catch (err) {
+        updated[i] = { ...updated[i], metricStatus: "failed", metricError: err instanceof Error ? err.message : String(err) };
       }
 
       processed++;
@@ -754,6 +875,64 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
 
           {!token && (
             <p className="text-xs text-destructive">Set your HubSpot token in Settings first.</p>
+          )}
+
+          {/* Latest ingested clips */}
+          {(latestInsta || latestTiktok || latestLoading) && (
+            <div className="mt-4 border-t pt-4 space-y-2">
+              <h3 className="text-sm font-medium">Latest General Search Clips</h3>
+              {latestLoading ? (
+                <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <Loader2 className="h-3 w-3 animate-spin" /> Loading...
+                </div>
+              ) : (
+                <div className="grid grid-cols-2 gap-3">
+                  {[
+                    { clip: latestInsta, label: "Instagram", icon: <Instagram className="h-3.5 w-3.5 text-pink-500" /> },
+                    { clip: latestTiktok, label: "TikTok", icon: <Music2 className="h-3.5 w-3.5 text-cyan-500" /> },
+                  ].map(({ clip, label, icon }) =>
+                    clip ? (
+                      <button
+                        key={label}
+                        onClick={() => openUrl(clip.link)}
+                        className="flex gap-2.5 rounded-md border p-2 cursor-pointer hover:bg-muted/50 transition-colors text-left"
+                      >
+                        <div className="w-14 h-14 rounded bg-muted flex-shrink-0 overflow-hidden flex items-center justify-center">
+                          {clip.thumbnail ? (
+                            <img src={clip.thumbnail} alt="" className="h-full w-full object-cover" />
+                          ) : (
+                            icon
+                          )}
+                        </div>
+                        <div className="min-w-0 flex-1 space-y-0.5">
+                          <div className="flex items-center gap-1.5">
+                            {icon}
+                            <span className="text-xs font-medium truncate">{label}</span>
+                          </div>
+                          {clip.creatorName && (
+                            <p className="text-[11px] text-muted-foreground truncate">{clip.creatorName}</p>
+                          )}
+                          {clip.dateFound && (
+                            <p className="text-[10px] text-muted-foreground">
+                              {new Date(clip.dateFound).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
+                            </p>
+                          )}
+                          <div className="flex gap-2 text-[10px] text-muted-foreground">
+                            {clip.likes && <span>{Number(clip.likes).toLocaleString()} likes</span>}
+                            {clip.views && <span>{Number(clip.views).toLocaleString()} views</span>}
+                          </div>
+                        </div>
+                      </button>
+                    ) : (
+                      <div key={label} className="flex items-center gap-2 rounded-md border border-dashed p-3 text-xs text-muted-foreground">
+                        {icon}
+                        <span>No {label} clips yet</span>
+                      </div>
+                    )
+                  )}
+                </div>
+              )}
+            </div>
           )}
 
           {/* Session history */}
@@ -928,7 +1107,45 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
                         <Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-4 text-green-700 bg-green-100 dark:bg-green-900/30 dark:text-green-400">{metricsDone} ok</Badge>
                       )}
                       {metricsFailed > 0 && (
-                        <Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-4 text-red-700 bg-red-100 dark:bg-red-900/30 dark:text-red-400">{metricsFailed} failed</Badge>
+                        <Popover>
+                          <PopoverTrigger asChild>
+                            <button className="text-[10px] px-1.5 py-0 h-4 rounded-md font-medium text-red-700 bg-red-100 dark:bg-red-900/30 dark:text-red-400 hover:bg-red-200 dark:hover:bg-red-900/50 cursor-pointer underline decoration-dotted">
+                              {metricsFailed} failed
+                            </button>
+                          </PopoverTrigger>
+                          <PopoverContent className="w-96 max-h-72 overflow-y-auto p-0" align="end">
+                            <div className="px-3 py-2 border-b">
+                              <p className="text-xs font-medium">Failed metrics ({metricsFailed})</p>
+                            </div>
+                            <div className="divide-y">
+                              {entries.filter((e) => e.metricStatus === "failed").map((e, idx) => (
+                                <div key={`${e.url}-${idx}`} className="px-3 py-2 space-y-0.5">
+                                  <div className="flex items-center gap-1.5">
+                                    <button
+                                      onClick={() => openUrl(e.url)}
+                                      className="text-[11px] text-foreground hover:underline cursor-pointer truncate min-w-0 text-left"
+                                      title={e.url}
+                                    >
+                                      {e.url}
+                                    </button>
+                                    {e.clipId && (
+                                      <button
+                                        onClick={() => openUrl(`https://app-eu1.hubspot.com/contacts/146859718/record/2-192287471/${e.clipId}`)}
+                                        className="text-muted-foreground hover:text-foreground cursor-pointer flex-shrink-0"
+                                        title="Open in HubSpot"
+                                      >
+                                        <ExternalLink className="h-3 w-3" />
+                                      </button>
+                                    )}
+                                  </div>
+                                  {e.metricError && (
+                                    <p className="text-[10px] text-red-500 dark:text-red-400 break-words leading-3.5">{e.metricError}</p>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          </PopoverContent>
+                        </Popover>
                       )}
                     </div>
                   )}
@@ -1096,7 +1313,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
                     <span title="Metrics fetched"><CheckCircle className="h-3 w-3 text-green-500" /></span>
                   )}
                   {entry.metricStatus === "failed" && (
-                    <span title="Metrics fetch failed"><AlertCircle className="h-3 w-3 text-red-500" /></span>
+                    <span title={entry.metricError || "Metrics fetch failed"}><AlertCircle className="h-3 w-3 text-red-500" /></span>
                   )}
 
                   <div className="ml-auto">
@@ -1115,6 +1332,79 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
           </div>
         </div>
       )}
+
+      <Dialog open={complianceModalOpen} onOpenChange={setComplianceModalOpen}>
+        <DialogContent className="sm:max-w-lg max-h-[80vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              {complianceResults?.invalid.length ? (
+                <AlertTriangle className="h-5 w-5 text-amber-500" />
+              ) : (
+                <CheckCircle className="h-5 w-5 text-emerald-500" />
+              )}
+              URL Compliance
+            </DialogTitle>
+            <DialogDescription>
+              {complianceResults && (() => {
+                const { fixed, invalid } = complianceResults;
+                const parts: string[] = [];
+                if (fixed.length > 0) parts.push(`${fixed.length} URL${fixed.length > 1 ? "s" : ""} auto-fixed`);
+                if (invalid.length > 0) parts.push(`${invalid.length} URL${invalid.length > 1 ? "s" : ""} invalid and removed`);
+                return parts.join(", ") + ".";
+              })()}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="overflow-y-auto flex-1 space-y-4 pr-1">
+            {complianceResults?.fixed.length ? (
+              <div>
+                <h4 className="text-sm font-medium mb-2 flex items-center gap-1.5">
+                  <CheckCircle className="h-3.5 w-3.5 text-emerald-500" />
+                  Auto-fixed
+                </h4>
+                <div className="space-y-2">
+                  {complianceResults.fixed.map((r, i) => (
+                    <div key={i} className="rounded-md border p-2 text-xs space-y-1">
+                      <div className="text-muted-foreground line-through break-all">{r.originalUrl}</div>
+                      <div className="flex items-center gap-1">
+                        <ArrowRight className="h-3 w-3 shrink-0 text-emerald-500" />
+                        <span className="break-all">{r.fixedUrl}</span>
+                      </div>
+                      <div className="text-muted-foreground italic">{r.issues.join("; ")}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+            {complianceResults?.invalid.length ? (
+              <div>
+                <h4 className="text-sm font-medium mb-2 flex items-center gap-1.5">
+                  <AlertCircle className="h-3.5 w-3.5 text-destructive" />
+                  Invalid — removed
+                </h4>
+                <div className="space-y-2">
+                  {complianceResults.invalid.map((r, i) => (
+                    <div key={i} className="rounded-md border border-destructive/30 p-2 text-xs space-y-1">
+                      <div className="break-all">{r.originalUrl || "(empty)"}</div>
+                      <div className="text-destructive italic">{r.issues.join("; ")}</div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            ) : null}
+          </div>
+          <DialogFooter>
+            {complianceFixedRaw ? (
+              <Button onClick={handleComplianceContinue} className="cursor-pointer">
+                Continue
+              </Button>
+            ) : (
+              <Button onClick={() => { setComplianceModalOpen(false); setComplianceResults(null); setComplianceFixedRaw(null); }} className="cursor-pointer">
+                OK
+              </Button>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <Dialog open={existingClipsModalOpen} onOpenChange={setExistingClipsModalOpen}>
         <DialogContent className="sm:max-w-md">

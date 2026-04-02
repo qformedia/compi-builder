@@ -2542,6 +2542,9 @@ async fn resolve_instagram_info(
         let handle = json.get("uploader_id").and_then(|v| v.as_str())
             .or_else(|| json.get("uploader").and_then(|v| v.as_str()))
             .map(String::from);
+        let display_name = json.get("channel").and_then(|v| v.as_str())
+            .or_else(|| json.get("uploader").and_then(|v| v.as_str()))
+            .map(String::from);
         let caption = json.get("description").and_then(|v| v.as_str()).map(String::from);
         let thumbnail = json.get("thumbnail").and_then(|v| v.as_str()).map(String::from);
         let likes = json.get("like_count").and_then(|v| v.as_i64());
@@ -2553,6 +2556,7 @@ async fn resolve_instagram_info(
             return Ok(serde_json::json!({
                 "handle": h,
                 "profileUrl": format!("https://www.instagram.com/{}/", h),
+                "displayName": display_name,
                 "caption": caption,
                 "thumbnail": thumbnail,
                 "source": "ytdlp",
@@ -2574,9 +2578,41 @@ async fn ytdlp_dump_json(
     cookies_browser: &Option<String>,
     cookies_file: &Option<String>,
 ) -> Result<serde_json::Value, String> {
+    let has_browser = cookies_browser.as_ref().map_or(false, |b| !b.is_empty());
+    let has_file = cookies_file.as_ref().map_or(false, |f| !f.is_empty() && PathBuf::from(f).exists());
+
+    let result = ytdlp_dump_json_attempt(
+        app, url,
+        if has_browser { cookies_browser } else { &None },
+        if has_browser { &None } else { cookies_file },
+    ).await;
+
+    // On cookie-related failures, retry without cookies
+    if let Err(ref e) = result {
+        let lower = e.to_lowercase();
+        if (has_browser || has_file) && (lower.contains("could not copy") || lower.contains("cookie")) {
+            // Try with file-only if we used browser and have a file fallback
+            if has_browser && has_file {
+                let file_result = ytdlp_dump_json_attempt(app, url, &None, cookies_file).await;
+                if file_result.is_ok() { return file_result; }
+            }
+            // Last resort: no cookies at all
+            return ytdlp_dump_json_attempt(app, url, &None, &None).await;
+        }
+    }
+
+    result
+}
+
+/// Single attempt of yt-dlp --dump-json with given cookie configuration
+async fn ytdlp_dump_json_attempt(
+    app: &AppHandle,
+    url: &str,
+    cookies_browser: &Option<String>,
+    cookies_file: &Option<String>,
+) -> Result<serde_json::Value, String> {
     let shell = app.shell();
 
-    // Try sidecar first, then system yt-dlp
     let ytdlp_cmd = if let Ok(cmd) = shell.sidecar("yt-dlp") {
         cmd
     } else if let Some(sys) = helpers::find_system_ytdlp() {
@@ -2587,18 +2623,22 @@ async fn ytdlp_dump_json(
 
     let mut args = vec!["--dump-json".to_string(), "--no-download".to_string()];
 
-    let has_browser = cookies_browser.as_ref().map_or(false, |b| !b.is_empty());
-    let has_file = cookies_file.as_ref().map_or(false, |f| !f.is_empty() && PathBuf::from(f).exists());
-
-    if has_browser {
-        args.push("--cookies-from-browser".into());
-        args.push(cookies_browser.clone().unwrap());
-    } else if has_file {
-        args.push("--cookies".into());
-        args.push(cookies_file.clone().unwrap());
+    if let Some(ref browser) = cookies_browser {
+        if !browser.is_empty() {
+            args.push("--cookies-from-browser".into());
+            args.push(browser.clone());
+        }
+    } else if let Some(ref cf) = cookies_file {
+        if !cf.is_empty() && PathBuf::from(cf).exists() {
+            args.push("--cookies".into());
+            args.push(cf.clone());
+        }
     }
 
     args.push(url.to_string());
+
+    #[cfg(target_os = "windows")]
+    apply_windows_cookie_workaround(&mut args);
 
     let output = ytdlp_cmd
         .args(args)
@@ -2632,7 +2672,11 @@ async fn fetch_clip_metrics(
         instagram_delay().await;
         let json = result?;
 
+        let display_name = json.get("channel").and_then(|v| v.as_str())
+            .or_else(|| json.get("uploader").and_then(|v| v.as_str()));
+
         return Ok(serde_json::json!({
+            "displayName": display_name,
             "caption": json.get("description").and_then(|v| v.as_str()),
             "thumbnail": json.get("thumbnail").and_then(|v| v.as_str()),
             "likes": json.get("like_count").and_then(|v| v.as_i64()),
@@ -2645,7 +2689,12 @@ async fn fetch_clip_metrics(
 
     // TikTok or other
     let json = ytdlp_dump_json(&app, &url, &cookies_browser, &cookies_file).await?;
+
+    let display_name = json.get("creator").and_then(|v| v.as_str())
+        .or_else(|| json.get("uploader").and_then(|v| v.as_str()));
+
     Ok(serde_json::json!({
+        "displayName": display_name,
         "caption": json.get("description").and_then(|v| v.as_str()),
         "thumbnail": json.get("thumbnail").and_then(|v| v.as_str()),
         "likes": json.get("like_count").and_then(|v| v.as_i64()),
@@ -3042,7 +3091,8 @@ async fn search_untagged_clips(
         "properties": [
             "link", "tags", "creator_name", "creator_status", "creator_main_link",
             "creator_id", "date_found", "createdate", "social_media_caption",
-            "social_media_tags", "fetched_social_thumbnail", "score", "hubspot_owner_id"
+            "social_media_tags", "fetched_social_thumbnail", "score", "hubspot_owner_id",
+            "likes", "plays", "comments", "shares"
         ],
         "sorts": [
             { "propertyName": "date_found", "direction": "DESCENDING" }
@@ -3167,6 +3217,87 @@ async fn update_clip_properties(
     }
 
     Ok(())
+}
+
+/// Update properties on a Creator record
+#[tauri::command]
+async fn update_creator_properties(
+    token: String,
+    creator_id: String,
+    properties: serde_json::Value,
+) -> Result<(), String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let body = serde_json::json!({ "properties": properties });
+
+    let res = client
+        .patch(&format!(
+            "https://api.hubapi.com/crm/v3/objects/{}/{}",
+            CREATORS_OBJECT_ID, creator_id
+        ))
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Update creator properties failed: {e}"))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("HubSpot update creator error ({}): {}", status, text));
+    }
+
+    Ok(())
+}
+
+/// Fetch latest clips filtered by found_in and link pattern (instagram/tiktok)
+#[tauri::command]
+async fn search_latest_clips_by_platform(
+    token: String,
+    found_in: String,
+    link_contains: String,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let search_url = format!(
+        "https://api.hubapi.com/crm/v3/objects/{}/search",
+        EXTERNAL_CLIPS_OBJECT_ID
+    );
+
+    let body = serde_json::json!({
+        "filterGroups": [{
+            "filters": [
+                { "propertyName": "found_in", "operator": "EQ", "value": found_in },
+                { "propertyName": "link", "operator": "CONTAINS_TOKEN", "value": link_contains },
+                { "propertyName": "link_not_working_anymore", "operator": "NEQ", "value": "true" },
+            ]
+        }],
+        "properties": [
+            "link", "creator_name", "date_found", "fetched_social_thumbnail",
+            "social_media_caption", "likes", "plays", "comments", "shares", "found_in"
+        ],
+        "sorts": [{ "propertyName": "date_found", "direction": "DESCENDING" }],
+        "limit": 1
+    });
+
+    let res = client
+        .post(&search_url)
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Latest clips search failed: {e}"))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("HubSpot search error ({}): {}", status, text));
+    }
+
+    res.json().await
+        .map_err(|e| format!("Failed to parse search response: {e}"))
 }
 
 /// Save arbitrary text content to a file via native save dialog
@@ -3347,6 +3478,8 @@ pub fn run() {
             search_untagged_clips,
             search_clips_missing_metrics,
             update_clip_properties,
+            update_creator_properties,
+            search_latest_clips_by_platform,
             save_text_file,
         ])
         .run(tauri::generate_context!())

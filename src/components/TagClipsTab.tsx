@@ -42,6 +42,10 @@ import {
   BarChart3,
   Pause,
   RotateCw,
+  Heart,
+  Eye,
+  MessageCircle,
+  Share2,
 } from "lucide-react";
 import type { TagOption } from "@/lib/tags";
 import type { AppSettings } from "@/types";
@@ -59,6 +63,10 @@ interface UntaggedClip {
   socialMediaTags: string | null;
   score: string | null;
   tags: string[];
+  likes: string | null;
+  plays: string | null;
+  comments: string | null;
+  shares: string | null;
   metricStatus: "idle" | "fetching" | "done" | "failed";
   platform: "instagram" | "tiktok" | "other";
   pendingTags: string[];
@@ -425,6 +433,10 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
         socialMediaTags: p.social_media_tags ?? null,
         score: p.score ?? null,
         tags: p.tags ? p.tags.split(";").map((t) => resolveTagLabel(t.trim())) : [],
+        likes: p.likes ?? null,
+        plays: p.plays ?? null,
+        comments: p.comments ?? null,
+        shares: p.shares ?? null,
         platform: detectPlatform(link),
         metricStatus: p.social_media_caption ? "done" as const : "idle" as const,
         pendingTags: [],
@@ -985,6 +997,36 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
                         )}
                       </div>
                     </div>
+
+                    {/* === Middle: Metrics === */}
+                    {(clip.likes || clip.plays || clip.comments || clip.shares) && (
+                      <div className="w-24 flex-shrink-0 border-l px-2.5 py-3 flex flex-col justify-center gap-1 text-[10px] text-muted-foreground">
+                        {clip.likes && (
+                          <div className="flex items-center gap-1.5" title="Likes">
+                            <Heart className="h-3 w-3 text-pink-400 flex-shrink-0" />
+                            <span>{Number(clip.likes).toLocaleString()}</span>
+                          </div>
+                        )}
+                        {clip.plays && (
+                          <div className="flex items-center gap-1.5" title="Views">
+                            <Eye className="h-3 w-3 text-blue-400 flex-shrink-0" />
+                            <span>{Number(clip.plays).toLocaleString()}</span>
+                          </div>
+                        )}
+                        {clip.comments && (
+                          <div className="flex items-center gap-1.5" title="Comments">
+                            <MessageCircle className="h-3 w-3 text-amber-400 flex-shrink-0" />
+                            <span>{Number(clip.comments).toLocaleString()}</span>
+                          </div>
+                        )}
+                        {clip.shares && (
+                          <div className="flex items-center gap-1.5" title="Shares">
+                            <Share2 className="h-3 w-3 text-green-400 flex-shrink-0" />
+                            <span>{Number(clip.shares).toLocaleString()}</span>
+                          </div>
+                        )}
+                      </div>
+                    )}
 
                     {/* === Right: Actions — tag picker + score + save === */}
                     <div className="w-72 flex-shrink-0 border-l p-3 flex flex-col justify-center gap-2 bg-muted/5">
