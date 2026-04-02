@@ -2922,6 +2922,7 @@ async fn create_external_clip(
     token: String,
     link: String,
     owner_id: String,
+    found_in: String,
 ) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
     let url = format!(
@@ -2933,6 +2934,7 @@ async fn create_external_clip(
         "properties": {
             "link": link,
             "hubspot_owner_id": owner_id,
+            "found_in": found_in,
         }
     });
 
@@ -3167,6 +3169,32 @@ async fn update_clip_properties(
     Ok(())
 }
 
+/// Save arbitrary text content to a file via native save dialog
+#[tauri::command]
+async fn save_text_file(
+    app: tauri::AppHandle,
+    content: String,
+    default_name: String,
+) -> Result<bool, String> {
+    use tauri_plugin_dialog::DialogExt;
+
+    let file_path = app
+        .dialog()
+        .file()
+        .set_file_name(&default_name)
+        .add_filter("CSV", &["csv"])
+        .blocking_save_file();
+
+    match file_path {
+        Some(path) => {
+            std::fs::write(path.as_path().unwrap(), content)
+                .map_err(|e| format!("Failed to write file: {}", e))?;
+            Ok(true)
+        }
+        None => Ok(false), // user cancelled
+    }
+}
+
 // ── App entry ───────────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -3319,6 +3347,7 @@ pub fn run() {
             search_untagged_clips,
             search_clips_missing_metrics,
             update_clip_properties,
+            save_text_file,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

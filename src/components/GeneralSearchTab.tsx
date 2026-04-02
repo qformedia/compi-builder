@@ -1,6 +1,7 @@
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { saveSession, getSessions, type ClipSessionRecord } from "@/lib/clip-sessions";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
@@ -35,6 +36,10 @@ import {
   Clipboard,
   ArrowRight,
   AlertTriangle,
+  Download,
+  ChevronDown,
+  ChevronRight,
+  History,
 } from "lucide-react";
 import type { AppSettings } from "@/types";
 
@@ -102,6 +107,11 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
   const [emailError, setEmailError] = useState<string | null>(null);
   const [owners, setOwners] = useState<Array<{ id: string; email: string; firstName: string; lastName: string }>>([]);
   const [selectedOwnerId, setSelectedOwnerId] = useState(settings.ownerId || "");
+  const [searchType, setSearchType] = useState<"General Search" | "Specific Search">("General Search");
+  const [sessionHistory, setSessionHistory] = useState<ClipSessionRecord[]>([]);
+  const [historyVisible, setHistoryVisible] = useState(5);
+  const [expandedSession, setExpandedSession] = useState<string | null>(null);
+  const historyLoaded = useRef(false);
 
   const token = settings.hubspotToken;
 
@@ -115,6 +125,13 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
   useEffect(() => {
     if (settings.ownerId) setSelectedOwnerId(settings.ownerId);
   }, [settings.ownerId]);
+
+  useEffect(() => {
+    if (!historyLoaded.current) {
+      historyLoaded.current = true;
+      setSessionHistory(getSessions());
+    }
+  }, []);
 
   const handleParse = useCallback(async () => {
     if (!rawUrls.trim()) return;
@@ -449,6 +466,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
             token,
             link: entry.url,
             ownerId,
+            foundIn: searchType,
           });
           clipId = clipResult.id;
         }
@@ -582,6 +600,48 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
     }
 
     setMetricsFetching(false);
+
+    // Persist session to local history
+    const sessionClips = updated
+      .filter((e) => e.clipId && e.created)
+      .map((e) => {
+        const captionText = e.caption ?? null;
+        let tags: string | null = null;
+        if (captionText) {
+          const hashtags = [...captionText.matchAll(/#([A-Za-z0-9_]+)/g)].map((m) => m[1]);
+          if (hashtags.length > 0) tags = hashtags.join(";");
+        }
+        return {
+          clipId: e.clipId!,
+          link: e.url,
+          platform: e.platform,
+          handle: e.handle,
+          profileUrl: e.profileUrl,
+          creatorId: e.creatorId,
+          creatorName: e.creatorName ?? e.handle,
+          creatorMainLink: e.profileUrl,
+          caption: captionText,
+          likes: e.likes,
+          comments: e.comments,
+          views: e.views,
+          shares: e.shares,
+          postedDate: e.timestamp ? new Date(e.timestamp * 1000).toISOString().split("T")[0] : null,
+          socialMediaTags: tags,
+          foundIn: searchType,
+          existedAlready: !!e.existingClipId,
+        };
+      });
+
+    if (sessionClips.length > 0) {
+      saveSession({
+        id: String(Date.now()),
+        date: new Date().toISOString(),
+        searchType,
+        clipCount: sessionClips.length,
+        clips: sessionClips,
+      });
+      setSessionHistory(getSessions());
+    }
   };
 
   const handleReset = () => {
@@ -633,10 +693,10 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
     <div className="flex flex-col h-full p-4 gap-4">
       {phase === "input" && (
         <div className="flex flex-col gap-4 max-w-2xl mx-auto w-full pt-8">
-          <div className="space-y-1">
-            <h2 className="text-lg font-semibold">General Search</h2>
+          <div className="space-y-3">
+            <h2 className="text-lg font-semibold">Create Clips</h2>
             <p className="text-sm text-muted-foreground">
-              Paste Instagram and TikTok clip URLs (one per line) from Tab Copy. The app will extract artist handles, check HubSpot for existing creators, and create everything for you.
+              Paste Instagram and TikTok clip URLs (one per line). The app will extract artist handles, check HubSpot for existing creators, and create everything for you.
             </p>
           </div>
 
@@ -650,9 +710,36 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
               rows={12}
               className="font-mono text-xs"
             />
-            <p className="text-xs text-muted-foreground">
-              {rawUrls.trim() ? `${rawUrls.trim().split("\n").filter((l) => l.trim()).length} URLs detected` : "Paste links from Tab Copy"}
-            </p>
+            {rawUrls.trim() && (
+              <p className="text-xs text-muted-foreground">
+                {rawUrls.trim().split("\n").filter((l) => l.trim()).length} URLs detected
+              </p>
+            )}
+          </div>
+
+          <div className="flex rounded-md overflow-hidden border">
+            <button
+              onClick={() => setSearchType("General Search")}
+              className="flex-1 px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors"
+              style={
+                searchType === "General Search"
+                  ? { backgroundColor: "rgb(106, 120, 209)", color: "#fff" }
+                  : {}
+              }
+            >
+              General Search
+            </button>
+            <button
+              onClick={() => setSearchType("Specific Search")}
+              className="flex-1 px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors border-l"
+              style={
+                searchType === "Specific Search"
+                  ? { backgroundColor: "rgb(0, 164, 189)", color: "#fff" }
+                  : {}
+              }
+            >
+              Specific Search
+            </button>
           </div>
 
           <Button
@@ -667,6 +754,106 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
 
           {!token && (
             <p className="text-xs text-destructive">Set your HubSpot token in Settings first.</p>
+          )}
+
+          {/* Session history */}
+          {sessionHistory.length > 0 && (
+            <div className="mt-4 border-t pt-4 space-y-2">
+              <div className="flex items-center gap-2">
+                <History className="h-4 w-4 text-muted-foreground" />
+                <h3 className="text-sm font-medium">Recent Sessions</h3>
+              </div>
+              <div className="space-y-1.5">
+                {sessionHistory.slice(0, historyVisible).map((session) => {
+                  const isExpanded = expandedSession === session.id;
+                  const dateStr = new Date(session.date).toLocaleDateString(undefined, {
+                    month: "short", day: "numeric", year: "numeric", hour: "2-digit", minute: "2-digit",
+                  });
+                  return (
+                    <div key={session.id} className="rounded-md border">
+                      <div className="flex items-center justify-between px-3 py-2">
+                        <button
+                          onClick={() => setExpandedSession(isExpanded ? null : session.id)}
+                          className="flex items-center gap-2 text-xs cursor-pointer hover:text-foreground text-muted-foreground min-w-0"
+                        >
+                          {isExpanded ? <ChevronDown className="h-3 w-3 flex-shrink-0" /> : <ChevronRight className="h-3 w-3 flex-shrink-0" />}
+                          <span className="font-medium text-foreground">{dateStr}</span>
+                          <Badge variant="outline" className="text-[10px] h-4 px-1.5">{session.searchType}</Badge>
+                          <span>{session.clipCount} clip{session.clipCount !== 1 ? "s" : ""}</span>
+                        </button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          className="cursor-pointer h-6 px-2 text-xs gap-1"
+                          onClick={async () => {
+                            const escape = (s: string) => {
+                              if (s.includes(",") || s.includes('"') || s.includes("\n")) return `"${s.replace(/"/g, '""')}"`;
+                              return s;
+                            };
+                            const header = "Clip ID,Link,Platform,Handle,Creator ID,Creator Main Link,Found In,Caption,Likes,Comments,Views,Shares,Posted Date,Social Media Tags,Already Existed";
+                            const rows = session.clips.map((c) =>
+                              [
+                                c.clipId,
+                                c.link,
+                                c.platform,
+                                c.handle ?? "",
+                                c.creatorId ?? "",
+                                c.creatorMainLink ?? "",
+                                c.foundIn,
+                                escape(c.caption ?? ""),
+                                c.likes != null ? String(c.likes) : "",
+                                c.comments != null ? String(c.comments) : "",
+                                c.views != null ? String(c.views) : "",
+                                c.shares != null ? String(c.shares) : "",
+                                c.postedDate ?? "",
+                                escape(c.socialMediaTags ?? ""),
+                                c.existedAlready ? "Yes" : "No",
+                              ].join(",")
+                            );
+                            const csv = [header, ...rows].join("\n");
+                            const defaultName = `clips-${session.searchType.replace(/\s/g, "-").toLowerCase()}-${new Date(session.date).toISOString().split("T")[0]}.csv`;
+                            await invoke("save_text_file", { content: csv, defaultName });
+                          }}
+                        >
+                          <Download className="h-3 w-3" />
+                          CSV
+                        </Button>
+                      </div>
+                      {isExpanded && (
+                        <div className="border-t px-3 py-2 space-y-1">
+                          {session.clips.map((c, idx) => (
+                            <div key={`${c.clipId}-${idx}`} className="flex items-center gap-1.5 text-[11px]">
+                              {c.platform === "instagram"
+                                ? <Instagram className="h-3 w-3 text-pink-500 flex-shrink-0" />
+                                : <Music2 className="h-3 w-3 text-cyan-500 flex-shrink-0" />}
+                              <button
+                                onClick={() => openUrl(c.link)}
+                                className="text-foreground hover:underline cursor-pointer truncate min-w-0 text-left"
+                                title={c.link}
+                              >
+                                {c.link}
+                              </button>
+                              {c.handle && <span className="text-muted-foreground flex-shrink-0">@{c.handle}</span>}
+                              {c.existedAlready && <Badge variant="outline" className="text-[9px] h-3.5 px-1">existed</Badge>}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+                {sessionHistory.length > historyVisible && (
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    className="cursor-pointer w-full text-xs text-muted-foreground"
+                    onClick={() => setHistoryVisible((v) => v + 5)}
+                  >
+                    Load More ({sessionHistory.length - historyVisible} remaining)
+                  </Button>
+                )}
+              </div>
+            </div>
           )}
         </div>
       )}

@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { Clock, Film, CheckCircle, Loader2, Sparkles, RefreshCw, X, RulerDimensionLine, AlertTriangle, Settings, Search, ListOrdered, MessageSquarePlus, Globe, Tags } from "lucide-react";
+import { Clock, Film, CheckCircle, Loader2, Sparkles, RefreshCw, X, RulerDimensionLine, AlertTriangle, Search, ListOrdered, MessageSquarePlus, Globe, Tags } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { HubSpotIcon } from "@/components/ClipCard";
 import { fetchVideoProjectClips } from "@/lib/hubspot";
@@ -17,7 +17,8 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
-import { SettingsDialog } from "@/components/SettingsDialog";
+import { SettingsPage } from "@/components/SettingsPage";
+import { Sidebar, type Page } from "@/components/Sidebar";
 import { FeedbackDialog } from "@/components/FeedbackDialog";
 import { SearchTab } from "@/components/SearchTab";
 import { ArrangeTab, decodeEditingNotes } from "@/components/ArrangeTab";
@@ -81,10 +82,14 @@ function App() {
     const saved = localStorage.getItem("compi-settings");
     return saved ? { ...DEFAULT_SETTINGS, ...JSON.parse(saved) } : DEFAULT_SETTINGS;
   });
-  const [settingsOpen, setSettingsOpen] = useState(false);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [project, setProject] = useState<Project | null>(null);
-  const [activeTab, setActiveTab] = useState("search");
+  const [activePage, setActivePage] = useState<Page>("videos");
+  const [activeVideoTab, setActiveVideoTab] = useState("search");
+  const [activeClipTab, setActiveClipTab] = useState("general-search");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
+    return localStorage.getItem("sidebar-collapsed") === "true";
+  });
   const [thumbWidth, setThumbWidth] = useState(110);
 
   // Tag options for TagClipsTab (loaded from HubSpot, cached)
@@ -304,6 +309,10 @@ function App() {
   };
 
   const isConfigured = settings.hubspotToken && settings.rootFolder;
+
+  useEffect(() => {
+    if (!isConfigured) setActivePage("settings");
+  }, [isConfigured]);
 
   const [syncing, setSyncing] = useState(false);
 
@@ -688,6 +697,14 @@ function App() {
     };
   }, [project]);
 
+  const handleToggleSidebar = useCallback(() => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      localStorage.setItem("sidebar-collapsed", String(next));
+      return next;
+    });
+  }, []);
+
   return (
     <div className="flex h-screen flex-col">
       {/* Header */}
@@ -709,13 +726,6 @@ function App() {
             title="Share feedback"
           >
             <MessageSquarePlus className="h-5 w-5" />
-          </Button>
-          <Button
-            variant="ghost"
-            size="icon"
-            onClick={() => setSettingsOpen(true)}
-          >
-            <Settings className="h-5 w-5" />
           </Button>
         </div>
       </header>
@@ -763,168 +773,210 @@ function App() {
         </div>
       )}
 
-      {/* Main content */}
-      {!isConfigured ? (
-        <div className="flex flex-1 items-center justify-center">
-          <div className="text-center">
-            <p className="mb-4 text-muted-foreground">
-              Configure your HubSpot token and project folder to get started.
-            </p>
-            <Button onClick={() => setSettingsOpen(true)}>
-              Open Settings
-            </Button>
-          </div>
-        </div>
-      ) : (
-        <Tabs
-          value={activeTab}
-          onValueChange={setActiveTab}
-          className="flex flex-1 flex-col overflow-hidden"
-        >
-          <div className="flex items-center justify-between mx-4 mt-2">
-            <TabsList className="w-fit">
-              <TabsTrigger value="search">
-                <Search className="mr-1.5 h-4 w-4" />
-                Search
-              </TabsTrigger>
-              <TabsTrigger value="arrange">
-                <ListOrdered className="mr-1.5 h-4 w-4" />
-                Arrange
-              </TabsTrigger>
-              <TabsTrigger value="general-search">
-                <Globe className="mr-1.5 h-4 w-4" />
-                General Search
-              </TabsTrigger>
-              <TabsTrigger value="tag-clips">
-                <Tags className="mr-1.5 h-4 w-4" />
-                Tag Clips
-              </TabsTrigger>
-            </TabsList>
+      {/* Sidebar + Content */}
+      <div className="flex flex-1 overflow-hidden">
+        <Sidebar
+          activePage={activePage}
+          onPageChange={setActivePage}
+          collapsed={sidebarCollapsed}
+          onToggleCollapse={handleToggleSidebar}
+        />
 
-            {activeTab === "arrange" && arrangeStats && (
-              <div className="flex items-center gap-2">
-                <div className="flex items-center gap-3 text-sm text-muted-foreground mr-2">
-                  <span className="flex items-center gap-1.5">
-                    <RulerDimensionLine className="h-3.5 w-3.5 flex-shrink-0" />
-                    <input
-                      type="range"
-                      min={60}
-                      max={200}
-                      value={thumbWidth}
-                      onChange={(e) => setThumbWidth(Number(e.target.value))}
-                      className="w-20 accent-primary cursor-pointer"
-                    />
-                  </span>
-                  <span className="flex items-center gap-1">
-                    <Film className="h-3.5 w-3.5" />
-                    {arrangeStats.count} clip{arrangeStats.count !== 1 ? "s" : ""}
-                  </span>
-                  <span className="flex items-center gap-1">
-                    <Clock className="h-3.5 w-3.5" />
-                    {arrangeStats.duration}
-                  </span>
+        <main className="flex flex-1 flex-col overflow-hidden">
+          {/* ── Videos page ── */}
+          <div className={`flex flex-1 flex-col overflow-hidden ${activePage === "videos" ? "" : "hidden"}`}>
+            {!isConfigured ? (
+              <div className="flex flex-1 items-center justify-center">
+                <div className="text-center">
+                  <p className="mb-4 text-muted-foreground">
+                    Configure your HubSpot token and project folder to get started.
+                  </p>
+                  <Button onClick={() => setActivePage("settings")}>
+                    Open Settings
+                  </Button>
                 </div>
-                {project?.hubspotVideoProjectId && (
-                  <>
-                    <Button
-                      onClick={() =>
-                        openUrl(`https://app-eu1.hubspot.com/contacts/146859718/record/2-192286893/${project.hubspotVideoProjectId}`)
-                      }
-                      size="sm"
-                      variant="outline"
-                      title="Open in HubSpot"
-                      className="cursor-pointer h-8 w-8 p-0"
-                    >
-                      <HubSpotIcon className="h-3.5 w-3.5" />
-                    </Button>
-                    <Button
-                      onClick={syncFromHubSpot}
-                      disabled={syncing}
-                      size="sm"
-                      variant="outline"
-                      title="Sync clips from HubSpot"
-                      className="cursor-pointer h-8 w-8 p-0"
-                    >
-                      <RefreshCw className={`h-3.5 w-3.5 ${syncing ? "animate-spin" : ""}`} />
-                    </Button>
-                  </>
-                )}
-                <Button
-                  size="sm"
-                  onClick={() => {
-                    // If already ran, just re-open with results
-                    if (finishPhase === "working" && !stepStatuses.every((s) => s === "pending")) {
-                      setFinishDialogOpen(true);
-                      return;
-                    }
-                    setFinishPhase("confirm");
-                    setFinishDialogOpen(true);
-                  }}
-                  className="gap-1.5 cursor-pointer"
-                >
-                  <Sparkles className="h-3.5 w-3.5" />
-                  Finish Video
-                </Button>
               </div>
+            ) : (
+              <Tabs
+                value={activeVideoTab}
+                onValueChange={setActiveVideoTab}
+                className="flex flex-1 flex-col overflow-hidden"
+              >
+                <div className="flex items-center justify-between mx-4 mt-2">
+                  <TabsList className="w-fit">
+                    <TabsTrigger value="search">
+                      <Search className="mr-1.5 h-4 w-4" />
+                      Search
+                    </TabsTrigger>
+                    <TabsTrigger value="arrange">
+                      <ListOrdered className="mr-1.5 h-4 w-4" />
+                      Arrange
+                    </TabsTrigger>
+                  </TabsList>
+
+                  {activeVideoTab === "arrange" && arrangeStats && (
+                    <div className="flex items-center gap-2">
+                      <div className="flex items-center gap-3 text-sm text-muted-foreground mr-2">
+                        <span className="flex items-center gap-1.5">
+                          <RulerDimensionLine className="h-3.5 w-3.5 flex-shrink-0" />
+                          <input
+                            type="range"
+                            min={60}
+                            max={200}
+                            value={thumbWidth}
+                            onChange={(e) => setThumbWidth(Number(e.target.value))}
+                            className="w-20 accent-primary cursor-pointer"
+                          />
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <Film className="h-3.5 w-3.5" />
+                          {arrangeStats.count} clip{arrangeStats.count !== 1 ? "s" : ""}
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <Clock className="h-3.5 w-3.5" />
+                          {arrangeStats.duration}
+                        </span>
+                      </div>
+                      {project?.hubspotVideoProjectId && (
+                        <>
+                          <Button
+                            onClick={() =>
+                              openUrl(`https://app-eu1.hubspot.com/contacts/146859718/record/2-192286893/${project.hubspotVideoProjectId}`)
+                            }
+                            size="sm"
+                            variant="outline"
+                            title="Open in HubSpot"
+                            className="cursor-pointer h-8 w-8 p-0"
+                          >
+                            <HubSpotIcon className="h-3.5 w-3.5" />
+                          </Button>
+                          <Button
+                            onClick={syncFromHubSpot}
+                            disabled={syncing}
+                            size="sm"
+                            variant="outline"
+                            title="Sync clips from HubSpot"
+                            className="cursor-pointer h-8 w-8 p-0"
+                          >
+                            <RefreshCw className={`h-3.5 w-3.5 ${syncing ? "animate-spin" : ""}`} />
+                          </Button>
+                        </>
+                      )}
+                      <Button
+                        size="sm"
+                        onClick={() => {
+                          if (finishPhase === "working" && !stepStatuses.every((s) => s === "pending")) {
+                            setFinishDialogOpen(true);
+                            return;
+                          }
+                          setFinishPhase("confirm");
+                          setFinishDialogOpen(true);
+                        }}
+                        className="gap-1.5 cursor-pointer"
+                      >
+                        <Sparkles className="h-3.5 w-3.5" />
+                        Finish Video
+                      </Button>
+                    </div>
+                  )}
+                </div>
+
+                <div className={`flex-1 overflow-auto px-4 ${activeVideoTab === "search" ? "" : "hidden"}`}>
+                  <TabErrorBoundary name="Search">
+                    <SearchTab
+                      settings={settings}
+                      project={project}
+                      setProject={setProject}
+                      addClip={addClipToProject}
+                      removeClip={removeClipFromProject}
+                    />
+                  </TabErrorBoundary>
+                </div>
+                <div className={`flex-1 overflow-auto px-4 ${activeVideoTab === "arrange" ? "" : "hidden"}`}>
+                  <TabErrorBoundary name="Arrange">
+                    <ArrangeTab
+                      settings={settings}
+                      project={project}
+                      setProject={setProject}
+                      isActive={activeVideoTab === "arrange"}
+                      removeClip={removeClipFromProject}
+                      thumbWidth={thumbWidth}
+                      suppressAutoPlay={finishDialogOpen}
+                    />
+                  </TabErrorBoundary>
+                </div>
+              </Tabs>
             )}
           </div>
 
-          {/* Keep all tabs mounted, toggle visibility with CSS */}
-          <div className={`flex-1 overflow-auto px-4 ${activeTab === "search" ? "" : "hidden"}`}>
-            <TabErrorBoundary name="Search">
-              <SearchTab
-                settings={settings}
-                project={project}
-                setProject={setProject}
-                addClip={addClipToProject}
-                removeClip={removeClipFromProject}
-              />
-            </TabErrorBoundary>
-          </div>
-          <div className={`flex-1 overflow-auto px-4 ${activeTab === "arrange" ? "" : "hidden"}`}>
-            <TabErrorBoundary name="Arrange">
-              <ArrangeTab
-                settings={settings}
-                project={project}
-                setProject={setProject}
-                isActive={activeTab === "arrange"}
-                removeClip={removeClipFromProject}
-                thumbWidth={thumbWidth}
-                suppressAutoPlay={finishDialogOpen}
-              />
-            </TabErrorBoundary>
-          </div>
-          <div className={`flex-1 overflow-hidden ${activeTab === "general-search" ? "" : "hidden"}`}>
-            <TabErrorBoundary name="General Search">
-              <GeneralSearchTab
-                settings={settings}
-                onSettingsChange={saveSettings}
-              />
-            </TabErrorBoundary>
-          </div>
-          <div className={`flex-1 overflow-hidden ${activeTab === "tag-clips" ? "" : "hidden"}`}>
-            <TabErrorBoundary name="Tag Clips">
-              <TagClipsTab
-                token={settings.hubspotToken}
-                tagOptions={appTagOptions}
-                settings={settings}
-                onTagsCreated={() => {
-                  invalidateTagCache();
-                  fetchTagOptions(settings.hubspotToken).then(setAppTagOptions).catch(() => {});
-                }}
-              />
-            </TabErrorBoundary>
-          </div>
-        </Tabs>
-      )}
+          {/* ── Clips page ── */}
+          <div className={`flex flex-1 flex-col overflow-hidden ${activePage === "clips" ? "" : "hidden"}`}>
+            {!isConfigured ? (
+              <div className="flex flex-1 items-center justify-center">
+                <div className="text-center">
+                  <p className="mb-4 text-muted-foreground">
+                    Configure your HubSpot token and project folder to get started.
+                  </p>
+                  <Button onClick={() => setActivePage("settings")}>
+                    Open Settings
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <Tabs
+                value={activeClipTab}
+                onValueChange={setActiveClipTab}
+                className="flex flex-1 flex-col overflow-hidden"
+              >
+                <div className="flex items-center justify-between mx-4 mt-2">
+                  <TabsList className="w-fit">
+                    <TabsTrigger value="general-search">
+                      <Globe className="mr-1.5 h-4 w-4" />
+                      Create
+                    </TabsTrigger>
+                    <TabsTrigger value="tag-clips">
+                      <Tags className="mr-1.5 h-4 w-4" />
+                      Tag
+                    </TabsTrigger>
+                  </TabsList>
+                </div>
 
-      <SettingsDialog
-        open={settingsOpen}
-        onOpenChange={setSettingsOpen}
-        settings={settings}
-        onSave={saveSettings}
-        onCheckUpdate={checkForUpdates}
-      />
+                <div className={`flex-1 overflow-hidden ${activeClipTab === "general-search" ? "" : "hidden"}`}>
+                  <TabErrorBoundary name="Create Clips">
+                    <GeneralSearchTab
+                      settings={settings}
+                      onSettingsChange={saveSettings}
+                    />
+                  </TabErrorBoundary>
+                </div>
+                <div className={`flex-1 overflow-hidden ${activeClipTab === "tag-clips" ? "" : "hidden"}`}>
+                  <TabErrorBoundary name="Tag Clips">
+                    <TagClipsTab
+                      token={settings.hubspotToken}
+                      tagOptions={appTagOptions}
+                      settings={settings}
+                      onTagsCreated={() => {
+                        invalidateTagCache();
+                        fetchTagOptions(settings.hubspotToken).then(setAppTagOptions).catch(() => {});
+                      }}
+                    />
+                  </TabErrorBoundary>
+                </div>
+              </Tabs>
+            )}
+          </div>
+
+          {/* ── Settings page ── */}
+          <div className={`flex flex-1 flex-col overflow-hidden ${activePage === "settings" ? "" : "hidden"}`}>
+            <SettingsPage
+              settings={settings}
+              onSave={saveSettings}
+              onCheckUpdate={checkForUpdates}
+            />
+          </div>
+        </main>
+      </div>
+
       <FeedbackDialog
         open={feedbackOpen}
         onOpenChange={setFeedbackOpen}
