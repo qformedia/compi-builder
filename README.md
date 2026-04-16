@@ -27,30 +27,26 @@ CompiFlow connects to HubSpot CRM to manage External Clips and Video Projects, d
 Install these before running CompiFlow:
 
 1. **Rust** (latest stable)
-   ```bash
+  ```bash
    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
-   ```
-
+  ```
 2. **Node.js** (v18+)
-   ```bash
+  ```bash
    brew install node
-   ```
-
+  ```
 3. **yt-dlp** (for downloading clips)
-   ```bash
+  ```bash
    brew install yt-dlp
-   ```
-
+  ```
 4. **ffmpeg** (for video processing / duration probing)
-   ```bash
+  ```bash
    brew install ffmpeg
-   ```
-
+  ```
 5. **HubSpot Private App token** with scopes:
-   - `crm.objects.custom.read`
-   - `crm.objects.custom.write`
-   - `crm.schemas.custom.read`
-   - `crm.schemas.custom.write`
+  - `crm.objects.custom.read`
+  - `crm.objects.custom.write`
+  - `crm.schemas.custom.read`
+  - `crm.schemas.custom.write`
 
 ## Getting Started
 
@@ -67,6 +63,7 @@ npm run tauri dev
 ```
 
 On first launch:
+
 1. Click the **Settings** gear icon
 2. Enter your **HubSpot token**
 3. Set a **root folder** for projects (e.g. `~/Documents/CompiFlow`)

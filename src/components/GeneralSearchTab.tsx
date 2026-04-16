@@ -813,7 +813,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
   return (
     <div className="flex flex-col h-full p-4 gap-4">
       {phase === "input" && (
-        <div className="flex flex-col gap-4 max-w-2xl mx-auto w-full pt-8">
+        <div className="flex flex-col gap-4 max-w-2xl mx-auto w-full pt-8 overflow-y-auto flex-1 min-h-0">
           <div className="space-y-3">
             <h2 className="text-lg font-semibold">Create Clips</h2>
             <p className="text-sm text-muted-foreground">

@@ -248,7 +248,7 @@ async fn search_clips(
         .map_err(|e| format!("Failed to parse response: {e}"))
 }
 
-/// Fetch ALL clips for a specific creator matching the same tag filters, auto-paginating.
+/// Fetch clips for a specific creator matching the same tag filters, auto-paginating up to `max_results`.
 #[tauri::command]
 async fn search_creator_clips(
     token: String,
@@ -258,6 +258,7 @@ async fn search_creator_clips(
     tag_mode: String,
     creator_main_link: Option<String>,
     creator_name: String,
+    max_results: Option<u32>,
 ) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
@@ -283,8 +284,10 @@ async fn search_creator_clips(
         EXTERNAL_CLIPS_OBJECT_ID
     );
 
+    let max = max_results.unwrap_or(200).max(1) as usize;
     let mut all_results: Vec<serde_json::Value> = Vec::new();
     let mut after: Option<String> = None;
+    let mut capped = false;
 
     loop {
         let mut body = serde_json::json!({
@@ -316,18 +319,28 @@ async fn search_creator_clips(
         let page: serde_json::Value = res.json().await
             .map_err(|e| format!("Failed to parse response: {e}"))?;
 
-        if let Some(results) = page.get("results").and_then(|r| r.as_array()) {
-            all_results.extend(results.iter().cloned());
-        }
-
-        // Check for next page
-        after = page
+        let next_after = page
             .get("paging")
             .and_then(|p| p.get("next"))
             .and_then(|n| n.get("after"))
             .and_then(|a| a.as_str())
             .map(String::from);
 
+        if let Some(results) = page.get("results").and_then(|r| r.as_array()) {
+            all_results.extend(results.iter().cloned());
+        }
+
+        if all_results.len() > max {
+            all_results.truncate(max);
+            capped = true;
+            break;
+        }
+        if all_results.len() == max {
+            capped = next_after.is_some();
+            break;
+        }
+
+        after = next_after;
         if after.is_none() {
             break;
         }
@@ -335,7 +348,8 @@ async fn search_creator_clips(
 
     Ok(serde_json::json!({
         "total": all_results.len(),
-        "results": all_results
+        "results": all_results,
+        "capped": capped
     }))
 }
 

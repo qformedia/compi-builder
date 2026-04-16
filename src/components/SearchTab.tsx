@@ -8,13 +8,22 @@ import { TagPicker } from "@/components/TagPicker";
 import { CreatorPicker } from "@/components/CreatorPicker";
 import { ClipCard, SCORE_COLORS } from "@/components/ClipCard";
 import { decodeEditingNotes } from "@/components/ArrangeTab";
-import { searchClipsByTags, searchCreatorClips, searchVideoProjects, fetchVideoProjectClips } from "@/lib/hubspot";
+import {
+  searchClipsByTags,
+  searchCreatorClips,
+  searchVideoProjects,
+  fetchVideoProjectClips,
+  DEFAULT_CREATOR_CLIP_CAP,
+} from "@/lib/hubspot";
 import type { CreatorOption, VideoProjectSummary } from "@/lib/hubspot";
 import { fetchTagOptions } from "@/lib/tags";
 import type { TagOption } from "@/lib/tags";
 import type { AppSettings, Clip, Project, ProjectClip } from "@/types";
 
 const SCORE_OPTIONS = ["XL", "L", "M", "S", "XS"] as const;
+
+/** Cap total clips in the tag search list to bound memory (see load more). */
+const MAX_INITIAL_CLIPS = 500;
 
 interface Props {
   settings: AppSettings;
@@ -224,10 +233,13 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
   const [error, setError] = useState<string>();
   const [activePreviewId, setActivePreviewId] = useState<string | null>(null);
   const [cookieWarning, setCookieWarning] = useState<string | null>(null);
+  const [initialClipsCapReached, setInitialClipsCapReached] = useState(false);
 
   // Per-creator fully-loaded clips
   const [creatorClipsMap, setCreatorClipsMap] = useState<Map<string, Clip[]>>(new Map());
   const [creatorLoadState, setCreatorLoadState] = useState<Map<string, "pending" | "loading" | "loaded">>(new Map());
+  /** True when HubSpot has more clips for this creator than we loaded (see DEFAULT_CREATOR_CLIP_CAP). */
+  const [creatorClipsCapped, setCreatorClipsCapped] = useState<Map<string, boolean>>(new Map());
 
   const thumbCache = useRef(new Map<string, string | null>());
 
@@ -268,6 +280,10 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
 
   const search = async (loadMore = false) => {
     if (selectedTags.length === 0 && selectedCreator === null) return;
+    if (loadMore && initialClips.length >= MAX_INITIAL_CLIPS) {
+      setInitialClipsCapReached(true);
+      return;
+    }
     setLoading(true);
     setError(undefined);
     try {
@@ -293,12 +309,20 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
         const newClips = result.clips.filter(
           (c) => !loadedIds.has(c.id),
         );
-        setInitialClips((prev) => [...prev, ...newClips]);
+        const room = Math.max(0, MAX_INITIAL_CLIPS - initialClips.length);
+        const toAdd = newClips.slice(0, room);
+        setInitialClips((prev) => [...prev, ...toAdd]);
+        const mergedLen = initialClips.length + toAdd.length;
+        if (mergedLen >= MAX_INITIAL_CLIPS || newClips.length > room) {
+          setInitialClipsCapReached(true);
+        }
       } else {
         // Fresh search: reset everything
         setInitialClips(result.clips);
         setCreatorClipsMap(new Map());
         setCreatorLoadState(new Map());
+        setCreatorClipsCapped(new Map());
+        setInitialClipsCapReached(false);
         setActivePreviewId(null);
       }
 
@@ -321,7 +345,7 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
       });
 
       try {
-        const clips = await searchCreatorClips(
+        const { clips, capped } = await searchCreatorClips(
           settings.hubspotToken,
           selectedTags,
           selectedScores,
@@ -329,8 +353,10 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
           tagMode,
           selectedCreator?.mainLink,
           creatorName,
+          DEFAULT_CREATOR_CLIP_CAP,
         );
         setCreatorClipsMap((prev) => new Map(prev).set(creatorName, clips));
+        setCreatorClipsCapped((prev) => new Map(prev).set(creatorName, capped));
         setCreatorLoadState((prev) => new Map(prev).set(creatorName, "loaded"));
       } catch {
         setCreatorLoadState((prev) => new Map(prev).set(creatorName, "pending"));
@@ -599,6 +625,7 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
               clips={getCreatorClips(creator)}
               firstClip={getFirstClip(creator)}
               loadState={creatorLoadState.get(creator) ?? "pending"}
+              clipsCapped={creatorClipsCapped.get(creator) ?? false}
               onVisible={() => loadCreator(creator)}
               thumbCache={thumbCache}
               settings={settings}
@@ -614,7 +641,12 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
             />
           ))}
 
-          {nextAfter && (
+          {initialClipsCapReached && (
+            <p className="text-xs text-muted-foreground">
+              Showing at most {MAX_INITIAL_CLIPS} clips in this search. Narrow filters or start a new search to see more.
+            </p>
+          )}
+          {nextAfter && !initialClipsCapReached && (
             <Button
               variant="outline"
               onClick={() => search(true)}
@@ -637,6 +669,7 @@ interface CreatorRowProps {
   clips: Clip[];
   firstClip?: Clip;
   loadState: "pending" | "loading" | "loaded";
+  clipsCapped: boolean;
   onVisible: () => void;
   thumbCache: React.RefObject<Map<string, string | null>>;
   settings: AppSettings;
@@ -656,6 +689,7 @@ function CreatorRow({
   clips,
   firstClip,
   loadState,
+  clipsCapped,
   onVisible,
   thumbCache,
   settings,
@@ -718,6 +752,14 @@ function CreatorRow({
         )}
         <span className="font-normal text-muted-foreground">
           ({clips.length})
+          {clipsCapped && (
+            <span
+              className="ml-1 text-amber-600 dark:text-amber-400"
+              title={`Showing first ${DEFAULT_CREATOR_CLIP_CAP} clips; more exist in HubSpot`}
+            >
+              · first {DEFAULT_CREATOR_CLIP_CAP} only
+            </span>
+          )}
           {loadState === "loading" && (
             <Loader2 className="ml-1 inline h-3 w-3 animate-spin" />
           )}

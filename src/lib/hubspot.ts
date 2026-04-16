@@ -11,6 +11,7 @@ interface HubSpotSearchResponse {
   paging?: {
     next?: { after: string };
   };
+  capped?: boolean;
 }
 
 /** Search External Clips by tags (and optionally scores) via the Rust backend */
@@ -42,7 +43,10 @@ export async function searchClipsByTags(
   };
 }
 
-/** Fetch ALL clips for a specific creator matching the same filters */
+/** Max clips loaded per creator in search UI (HubSpot may have more). */
+export const DEFAULT_CREATOR_CLIP_CAP = 200;
+
+/** Fetch clips for a specific creator matching the same filters (capped for memory). */
 export async function searchCreatorClips(
   token: string,
   tags: string[],
@@ -51,7 +55,8 @@ export async function searchCreatorClips(
   tagMode: string,
   creatorMainLink: string | undefined,
   creatorName: string,
-): Promise<Clip[]> {
+  maxResults: number = DEFAULT_CREATOR_CLIP_CAP,
+): Promise<{ clips: Clip[]; capped: boolean }> {
   const data = await invoke<HubSpotSearchResponse>("search_creator_clips", {
     token,
     tags,
@@ -60,9 +65,13 @@ export async function searchCreatorClips(
     tagMode,
     creatorMainLink: creatorMainLink ?? null,
     creatorName,
+    max_results: maxResults,
   });
 
-  return data.results.map(parseClip);
+  return {
+    clips: data.results.map(parseClip),
+    capped: data.capped ?? false,
+  };
 }
 
 /** A creator record returned from the Creators object */

@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 
 import { getPersistedThumb, persistThumb, clearPersistedThumb } from "@/lib/thumb-cache";
+import { setThumbCacheEntry } from "@/lib/thumb-cache-mem";
 
 // ── Score badge colors (mimicking HubSpot) ──────────────────────────────────
 
@@ -135,6 +136,8 @@ export function ClipCard({
   const [thumbErrorMsg, setThumbErrorMsg] = useState<string | null>(null);
   const thumbRetriedRef = useRef(false);
   const cardRef = useRef<HTMLDivElement>(null);
+  const isActiveRef = useRef(isActive);
+  isActiveRef.current = isActive;
 
   // "Used Xx" popover state
   const [vpOpen, setVpOpen] = useState(false);
@@ -161,7 +164,7 @@ export function ClipCard({
   const loadThumb = useCallback(async (isRetry = false) => {
     // 1. Check HubSpot-stored thumbnail (permanent, no fetch needed)
     if (clip.fetchedThumbnail) {
-      thumbCache.current?.set(clip.link, clip.fetchedThumbnail);
+      if (thumbCache.current) setThumbCacheEntry(thumbCache.current, clip.link, clip.fetchedThumbnail);
       setThumb(clip.fetchedThumbnail);
       return;
     }
@@ -179,7 +182,7 @@ export function ClipCard({
     if (!isRetry) {
       const persisted = getPersistedThumb(clip.link);
       if (persisted) {
-        thumbCache.current?.set(clip.link, persisted);
+        if (thumbCache.current) setThumbCacheEntry(thumbCache.current, clip.link, persisted);
         setThumb(persisted);
         return;
       }
@@ -208,16 +211,16 @@ export function ClipCard({
               clipId: clip.id,
               thumbnailUrl: url,
             });
-            thumbCache.current?.set(clip.link, hubspotUrl);
+            if (thumbCache.current) setThumbCacheEntry(thumbCache.current, clip.link, hubspotUrl);
             persistThumb(clip.link, hubspotUrl);
             setThumb(hubspotUrl);
           } catch {
             // Upload failed; cache original as fallback
-            thumbCache.current?.set(clip.link, url);
+            if (thumbCache.current) setThumbCacheEntry(thumbCache.current, clip.link, url);
             persistThumb(clip.link, url);
           }
         } else {
-          thumbCache.current?.set(clip.link, url);
+          if (thumbCache.current) setThumbCacheEntry(thumbCache.current, clip.link, url);
           persistThumb(clip.link, url);
         }
       } else if (clip.localFile && rootFolder && projectName) {
@@ -230,26 +233,26 @@ export function ClipCard({
           if (b64) {
             const dataUrl = `data:image/jpeg;base64,${b64}`;
             setThumb(dataUrl);
-            thumbCache.current?.set(clip.link, dataUrl);
+            if (thumbCache.current) setThumbCacheEntry(thumbCache.current, clip.link, dataUrl);
             persistThumb(clip.link, dataUrl);
           } else {
-            thumbCache.current?.set(clip.link, null);
+            if (thumbCache.current) setThumbCacheEntry(thumbCache.current, clip.link, null);
             setThumbError(true);
             setThumbErrorMsg("No thumbnail found");
           }
         } catch {
-          thumbCache.current?.set(clip.link, null);
+          if (thumbCache.current) setThumbCacheEntry(thumbCache.current, clip.link, null);
           setThumbError(true);
           setThumbErrorMsg("No thumbnail found");
         }
       } else {
-        thumbCache.current?.set(clip.link, null);
+        if (thumbCache.current) setThumbCacheEntry(thumbCache.current, clip.link, null);
         setThumbError(true);
         setThumbErrorMsg("No thumbnail found");
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      thumbCache.current?.set(clip.link, null);
+      if (thumbCache.current) setThumbCacheEntry(thumbCache.current, clip.link, null);
       setThumbError(true);
       setThumbErrorMsg(msg);
       if (msg.toLowerCase().includes("cookie") && onCookieError) {
@@ -260,7 +263,7 @@ export function ClipCard({
     }
   }, [clip.link, clip.localFile, clip.fetchedThumbnail, clip.id, thumbCache, cookiesBrowser, cookiesFile, evil0ctalApiUrl, rootFolder, projectName, onCookieError, hubspotToken]);
 
-  // Initial load via IntersectionObserver
+  // Load thumbnails when near viewport; drop decoded image when far away (cache keeps URL).
   useEffect(() => {
     const el = cardRef.current;
     if (!el) return;
@@ -268,10 +271,12 @@ export function ClipCard({
       ([entry]) => {
         if (entry.isIntersecting) {
           loadThumb();
-          observer.disconnect();
+        } else if (!isActiveRef.current) {
+          setThumb(null);
+          setThumbLoading(false);
         }
       },
-      { threshold: 0.1 },
+      { threshold: 0.05, rootMargin: "120px" },
     );
     observer.observe(el);
     return () => observer.disconnect();
@@ -295,7 +300,7 @@ export function ClipCard({
   return (
     <div
       ref={cardRef}
-      className={`group relative flex snap-start flex-col overflow-hidden rounded-lg bg-card transition-shadow hover:shadow-md ${compact ? "w-full" : "w-52 flex-shrink-0 border"}`}
+      className={`group relative flex snap-start flex-col overflow-hidden rounded-lg bg-card transition-shadow hover:shadow-md [content-visibility:auto] [contain-intrinsic-size:13rem_30rem] ${compact ? "w-full" : "w-52 flex-shrink-0 border"}`}
     >
       {/* Thumbnail / Preview area */}
       <div
