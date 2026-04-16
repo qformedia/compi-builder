@@ -35,6 +35,14 @@ const SCORE_OPTIONS = ["XL", "L", "M", "S", "XS"] as const;
 /** Cap total clips in the tag search list to bound memory (see load more). */
 const MAX_INITIAL_CLIPS = 500;
 
+/** Normalise the user-entered date range: trim, swap if inverted, convert blanks to null. */
+function normaliseDateRange(from: string, to: string): { dateFrom: string | null; dateTo: string | null } {
+  let f = from.trim() || null;
+  let t = to.trim() || null;
+  if (f && t && f > t) [f, t] = [t, f];
+  return { dateFrom: f, dateTo: t };
+}
+
 interface Props {
   settings: AppSettings;
   project: Project | null;
@@ -300,13 +308,7 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
     setLoading(true);
     setError(undefined);
     try {
-      let dFrom = dateFoundFrom.trim();
-      let dTo = dateFoundTo.trim();
-      if (dFrom && dTo && dFrom > dTo) {
-        const swap = dFrom;
-        dFrom = dTo;
-        dTo = swap;
-      }
+      const { dateFrom, dateTo } = normaliseDateRange(dateFoundFrom, dateFoundTo);
 
       const result = await searchClipsByTags(
         settings.hubspotToken,
@@ -316,8 +318,8 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
         tagMode,
         selectedCreator?.mainLink,
         loadMore ? nextAfter : undefined,
-        dFrom || null,
-        dTo || null,
+        dateFrom,
+        dateTo,
       );
 
       if (loadMore) {
@@ -368,13 +370,7 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
       });
 
       try {
-        let dFrom = dateFoundFrom.trim();
-        let dTo = dateFoundTo.trim();
-        if (dFrom && dTo && dFrom > dTo) {
-          const swap = dFrom;
-          dFrom = dTo;
-          dTo = swap;
-        }
+        const { dateFrom, dateTo } = normaliseDateRange(dateFoundFrom, dateFoundTo);
 
         const { clips, capped } = await searchCreatorClips(
           settings.hubspotToken,
@@ -385,8 +381,8 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
           selectedCreator?.mainLink,
           creatorName,
           DEFAULT_CREATOR_CLIP_CAP,
-          dFrom || null,
-          dTo || null,
+          dateFrom,
+          dateTo,
         );
         setCreatorClipsMap((prev) => new Map(prev).set(creatorName, clips));
         setCreatorClipsCapped((prev) => new Map(prev).set(creatorName, capped));

@@ -160,11 +160,18 @@ export function ClipCard({
     }
   }, [clip.id, hubspotToken, vpProjects]);
 
+  const cacheThumb = useCallback(
+    (value: string | null) => {
+      if (thumbCache.current) setThumbCacheEntry(thumbCache.current, clip.link, value);
+    },
+    [thumbCache, clip.link],
+  );
+
   // Lazy-load thumbnail: HubSpot → in-memory cache → localStorage → fetch → upload to HubSpot
   const loadThumb = useCallback(async (isRetry = false) => {
     // 1. Check HubSpot-stored thumbnail (permanent, no fetch needed)
     if (clip.fetchedThumbnail) {
-      if (thumbCache.current) setThumbCacheEntry(thumbCache.current, clip.link, clip.fetchedThumbnail);
+      cacheThumb(clip.fetchedThumbnail);
       setThumb(clip.fetchedThumbnail);
       return;
     }
@@ -182,7 +189,7 @@ export function ClipCard({
     if (!isRetry) {
       const persisted = getPersistedThumb(clip.link);
       if (persisted) {
-        if (thumbCache.current) setThumbCacheEntry(thumbCache.current, clip.link, persisted);
+        cacheThumb(persisted);
         setThumb(persisted);
         return;
       }
@@ -211,16 +218,15 @@ export function ClipCard({
               clipId: clip.id,
               thumbnailUrl: url,
             });
-            if (thumbCache.current) setThumbCacheEntry(thumbCache.current, clip.link, hubspotUrl);
+            cacheThumb(hubspotUrl);
             persistThumb(clip.link, hubspotUrl);
             setThumb(hubspotUrl);
           } catch {
-            // Upload failed; cache original as fallback
-            if (thumbCache.current) setThumbCacheEntry(thumbCache.current, clip.link, url);
+            cacheThumb(url);
             persistThumb(clip.link, url);
           }
         } else {
-          if (thumbCache.current) setThumbCacheEntry(thumbCache.current, clip.link, url);
+          cacheThumb(url);
           persistThumb(clip.link, url);
         }
       } else if (clip.localFile && rootFolder && projectName) {
@@ -233,26 +239,26 @@ export function ClipCard({
           if (b64) {
             const dataUrl = `data:image/jpeg;base64,${b64}`;
             setThumb(dataUrl);
-            if (thumbCache.current) setThumbCacheEntry(thumbCache.current, clip.link, dataUrl);
+            cacheThumb(dataUrl);
             persistThumb(clip.link, dataUrl);
           } else {
-            if (thumbCache.current) setThumbCacheEntry(thumbCache.current, clip.link, null);
+            cacheThumb(null);
             setThumbError(true);
             setThumbErrorMsg("No thumbnail found");
           }
         } catch {
-          if (thumbCache.current) setThumbCacheEntry(thumbCache.current, clip.link, null);
+          cacheThumb(null);
           setThumbError(true);
           setThumbErrorMsg("No thumbnail found");
         }
       } else {
-        if (thumbCache.current) setThumbCacheEntry(thumbCache.current, clip.link, null);
+        cacheThumb(null);
         setThumbError(true);
         setThumbErrorMsg("No thumbnail found");
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      if (thumbCache.current) setThumbCacheEntry(thumbCache.current, clip.link, null);
+      cacheThumb(null);
       setThumbError(true);
       setThumbErrorMsg(msg);
       if (msg.toLowerCase().includes("cookie") && onCookieError) {
@@ -261,7 +267,7 @@ export function ClipCard({
     } finally {
       setThumbLoading(false);
     }
-  }, [clip.link, clip.localFile, clip.fetchedThumbnail, clip.id, thumbCache, cookiesBrowser, cookiesFile, evil0ctalApiUrl, rootFolder, projectName, onCookieError, hubspotToken]);
+  }, [clip.link, clip.localFile, clip.fetchedThumbnail, clip.id, cacheThumb, cookiesBrowser, cookiesFile, evil0ctalApiUrl, rootFolder, projectName, onCookieError, hubspotToken]);
 
   // Load thumbnails when near viewport; drop decoded image when far away (cache keeps URL).
   useEffect(() => {
