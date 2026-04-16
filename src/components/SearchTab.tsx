@@ -2,7 +2,17 @@ import { useState, useMemo, useRef, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Loader2, X, Cookie, ExternalLink, Search as SearchIcon, Plus, Globe, FolderOpen } from "lucide-react";
+import {
+  Loader2,
+  X,
+  Cookie,
+  ExternalLink,
+  Search as SearchIcon,
+  Plus,
+  Globe,
+  FolderOpen,
+  CalendarRange,
+} from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { TagPicker } from "@/components/TagPicker";
 import { CreatorPicker } from "@/components/CreatorPicker";
@@ -202,6 +212,9 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [tagMode, setTagMode] = useState<"AND" | "OR">("AND");
   const [selectedCreator, setSelectedCreator] = useState<CreatorOption | null>(null);
+  /** HubSpot `date_found` inclusive range (`YYYY-MM-DD` from `<input type="date">`). */
+  const [dateFoundFrom, setDateFoundFrom] = useState("");
+  const [dateFoundTo, setDateFoundTo] = useState("");
 
   const [thumbRetryKey, setThumbRetryKey] = useState(0);
   useEffect(() => {
@@ -287,6 +300,14 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
     setLoading(true);
     setError(undefined);
     try {
+      let dFrom = dateFoundFrom.trim();
+      let dTo = dateFoundTo.trim();
+      if (dFrom && dTo && dFrom > dTo) {
+        const swap = dFrom;
+        dFrom = dTo;
+        dTo = swap;
+      }
+
       const result = await searchClipsByTags(
         settings.hubspotToken,
         selectedTags,
@@ -295,6 +316,8 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
         tagMode,
         selectedCreator?.mainLink,
         loadMore ? nextAfter : undefined,
+        dFrom || null,
+        dTo || null,
       );
 
       if (loadMore) {
@@ -345,6 +368,14 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
       });
 
       try {
+        let dFrom = dateFoundFrom.trim();
+        let dTo = dateFoundTo.trim();
+        if (dFrom && dTo && dFrom > dTo) {
+          const swap = dFrom;
+          dFrom = dTo;
+          dTo = swap;
+        }
+
         const { clips, capped } = await searchCreatorClips(
           settings.hubspotToken,
           selectedTags,
@@ -354,6 +385,8 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
           selectedCreator?.mainLink,
           creatorName,
           DEFAULT_CREATOR_CLIP_CAP,
+          dFrom || null,
+          dTo || null,
         );
         setCreatorClipsMap((prev) => new Map(prev).set(creatorName, clips));
         setCreatorClipsCapped((prev) => new Map(prev).set(creatorName, capped));
@@ -362,7 +395,16 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
         setCreatorLoadState((prev) => new Map(prev).set(creatorName, "pending"));
       }
     },
-    [settings.hubspotToken, selectedTags, selectedScores, neverUsed, tagMode, selectedCreator],
+    [
+      settings.hubspotToken,
+      selectedTags,
+      selectedScores,
+      neverUsed,
+      tagMode,
+      selectedCreator,
+      dateFoundFrom,
+      dateFoundTo,
+    ],
   );
 
   // Auto-search when filters change
@@ -372,7 +414,7 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
     if (selectedTags.length > 0 || selectedCreator !== null) {
       searchRef.current(false);
     }
-  }, [selectedTags, selectedScores, neverUsed, tagMode, selectedCreator]);
+  }, [selectedTags, selectedScores, neverUsed, tagMode, selectedCreator, dateFoundFrom, dateFoundTo]);
 
   const isInProject = (clipId: string) =>
     project?.clips.some((c) => c.hubspotId === clipId) ?? false;
@@ -519,7 +561,7 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
           </Button>
         </div>
         {/* Filters row */}
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5">
           {/* AND/OR toggle (only shown when 2+ tags selected) */}
           {selectedTags.length >= 2 && (
             <>
@@ -588,6 +630,41 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
             value={selectedCreator}
             onChange={setSelectedCreator}
           />
+
+          <span className="mx-2 text-muted-foreground/30">|</span>
+
+          <span className="flex items-center gap-1 text-[11px] text-muted-foreground shrink-0" title="Filter by date found in HubSpot">
+            <CalendarRange className="h-3.5 w-3.5" />
+            Found
+          </span>
+          <Input
+            type="date"
+            value={dateFoundFrom}
+            onChange={(e) => setDateFoundFrom(e.target.value)}
+            className="h-7 w-[9.75rem] shrink-0 px-1.5 py-0 text-[11px] cursor-pointer"
+            aria-label="Date found from"
+          />
+          <span className="text-[10px] text-muted-foreground">–</span>
+          <Input
+            type="date"
+            value={dateFoundTo}
+            onChange={(e) => setDateFoundTo(e.target.value)}
+            className="h-7 w-[9.75rem] shrink-0 px-1.5 py-0 text-[11px] cursor-pointer"
+            aria-label="Date found to"
+          />
+          {(dateFoundFrom || dateFoundTo) && (
+            <button
+              type="button"
+              onClick={() => {
+                setDateFoundFrom("");
+                setDateFoundTo("");
+              }}
+              className="rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
+              title="Clear date range"
+            >
+              <X className="h-3 w-3" />
+            </button>
+          )}
         </div>
       </div>
 

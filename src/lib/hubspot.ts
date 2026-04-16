@@ -23,6 +23,10 @@ export async function searchClipsByTags(
   tagMode = "AND",
   creatorMainLink?: string,
   after?: string,
+  /** Inclusive lower bound on HubSpot `date_found` (`YYYY-MM-DD`). */
+  dateFrom?: string | null,
+  /** Inclusive upper bound on HubSpot `date_found` (`YYYY-MM-DD`). */
+  dateTo?: string | null,
 ): Promise<{ clips: Clip[]; total: number; nextAfter?: string }> {
   const data = await invoke<HubSpotSearchResponse>("search_clips", {
     token,
@@ -32,6 +36,8 @@ export async function searchClipsByTags(
     tagMode,
     creatorMainLink: creatorMainLink ?? null,
     after: after ?? null,
+    date_from: dateFrom?.trim() || null,
+    date_to: dateTo?.trim() || null,
   });
 
   const clips = data.results.map(parseClip);
@@ -56,6 +62,8 @@ export async function searchCreatorClips(
   creatorMainLink: string | undefined,
   creatorName: string,
   maxResults: number = DEFAULT_CREATOR_CLIP_CAP,
+  dateFrom?: string | null,
+  dateTo?: string | null,
 ): Promise<{ clips: Clip[]; capped: boolean }> {
   const data = await invoke<HubSpotSearchResponse>("search_creator_clips", {
     token,
@@ -66,6 +74,8 @@ export async function searchCreatorClips(
     creatorMainLink: creatorMainLink ?? null,
     creatorName,
     max_results: maxResults,
+    date_from: dateFrom?.trim() || null,
+    date_to: dateTo?.trim() || null,
   });
 
   return {

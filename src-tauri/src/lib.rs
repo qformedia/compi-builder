@@ -206,9 +206,19 @@ async fn search_clips(
     tag_mode: String,
     creator_main_link: Option<String>,
     after: Option<String>,
+    date_from: Option<String>,
+    date_to: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
-    let filter_groups = build_filter_groups(&tags, &scores, never_used, &tag_mode, creator_main_link.as_deref());
+    let filter_groups = build_filter_groups(
+        &tags,
+        &scores,
+        never_used,
+        &tag_mode,
+        creator_main_link.as_deref(),
+        date_from.as_deref(),
+        date_to.as_deref(),
+    );
 
     let props: Vec<serde_json::Value> = CLIP_PROPERTIES.iter().map(|p| serde_json::json!(p)).collect();
 
@@ -259,12 +269,22 @@ async fn search_creator_clips(
     creator_main_link: Option<String>,
     creator_name: String,
     max_results: Option<u32>,
+    date_from: Option<String>,
+    date_to: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())?;
-    let mut filter_groups = build_filter_groups(&tags, &scores, never_used, &tag_mode, creator_main_link.as_deref());
+    let mut filter_groups = build_filter_groups(
+        &tags,
+        &scores,
+        never_used,
+        &tag_mode,
+        creator_main_link.as_deref(),
+        date_from.as_deref(),
+        date_to.as_deref(),
+    );
 
     // Add creator_name filter to every group
     let creator_filter = serde_json::json!({

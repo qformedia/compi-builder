@@ -4,15 +4,32 @@ use std::path::PathBuf;
 
 // ── HubSpot Filters ─────────────────────────────────────────────────────────
 
+/// Accepts `YYYY-MM-DD` from HTML date inputs for HubSpot `date` properties.
+fn is_plausible_iso_date(s: &str) -> bool {
+    let s = s.trim();
+    if s.len() != 10 {
+        return false;
+    }
+    let b = s.as_bytes();
+    if b[4] != b'-' || b[7] != b'-' {
+        return false;
+    }
+    s.chars()
+        .all(|c| c.is_ascii_digit() || c == '-')
+}
+
 /// Build HubSpot filterGroups for External Clips search.
 /// `tag_mode` = "AND" → one group with all tag filters; "OR" → one group per tag.
 /// When `creator_main_link` is provided, every group is narrowed to that creator.
+/// `date_from` / `date_to` filter on `date_found` (inclusive, `YYYY-MM-DD`).
 pub(crate) fn build_filter_groups(
     tags: &[String],
     scores: &[String],
     never_used: bool,
     tag_mode: &str,
     creator_main_link: Option<&str>,
+    date_from: Option<&str>,
+    date_to: Option<&str>,
 ) -> Vec<serde_json::Value> {
     let mut shared: Vec<serde_json::Value> = Vec::new();
 
@@ -43,6 +60,25 @@ pub(crate) fn build_filter_groups(
         "operator": "NEQ",
         "value": "true"
     }));
+
+    if let Some(d) = date_from {
+        if is_plausible_iso_date(d) {
+            shared.push(serde_json::json!({
+                "propertyName": "date_found",
+                "operator": "GTE",
+                "value": d.trim()
+            }));
+        }
+    }
+    if let Some(d) = date_to {
+        if is_plausible_iso_date(d) {
+            shared.push(serde_json::json!({
+                "propertyName": "date_found",
+                "operator": "LTE",
+                "value": d.trim()
+            }));
+        }
+    }
 
     if let Some(link) = creator_main_link {
         shared.push(serde_json::json!({
@@ -753,7 +789,7 @@ mod tests {
 
     #[test]
     fn filter_groups_empty_tags_single_group() {
-        let groups = build_filter_groups(&[], &[], false, "AND", None);
+        let groups = build_filter_groups(&[], &[], false, "AND", None, None, None);
         assert_eq!(groups.len(), 1);
         let filters = groups[0]["filters"].as_array().unwrap();
         assert!(filters.iter().any(|f| f["propertyName"] == "creator_status"));
@@ -763,7 +799,7 @@ mod tests {
     #[test]
     fn filter_groups_or_mode_creates_group_per_tag() {
         let tags = vec!["tag1".into(), "tag2".into()];
-        let groups = build_filter_groups(&tags, &[], false, "OR", None);
+        let groups = build_filter_groups(&tags, &[], false, "OR", None, None, None);
         assert_eq!(groups.len(), 2);
         for (i, group) in groups.iter().enumerate() {
             let filters = group["filters"].as_array().unwrap();
@@ -775,7 +811,7 @@ mod tests {
     #[test]
     fn filter_groups_and_mode_single_group_all_tags() {
         let tags = vec!["a".into(), "b".into(), "c".into()];
-        let groups = build_filter_groups(&tags, &[], false, "AND", None);
+        let groups = build_filter_groups(&tags, &[], false, "AND", None, None, None);
         assert_eq!(groups.len(), 1);
         let filters = groups[0]["filters"].as_array().unwrap();
         let tag_filters: Vec<_> = filters.iter().filter(|f| f["propertyName"] == "tags").collect();
@@ -785,7 +821,7 @@ mod tests {
     #[test]
     fn filter_groups_with_scores() {
         let scores = vec!["A".into(), "B".into()];
-        let groups = build_filter_groups(&[], &scores, false, "AND", None);
+        let groups = build_filter_groups(&[], &scores, false, "AND", None, None, None);
         let filters = groups[0]["filters"].as_array().unwrap();
         let score_filter = filters.iter().find(|f| f["propertyName"] == "score").unwrap();
         assert_eq!(score_filter["operator"], "IN");
@@ -794,7 +830,7 @@ mod tests {
 
     #[test]
     fn filter_groups_never_used() {
-        let groups = build_filter_groups(&[], &[], true, "AND", None);
+        let groups = build_filter_groups(&[], &[], true, "AND", None, None, None);
         let filters = groups[0]["filters"].as_array().unwrap();
         assert!(filters.iter().any(|f|
             f["propertyName"] == "num_of_published_video_project" && f["value"] == "0"
@@ -804,7 +840,7 @@ mod tests {
     #[test]
     fn filter_groups_creator_link_added_to_all_groups() {
         let tags = vec!["x".into(), "y".into()];
-        let groups = build_filter_groups(&tags, &[], false, "OR", Some("https://example.com"));
+        let groups = build_filter_groups(&tags, &[], false, "OR", Some("https://example.com"), None, None);
         assert_eq!(groups.len(), 2);
         for group in &groups {
             let filters = group["filters"].as_array().unwrap();
@@ -812,6 +848,37 @@ mod tests {
                 f["propertyName"] == "creator_main_link" && f["value"] == "https://example.com"
             ));
         }
+    }
+
+    #[test]
+    fn filter_groups_date_found_range() {
+        let groups = build_filter_groups(
+            &[],
+            &[],
+            false,
+            "AND",
+            None,
+            Some("2025-01-15"),
+            Some("2025-06-01"),
+        );
+        let filters = groups[0]["filters"].as_array().unwrap();
+        let gte = filters
+            .iter()
+            .find(|f| f["propertyName"] == "date_found" && f["operator"] == "GTE")
+            .unwrap();
+        assert_eq!(gte["value"], "2025-01-15");
+        let lte = filters
+            .iter()
+            .find(|f| f["propertyName"] == "date_found" && f["operator"] == "LTE")
+            .unwrap();
+        assert_eq!(lte["value"], "2025-06-01");
+    }
+
+    #[test]
+    fn filter_groups_ignores_bad_date_strings() {
+        let groups = build_filter_groups(&[], &[], false, "AND", None, Some("not-a-date"), Some(""));
+        let filters = groups[0]["filters"].as_array().unwrap();
+        assert!(!filters.iter().any(|f| f["propertyName"] == "date_found"));
     }
 
     // ── find_downloaded_file ─────────────────────────────────────────────
