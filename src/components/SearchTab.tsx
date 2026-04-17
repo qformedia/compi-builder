@@ -3,6 +3,11 @@ import { invoke } from "@tauri-apps/api/core";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
+  Popover,
+  PopoverTrigger,
+  PopoverContent,
+} from "@/components/ui/popover";
+import {
   Loader2,
   X,
   Cookie,
@@ -12,8 +17,11 @@ import {
   Globe,
   FolderOpen,
   CalendarRange,
+  ChevronLeft,
+  ChevronRight,
 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { cn } from "@/lib/utils";
 import { TagPicker } from "@/components/TagPicker";
 import { CreatorPicker } from "@/components/CreatorPicker";
 import { ClipCard, SCORE_COLORS } from "@/components/ClipCard";
@@ -633,21 +641,9 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
             <CalendarRange className="h-3.5 w-3.5" />
             Found
           </span>
-          <Input
-            type="date"
-            value={dateFoundFrom}
-            onChange={(e) => setDateFoundFrom(e.target.value)}
-            className="h-7 w-[9.75rem] shrink-0 px-1.5 py-0 text-[11px] cursor-pointer"
-            aria-label="Date found from"
-          />
+          <DateInput value={dateFoundFrom} onChange={setDateFoundFrom} aria-label="Date found from" />
           <span className="text-[10px] text-muted-foreground">–</span>
-          <Input
-            type="date"
-            value={dateFoundTo}
-            onChange={(e) => setDateFoundTo(e.target.value)}
-            className="h-7 w-[9.75rem] shrink-0 px-1.5 py-0 text-[11px] cursor-pointer"
-            aria-label="Date found to"
-          />
+          <DateInput value={dateFoundTo} onChange={setDateFoundTo} aria-label="Date found to" />
           {(dateFoundFrom || dateFoundTo) && (
             <button
               type="button"
@@ -869,5 +865,124 @@ function CreatorRow({
         ))}
       </div>
     </div>
+  );
+}
+
+// ── DatePickerInput: popover with mini calendar ──────────────────────────────
+
+const MONTH_NAMES = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+const DAY_HEADERS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"];
+
+function toIso(year: number, month: number, day: number) {
+  return `${year}-${String(month + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
+function MiniCalendar({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const today = new Date();
+  const sel = value ? new Date(value + "T00:00:00") : null;
+  const [viewYear, setViewYear] = useState(sel?.getFullYear() ?? today.getFullYear());
+  const [viewMonth, setViewMonth] = useState(sel?.getMonth() ?? today.getMonth());
+
+  const daysInMonth = new Date(viewYear, viewMonth + 1, 0).getDate();
+  const startPad = (new Date(viewYear, viewMonth, 1).getDay() + 6) % 7;
+
+  const cells: (number | null)[] = Array.from({ length: startPad }, () => null);
+  for (let d = 1; d <= daysInMonth; d++) cells.push(d);
+
+  const prevMonth = () => {
+    if (viewMonth === 0) { setViewMonth(11); setViewYear((y) => y - 1); }
+    else setViewMonth((m) => m - 1);
+  };
+  const nextMonth = () => {
+    if (viewMonth === 11) { setViewMonth(0); setViewYear((y) => y + 1); }
+    else setViewMonth((m) => m + 1);
+  };
+
+  return (
+    <div className="w-52">
+      <div className="flex items-center justify-between mb-1">
+        <Button variant="ghost" size="icon-xs" onClick={prevMonth}><ChevronLeft /></Button>
+        <span className="text-xs font-medium">{MONTH_NAMES[viewMonth]} {viewYear}</span>
+        <Button variant="ghost" size="icon-xs" onClick={nextMonth}><ChevronRight /></Button>
+      </div>
+      <div className="grid grid-cols-7 text-center text-[10px] text-muted-foreground mb-0.5">
+        {DAY_HEADERS.map((d) => <span key={d}>{d}</span>)}
+      </div>
+      <div className="grid grid-cols-7 place-items-center gap-y-0.5">
+        {cells.map((day, i) =>
+          day === null ? (
+            <span key={`p${i}`} />
+          ) : (
+            <button
+              key={day}
+              type="button"
+              onClick={() => onChange(toIso(viewYear, viewMonth, day))}
+              className={cn(
+                "h-6.5 w-6.5 rounded text-[11px] transition-colors cursor-pointer",
+                value === toIso(viewYear, viewMonth, day)
+                  ? "bg-primary text-primary-foreground"
+                  : viewYear === today.getFullYear() && viewMonth === today.getMonth() && day === today.getDate()
+                    ? "bg-accent font-semibold"
+                    : "hover:bg-muted",
+              )}
+            >
+              {day}
+            </button>
+          ),
+        )}
+      </div>
+      {value && (
+        <Button
+          variant="ghost"
+          size="xs"
+          className="mt-1.5 w-full text-muted-foreground"
+          onClick={() => onChange("")}
+        >
+          Clear
+        </Button>
+      )}
+    </div>
+  );
+}
+
+function DateInput({
+  value,
+  onChange,
+  "aria-label": ariaLabel,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  "aria-label"?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const label = value
+    ? new Date(value + "T00:00:00").toLocaleDateString(undefined, { day: "numeric", month: "short", year: "2-digit" })
+    : "any";
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          variant="outline"
+          size="xs"
+          className={cn(
+            "w-[6.5rem] justify-start font-normal",
+            !value && "text-muted-foreground",
+          )}
+          aria-label={ariaLabel}
+        >
+          {label}
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-auto p-2" align="start">
+        <MiniCalendar
+          value={value}
+          onChange={(v) => {
+            onChange(v);
+            setOpen(false);
+          }}
+        />
+      </PopoverContent>
+    </Popover>
   );
 }
