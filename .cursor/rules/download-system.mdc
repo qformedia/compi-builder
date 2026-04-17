@@ -71,7 +71,7 @@ Before finishing any change to download-related code, verify:
 
 ## Error Messages
 
-- All user-facing errors go through `friendly_download_error()`
+- User-facing yt-dlp outcomes go through `friendly_download_error()` (stderr **and** spawn / missing-binary errors from `run_ytdlp`)
 - Add new patterns there when handling new failure modes
 - Keep messages actionable (tell the user what to do, not what went wrong internally)
 - Platform-aware: don't mention `brew` on Windows

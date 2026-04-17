@@ -1,0 +1,30 @@
+---
+description: Pointer to the canonical URL compliance spec for Quantastic External Clips. Use when modifying URL ingestion, validation, or normalization for clip source URLs (Instagram, TikTok, YouTube, Pinterest, Bilibili, Douyin, Kuaishou, Xiaohongshu).
+globs: src/lib/url-compliance.ts, src/lib/url-compliance.test.ts, src/components/GeneralSearchTab.tsx, src/components/TagClipsTab.tsx
+alwaysApply: false
+---
+
+# URL Formatting (Quantastic / External Clips)
+
+The canonical normalization rules for External Clip source URLs are NOT defined in this repo. They live in the shared user-level Cursor skill:
+
+```
+~/.cursor/skills/url-formatting/
+├── SKILL.md      # workflow + when to apply
+├── spec.md       # source of truth — read before changing url-compliance.ts
+├── examples.md   # canonical input/output fixtures
+└── reference/    # TS reference impl + tests (mirror of this repo)
+```
+
+The same spec is shared across:
+
+- **CompiFlow** (this repo) — `src/lib/url-compliance.ts`
+- **Quantastic Chrome extension** — for adding clips from the browser
+- Any other Quantastic repo that ingests clip URLs
+
+## When changing URL handling
+
+1. Read `~/.cursor/skills/url-formatting/spec.md` first — never derive rules from this repo's code alone.
+2. If the rule itself needs to change, update `spec.md` in the skill repo first, then mirror the change here, then update other downstream repos.
+3. Tests in `src/lib/url-compliance.test.ts` must stay aligned with `~/.cursor/skills/url-formatting/examples.md`.
+4. Issue strings in `url-compliance.ts` are user-facing and must match the spec verbatim (translation happens at the UI layer, not here).

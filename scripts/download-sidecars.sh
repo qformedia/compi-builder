@@ -20,6 +20,11 @@ echo "  Downloading yt-dlp for macOS..."
 curl -fSL "$YT_DLP_BASE/yt-dlp_macos" -o "$BIN_DIR/yt-dlp-aarch64-apple-darwin"
 cp "$BIN_DIR/yt-dlp-aarch64-apple-darwin" "$BIN_DIR/yt-dlp-x86_64-apple-darwin"
 chmod +x "$BIN_DIR/yt-dlp-aarch64-apple-darwin" "$BIN_DIR/yt-dlp-x86_64-apple-darwin"
+if command -v codesign >/dev/null 2>&1; then
+  codesign --sign - --force --timestamp=none \
+    "$BIN_DIR/yt-dlp-aarch64-apple-darwin" \
+    "$BIN_DIR/yt-dlp-x86_64-apple-darwin"
+fi
 
 # ── Windows x64 ─────────────────────────────────────────────────────────────
 echo "  Downloading yt-dlp for Windows..."

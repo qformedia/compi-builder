@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 use tauri::{AppHandle, Emitter};
+#[cfg(target_os = "macos")]
+use tauri::Manager;
 use tauri_plugin_shell::ShellExt;
 use once_cell::sync::Lazy;
 use tokio::sync::Semaphore;
@@ -1661,6 +1663,20 @@ fn apply_windows_cookie_workaround(args: &mut Vec<String>) {
 use helpers::augmented_path;
 use helpers::find_system_ytdlp;
 
+#[cfg(target_os = "macos")]
+static STRIP_YTDLP_QUARANTINE: std::sync::Once = std::sync::Once::new();
+
+/// macOS: strip quarantine from the bundled sidecar once per process so Gatekeeper allows it to run.
+#[cfg(target_os = "macos")]
+fn ensure_ytdlp_sidecar_unquarantined(app: &AppHandle) {
+    STRIP_YTDLP_QUARANTINE.call_once(|| {
+        if let Ok(dir) = app.path().resource_dir() {
+            let path = dir.join("binaries").join(helpers::ytdlp_sidecar_filename());
+            helpers::unquarantine_path(&path);
+        }
+    });
+}
+
 /// Run yt-dlp with args, trying bundled sidecar first then system PATH as fallback
 async fn run_ytdlp(app: &AppHandle, args: &[String]) -> Result<YtDlpOutput, String> {
     #[allow(unused_mut)]
@@ -1668,6 +1684,9 @@ async fn run_ytdlp(app: &AppHandle, args: &[String]) -> Result<YtDlpOutput, Stri
 
     #[cfg(target_os = "windows")]
     apply_windows_cookie_workaround(&mut args);
+
+    #[cfg(target_os = "macos")]
+    ensure_ytdlp_sidecar_unquarantined(app);
 
     // Try bundled sidecar first.
     // yt-dlp may spawn helper runtimes (e.g. deno for YouTube's n-challenge),
@@ -1697,8 +1716,21 @@ async fn run_ytdlp(app: &AppHandle, args: &[String]) -> Result<YtDlpOutput, Stri
     // Fallback: system-installed yt-dlp (works in dev mode).
     // macOS .app bundles don't inherit the user's shell PATH, so we probe
     // well-known Homebrew locations before falling back to bare PATH lookup.
-    let ytdlp_path = find_system_ytdlp()
-        .ok_or_else(|| "yt-dlp is not installed. Install it with: brew install yt-dlp".to_string())?;
+    let ytdlp_path = find_system_ytdlp().ok_or_else(|| {
+        #[cfg(target_os = "windows")]
+        {
+            "yt-dlp is not installed. Install it from https://github.com/yt-dlp/yt-dlp/releases"
+                .to_string()
+        }
+        #[cfg(target_os = "macos")]
+        {
+            "yt-dlp is not installed. Install it with: brew install yt-dlp".to_string()
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            "yt-dlp is not installed.".to_string()
+        }
+    })?;
 
     let mut cmd = tokio::process::Command::new(&ytdlp_path);
     cmd.args(&args);
@@ -1746,7 +1778,9 @@ async fn ytdlp_thumbnail_with(app: &AppHandle, url: &str, cookies_browser: &Opti
 
     args.push(url.to_string());
 
-    let output = run_ytdlp(app, &args).await?;
+    let output = run_ytdlp(app, &args)
+        .await
+        .map_err(|e| friendly_download_error(&e, url, cookies_browser))?;
 
     if !output.success {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -2326,7 +2360,7 @@ async fn run_ytdlp_with_cookie_cascade(
             let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
             Err(friendly_download_error(&stderr, url, cookies_browser))
         }
-        Err(msg) => Err(msg),
+        Err(msg) => Err(friendly_download_error(&msg, url, cookies_browser)),
     }
 }
 

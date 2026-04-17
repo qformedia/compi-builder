@@ -277,6 +277,35 @@ pub(crate) fn friendly_download_error(stderr: &str, url: &str, cookies_browser: 
     let platform = detect_platform(url);
     let browser = cookies_browser.as_deref().unwrap_or("your browser");
 
+    // Bundled sidecar failed and no system yt-dlp — usually macOS quarantine / Gatekeeper.
+    #[cfg(target_os = "macos")]
+    if lower.contains("yt-dlp is not installed") {
+        return concat!(
+            "CompiFlow's bundled video downloader could not run. ",
+            "This is often caused by macOS security on first launch. ",
+            "Quit CompiFlow (Cmd+Q), then in Finder right-click the CompiFlow app → Open → confirm. ",
+            "Retry the download. If it still fails, install yt-dlp with Homebrew: brew install yt-dlp"
+        )
+        .into();
+    }
+    #[cfg(target_os = "windows")]
+    if lower.contains("yt-dlp is not installed") {
+        return concat!(
+            "CompiFlow could not run its bundled video downloader. ",
+            "Reinstall CompiFlow from the official installer, or install yt-dlp from ",
+            "https://github.com/yt-dlp/yt-dlp/releases and try again."
+        )
+        .into();
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    if lower.contains("yt-dlp is not installed") {
+        return concat!(
+            "CompiFlow could not run the bundled yt-dlp downloader. ",
+            "Install yt-dlp on your system and ensure it is on PATH, then retry."
+        )
+        .into();
+    }
+
     if lower.contains("[douyin]") && lower.contains("fresh cookies") {
         return "Douyin downloads are temporarily broken in yt-dlp (known bug). Check for yt-dlp updates.".into();
     }
@@ -376,6 +405,30 @@ pub(crate) fn find_system_ytdlp() -> Option<std::path::PathBuf> {
     }
 
     which::which("yt-dlp").ok()
+}
+
+/// Bundled yt-dlp sidecar filename inside `Resources/binaries/` (Tauri `externalBin` naming).
+#[cfg(target_os = "macos")]
+pub(crate) fn ytdlp_sidecar_filename() -> &'static str {
+    match std::env::consts::ARCH {
+        "aarch64" => "yt-dlp-aarch64-apple-darwin",
+        "x86_64" => "yt-dlp-x86_64-apple-darwin",
+        _ => "yt-dlp-aarch64-apple-darwin",
+    }
+}
+
+/// Remove macOS download quarantine from a file so Gatekeeper allows execution.
+/// Best-effort: no-op if `xattr` is missing or the attribute is not set.
+#[cfg(target_os = "macos")]
+pub(crate) fn unquarantine_path(path: &std::path::Path) {
+    use std::process::Command;
+    if !path.exists() {
+        return;
+    }
+    let _ = Command::new("xattr")
+        .args(["-d", "com.apple.quarantine"])
+        .arg(path)
+        .output();
 }
 
 // ── General Search Helpers ───────────────────────────────────────────────────
@@ -763,6 +816,36 @@ mod tests {
             &None,
         );
         assert_eq!(msg, "Some unknown error happened");
+    }
+
+    #[test]
+    fn friendly_error_ytdlp_not_installed_is_actionable() {
+        let raw = "yt-dlp is not installed. Install it with: brew install yt-dlp";
+        let msg = friendly_download_error(raw, "https://youtube.com/watch?v=x", &None);
+        assert_ne!(msg, raw.trim(), "expected friendlier message than raw stderr");
+        #[cfg(target_os = "macos")]
+        {
+            assert!(msg.contains("CompiFlow"), "got: {msg}");
+            assert!(msg.contains("Finder") || msg.contains("macOS"), "got: {msg}");
+        }
+        #[cfg(target_os = "windows")]
+        {
+            assert!(msg.contains("Reinstall") || msg.contains("github.com"), "got: {msg}");
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            assert!(msg.contains("CompiFlow") || msg.contains("yt-dlp"), "got: {msg}");
+        }
+    }
+
+    #[cfg(all(test, target_os = "macos"))]
+    #[test]
+    fn unquarantine_path_does_not_panic_on_plain_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("dummy_bin");
+        fs::write(&p, b"x").unwrap();
+        unquarantine_path(&p);
+        assert!(p.exists());
     }
 
     // ── format_selection_for_url ─────────────────────────────────────────

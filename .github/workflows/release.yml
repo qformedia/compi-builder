@@ -105,6 +105,8 @@ jobs:
           curl -fSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos \
             -o src-tauri/binaries/yt-dlp-aarch64-apple-darwin
           chmod +x src-tauri/binaries/yt-dlp-aarch64-apple-darwin
+          codesign --sign - --force --timestamp=none \
+            src-tauri/binaries/yt-dlp-aarch64-apple-darwin
 
       - name: Download yt-dlp sidecar (Windows)
         if: runner.os == 'Windows'

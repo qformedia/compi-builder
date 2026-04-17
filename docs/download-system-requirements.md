@@ -154,8 +154,8 @@ This logic lives in `helpers::format_selection_for_url()` and is tested.
 | Fallback | Last non-empty stderr line |
 
 ### Platform-specific errors
-- The fallback yt-dlp error message mentions `brew install yt-dlp`.
-  On Windows this should say something like `Install yt-dlp from https://github.com/yt-dlp/yt-dlp`.
+- When **both** the bundled sidecar and system fallback fail, `friendly_download_error()` maps the internal `"yt-dlp is not installed…"` string to an actionable message (macOS: Gatekeeper / first-open guidance + optional Homebrew fallback; Windows: reinstall or GitHub releases link).
+- macOS builds also strip `com.apple.quarantine` from the bundled sidecar once per process and adhoc-`codesign` the sidecar in CI to reduce Gatekeeper blocking.
 
 ## 10. Platform-Specific Considerations
 
