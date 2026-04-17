@@ -51,15 +51,17 @@ Same diagnosis approach as Step 1. Common frontend test issues:
 - Tests that query by `title` or text content break when labels change. Prefer querying by `data-testid` for structural elements and `title` for interactive buttons (since `title` doubles as the tooltip).
 - Tests that check exact element counts break when layout changes add/remove wrappers. Prefer semantic queries (`getByRole`, `getByTitle`) over structural ones.
 
-## Step 3 — Bump version in all three files
+## Step 3 — Decide and bump the version in all three files
+
+First, decide the next version number by following the `release-version-bump` skill. The default is a PATCH bump (third number); only escalate to MINOR for notable feature releases, and only escalate to MAJOR when the user explicitly asks.
+
+Then update the version in all three files — they must match exactly:
 
 | File | Field |
 |------|-------|
 | `src-tauri/tauri.conf.json` | `"version"` |
 | `package.json` | `"version"` |
 | `src-tauri/Cargo.toml` | `version` |
-
-All three must match exactly.
 
 ## Step 4 — Commit, tag, push
 
