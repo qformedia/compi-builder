@@ -137,6 +137,21 @@ export async function searchVideoProjects(
   }));
 }
 
+/** Look up an External Clip by its source URL. Returns the parsed clip if HubSpot has a match. */
+export async function findClipByLink(
+  token: string,
+  link: string,
+): Promise<{ found: boolean; clip?: Clip }> {
+  const data = await invoke<{
+    found: boolean;
+    id?: string | null;
+    result?: { id: string; properties: Record<string, string | null> } | null;
+  }>("find_clip_by_link", { token, link });
+
+  if (!data.found || !data.result) return { found: false };
+  return { found: true, clip: parseClip(data.result) };
+}
+
 /** Fetch all External Clips associated with a Video Project */
 export async function fetchVideoProjectClips(
   token: string,

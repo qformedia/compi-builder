@@ -19,6 +19,9 @@ import {
   CalendarRange,
   ChevronLeft,
   ChevronRight,
+  Link as LinkIcon,
+  Check,
+  AlertCircle,
 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { cn } from "@/lib/utils";
@@ -31,8 +34,10 @@ import {
   searchCreatorClips,
   searchVideoProjects,
   fetchVideoProjectClips,
+  findClipByLink,
   DEFAULT_CREATOR_CLIP_CAP,
 } from "@/lib/hubspot";
+import { checkUrlCompliance } from "@/lib/url-compliance";
 import type { CreatorOption, VideoProjectSummary } from "@/lib/hubspot";
 import { fetchTagOptions } from "@/lib/tags";
 import type { TagOption } from "@/lib/tags";
@@ -263,6 +268,9 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
   const [activePreviewId, setActivePreviewId] = useState<string | null>(null);
   const [cookieWarning, setCookieWarning] = useState<string | null>(null);
   const [initialClipsCapReached, setInitialClipsCapReached] = useState(false);
+
+  // Clip previewed via the "EC by Link" popover (one at a time).
+  const [linkPreviewClip, setLinkPreviewClip] = useState<Clip | null>(null);
 
   // Per-creator fully-loaded clips
   const [creatorClipsMap, setCreatorClipsMap] = useState<Map<string, Clip[]>>(new Map());
@@ -637,6 +645,13 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
 
           <span className="mx-2 text-muted-foreground/30">|</span>
 
+          <AddClipByLink
+            token={settings.hubspotToken}
+            onPreviewClip={setLinkPreviewClip}
+          />
+
+          <span className="mx-2 text-muted-foreground/30">|</span>
+
           <span className="flex items-center gap-1 text-[11px] text-muted-foreground shrink-0" title="Filter by date found in HubSpot">
             <CalendarRange className="h-3.5 w-3.5" />
             Found
@@ -687,6 +702,23 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
       {/* Results: horizontal scroll rows per creator */}
       <div className="flex-1 overflow-y-auto">
         <div className="flex flex-col gap-5 pb-4">
+          {linkPreviewClip && (
+            <LinkPreviewRow
+              clip={linkPreviewClip}
+              onDismiss={() => setLinkPreviewClip(null)}
+              thumbCache={thumbCache}
+              settings={settings}
+              selectedTags={selectedTags}
+              activePreviewId={activePreviewId}
+              setActivePreviewId={setActivePreviewId}
+              project={project}
+              isInProject={isInProject}
+              addClip={addClip}
+              removeClip={removeClip}
+              onCookieError={setCookieWarning}
+              thumbRetryKey={thumbRetryKey}
+            />
+          )}
           {creatorOrder.map((creator) => (
             <CreatorRow
               key={creator}
@@ -863,6 +895,211 @@ function CreatorRow({
             preferHubSpotPreview={settings.preferHubSpotPreview}
           />
         ))}
+      </div>
+    </div>
+  );
+}
+
+// ── AddClipByLink: lookup an External Clip by URL and add it to the project ──
+
+type LinkLookupState =
+  | { kind: "idle" }
+  | { kind: "checking" }
+  | { kind: "invalid"; message: string }
+  | { kind: "found"; clip: Clip }
+  | { kind: "not-found" };
+
+interface AddClipByLinkProps {
+  token: string;
+  onPreviewClip: (clip: Clip) => void;
+}
+
+function AddClipByLink({ token, onPreviewClip }: AddClipByLinkProps) {
+  const [open, setOpen] = useState(false);
+  const [input, setInput] = useState("");
+  const [state, setState] = useState<LinkLookupState>({ kind: "idle" });
+
+  // Debounce: normalize via url-compliance, then look up in HubSpot.
+  useEffect(() => {
+    const trimmed = input.trim();
+    if (!trimmed) {
+      setState({ kind: "idle" });
+      return;
+    }
+    setState({ kind: "checking" });
+    let cancelled = false;
+    const timer = setTimeout(async () => {
+      const compliance = checkUrlCompliance(trimmed);
+      if (compliance.status === "invalid") {
+        if (!cancelled) {
+          setState({ kind: "invalid", message: compliance.issues[0] ?? "invalid URL" });
+        }
+        return;
+      }
+      try {
+        const res = await findClipByLink(token, compliance.fixedUrl);
+        if (cancelled) return;
+        setState(res.found && res.clip ? { kind: "found", clip: res.clip } : { kind: "not-found" });
+      } catch (e) {
+        if (!cancelled) setState({ kind: "invalid", message: e instanceof Error ? e.message : String(e) });
+      }
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [input, token]);
+
+  const handleView = () => {
+    if (state.kind !== "found") return;
+    onPreviewClip(state.clip);
+    setInput("");
+    setState({ kind: "idle" });
+    setOpen(false);
+  };
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button
+          variant="outline"
+          size="xs"
+          className="font-normal"
+          title="Look up an existing External Clip by its source URL and preview it"
+        >
+          <LinkIcon className="mr-1 h-3.5 w-3.5" />
+          EC by Link
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-96 p-3" align="end">
+        <div className="flex flex-col gap-2">
+          <label className="text-xs font-medium text-muted-foreground">
+            Paste an External Clip URL — we'll verify it exists in HubSpot and show a preview.
+          </label>
+          <div className="flex gap-2">
+            <Input
+              autoFocus
+              placeholder="https://www.instagram.com/reel/..."
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && state.kind === "found") handleView();
+              }}
+            />
+            <Button size="sm" onClick={handleView} disabled={state.kind !== "found"}>
+              View
+            </Button>
+          </div>
+          <LinkLookupStatus state={state} />
+        </div>
+      </PopoverContent>
+    </Popover>
+  );
+}
+
+function LinkLookupStatus({ state }: { state: LinkLookupState }) {
+  if (state.kind === "idle") return null;
+  if (state.kind === "checking") {
+    return (
+      <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" />
+        Checking HubSpot…
+      </p>
+    );
+  }
+  if (state.kind === "invalid") {
+    return (
+      <p className="flex items-start gap-1.5 text-xs text-destructive">
+        <AlertCircle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+        {state.message}
+      </p>
+    );
+  }
+  if (state.kind === "not-found") {
+    return (
+      <p className="flex items-start gap-1.5 text-xs text-destructive">
+        <AlertCircle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+        Not in HubSpot — verify the link or create the clip via General Search.
+      </p>
+    );
+  }
+  return (
+    <p className="flex items-center gap-1.5 text-xs text-green-600 dark:text-green-400">
+      <Check className="h-3.5 w-3.5" />
+      Found — {state.clip.creatorName}
+      {state.clip.score ? ` · ${state.clip.score}` : ""}
+    </p>
+  );
+}
+
+// ── LinkPreviewRow: shows a single clip looked up by URL, mirrors CreatorRow ──
+
+interface LinkPreviewRowProps {
+  clip: Clip;
+  onDismiss: () => void;
+  thumbCache: React.RefObject<Map<string, string | null>>;
+  settings: AppSettings;
+  selectedTags: string[];
+  activePreviewId: string | null;
+  setActivePreviewId: (id: string | null) => void;
+  project: Project | null;
+  isInProject: (clipId: string) => boolean;
+  addClip: (clip: Clip) => void;
+  removeClip: (hubspotId: string) => void;
+  onCookieError: (msg: string) => void;
+  thumbRetryKey: number;
+}
+
+function LinkPreviewRow({
+  clip,
+  onDismiss,
+  thumbCache,
+  settings,
+  selectedTags,
+  activePreviewId,
+  setActivePreviewId,
+  project,
+  isInProject,
+  addClip,
+  removeClip,
+  onCookieError,
+  thumbRetryKey,
+}: LinkPreviewRowProps) {
+  const inProject = isInProject(clip.id);
+  return (
+    <div>
+      <h3 className="mb-2 flex items-center gap-1.5 text-sm font-semibold">
+        <LinkIcon className="h-3.5 w-3.5 text-muted-foreground" />
+        From link
+        <span className="font-normal text-muted-foreground">· {clip.creatorName}</span>
+        <button
+          onClick={onDismiss}
+          className="ml-1 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
+          title="Dismiss preview"
+        >
+          <X className="h-3.5 w-3.5" />
+        </button>
+      </h3>
+      <div className="flex gap-3 overflow-x-auto pb-2">
+        <ClipCard
+          clip={clip}
+          thumbCache={thumbCache}
+          cookiesBrowser={settings.cookiesBrowser}
+          cookiesFile={settings.cookiesFile}
+          evil0ctalApiUrl={settings.evil0ctalApiUrl}
+          onCookieError={onCookieError}
+          isActive={activePreviewId === clip.id}
+          onTogglePreview={() =>
+            setActivePreviewId(activePreviewId === clip.id ? null : clip.id)
+          }
+          inProject={inProject}
+          hasProject={!!project}
+          onToggleProject={() => (inProject ? removeClip(clip.id) : addClip(clip))}
+          hubspotToken={settings.hubspotToken}
+          searchTags={selectedTags}
+          thumbRetryKey={thumbRetryKey}
+          preferHubSpotPreview={settings.preferHubSpotPreview}
+        />
       </div>
     </div>
   );

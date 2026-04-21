@@ -2991,6 +2991,8 @@ async fn find_clip_by_link(
         EXTERNAL_CLIPS_OBJECT_ID
     );
 
+    let props: Vec<serde_json::Value> = CLIP_PROPERTIES.iter().map(|p| serde_json::json!(p)).collect();
+
     let body = serde_json::json!({
         "filterGroups": [{
             "filters": [{
@@ -2999,7 +3001,7 @@ async fn find_clip_by_link(
                 "value": link
             }]
         }],
-        "properties": ["link"],
+        "properties": props,
         "limit": 1
     });
 
@@ -3020,16 +3022,21 @@ async fn find_clip_by_link(
     let data: serde_json::Value = res.json().await
         .map_err(|e| format!("Failed to parse search response: {e}"))?;
 
-    let found = data.get("results")
+    let result = data
+        .get("results")
         .and_then(|r| r.as_array())
         .and_then(|arr| arr.first())
+        .cloned();
+    let id = result
+        .as_ref()
         .and_then(|clip| clip.get("id"))
         .and_then(|id| id.as_str())
         .map(String::from);
 
     Ok(serde_json::json!({
-        "found": found.is_some(),
-        "id": found,
+        "found": id.is_some(),
+        "id": id,
+        "result": result,
     }))
 }
 
