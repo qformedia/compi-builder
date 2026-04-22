@@ -3166,7 +3166,7 @@ async fn search_untagged_clips(
         "properties": [
             "link", "tags", "creator_name", "creator_status", "creator_main_link",
             "creator_id", "date_found", "createdate", "social_media_caption",
-            "social_media_tags", "fetched_social_thumbnail", "score", "hubspot_owner_id",
+            "social_media_tags", "fetched_social_thumbnail", "original_clip", "score", "hubspot_owner_id",
             "likes", "plays", "comments", "shares"
         ],
         "sorts": [
@@ -3230,7 +3230,7 @@ async fn search_clips_missing_metrics(
         "properties": [
             "link", "creator_status", "date_found",
             "social_media_caption", "likes", "plays",
-            "fetched_social_thumbnail", "link_not_working_anymore"
+            "fetched_social_thumbnail", "link_not_working_anymore", "original_clip"
         ],
         "sorts": [
             { "propertyName": "date_found", "direction": "DESCENDING" }

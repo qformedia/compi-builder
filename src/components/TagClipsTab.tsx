@@ -24,7 +24,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import { TagPicker } from "@/components/TagPicker";
-import { getEmbedUrl } from "@/components/ClipCard";
+import { getEmbedUrl, HubSpotVideoPlayer } from "@/components/ClipCard";
 import { resolveTagLabel } from "@/lib/tags";
 import { getPersistedThumb, persistThumb } from "@/lib/thumb-cache";
 import {
@@ -69,6 +69,8 @@ interface UntaggedClip {
   shares: string | null;
   metricStatus: "idle" | "fetching" | "done" | "failed";
   platform: "instagram" | "tiktok" | "other";
+  /** HubSpot CDN URL for the original video; when set, in-app preview prefers it over social embeds */
+  originalClip?: string;
   pendingTags: string[];
   pendingScore: string;
   thumbLoading: boolean;
@@ -438,6 +440,7 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
         comments: p.comments ?? null,
         shares: p.shares ?? null,
         platform: detectPlatform(link),
+        originalClip: p.original_clip ?? undefined,
         metricStatus: p.social_media_caption ? "done" as const : "idle" as const,
         pendingTags: [],
         pendingScore: "",
@@ -697,11 +700,18 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
 
   const previewClip = previewId ? clips.find((c) => c.id === previewId) : null;
   const previewEmbed = previewClip ? getEmbedUrl(previewClip.link) : null;
+  const preferHubSpotPreview = settings.preferHubSpotPreview !== false;
+  const useHubSpotInPreview = preferHubSpotPreview && Boolean(previewClip?.originalClip);
+  const showLeftPreviewPanel =
+    !!previewClip &&
+    (preferHubSpotPreview
+      ? Boolean(previewClip.originalClip || previewEmbed)
+      : Boolean(previewEmbed));
 
   return (
     <div className="flex h-full overflow-hidden">
-      {/* Left: video player panel */}
-      {previewClip && previewEmbed && (
+      {/* Left: video player panel — HubSpot MP4 when available (matches ClipCard + Search tab) */}
+      {showLeftPreviewPanel && previewClip && (
         <div className="w-[380px] flex-shrink-0 border-r flex flex-col overflow-hidden">
           <div className="flex items-center justify-between px-3 py-2 border-b flex-shrink-0">
             <div className="flex items-center gap-2 min-w-0">
@@ -714,14 +724,24 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
               Close
             </Button>
           </div>
-          <div className="flex-1 min-h-0">
-            <iframe
-              key={previewClip.id}
-              src={previewEmbed}
-              className="w-full h-full border-0"
-              allow="autoplay; encrypted-media"
-              allowFullScreen
-            />
+          <div className="relative flex-1 min-h-0 w-full">
+            {useHubSpotInPreview && previewClip.originalClip ? (
+              <HubSpotVideoPlayer
+                key={previewClip.id}
+                src={previewClip.originalClip}
+                onClose={() => setPreviewId(null)}
+              />
+            ) : (
+              previewEmbed && (
+                <iframe
+                  key={previewClip.id}
+                  src={previewEmbed}
+                  className="w-full h-full border-0"
+                  allow="autoplay; encrypted-media"
+                  allowFullScreen
+                />
+              )
+            )}
           </div>
           {previewClip.caption && (
             <div className="px-3 py-2 border-t max-h-24 overflow-auto flex-shrink-0">
@@ -884,6 +904,9 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
               {clips.map((clip) => {
                 const isPreviewing = previewId === clip.id;
                 const embedUrl = getEmbedUrl(clip.link);
+                const canOpenPreview = preferHubSpotPreview
+                  ? Boolean(clip.originalClip || embedUrl)
+                  : Boolean(embedUrl);
                 const isClearing = clip.pendingScore === "_clear";
                 const scoreChanged = isClearing || (clip.pendingScore !== "" && clip.pendingScore !== (clip.score ?? ""));
                 const hasPending = clip.pendingTags.length > 0 || scoreChanged;
@@ -906,7 +929,7 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
                         ) : (
                           <ImageIcon className="h-3 w-3 text-muted-foreground/40" />
                         )}
-                        {embedUrl && (
+                        {canOpenPreview && (
                           <button
                             onClick={() => setPreviewId(isPreviewing ? null : clip.id)}
                             className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 hover:opacity-100 transition-opacity cursor-pointer"

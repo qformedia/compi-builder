@@ -126,7 +126,7 @@ export function ClipCard({
   searchTags = [],
   compact = false,
   thumbRetryKey = 0,
-  preferHubSpotPreview = false,
+  preferHubSpotPreview = true,
 }: ClipCardProps) {
   const [thumb, setThumb] = useState<string | null>(
     thumbCache.current?.get(clip.link) ?? null,
@@ -714,7 +714,7 @@ export function ClipCard({
 
 // ── Compact HubSpot video player (fits in the small card thumbnail) ──────────
 
-function HubSpotVideoPlayer({ src, onClose }: { src: string; onClose: () => void }) {
+export function HubSpotVideoPlayer({ src, onClose }: { src: string; onClose: () => void }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [paused, setPaused] = useState(false);
   const [progress, setProgress] = useState(0);

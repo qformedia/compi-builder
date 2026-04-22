@@ -99,6 +99,7 @@ function toCardData(clip: ProjectClip): ClipCardData {
     fetchedThumbnail: clip.fetchedThumbnail,
     editingNotes: clip.editingNotes,
     localFile: clip.localFile,
+    originalClip: clip.originalClip,
   };
 }
 
