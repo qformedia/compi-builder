@@ -46,6 +46,7 @@ import {
   ChevronDown,
   ChevronRight,
   History,
+  RefreshCw,
 } from "lucide-react";
 import type { AppSettings } from "@/types";
 
@@ -128,6 +129,8 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
     id: string;
     link: string;
     creatorName: string | null;
+    /** HubSpot object creation time — primary sort key for "latest" */
+    createDate: string | null;
     dateFound: string | null;
     thumbnail: string | null;
     caption: string | null;
@@ -158,8 +161,13 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
     }
   }, []);
 
-  useEffect(() => {
-    if (!token) return;
+  const loadLatestClips = useCallback(async () => {
+    if (!token) {
+      setLatestInsta(null);
+      setLatestTiktok(null);
+      setLatestLoading(false);
+      return;
+    }
     setLatestLoading(true);
 
     const parseClip = (data: { results?: Array<{ id: string; properties: Record<string, string | null> }> }): LatestClip | null => {
@@ -170,6 +178,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
         id: r.id,
         link: p.link ?? "",
         creatorName: p.creator_name ?? null,
+        createDate: p.createdate ?? null,
         dateFound: p.date_found ?? null,
         thumbnail: p.fetched_social_thumbnail ?? null,
         caption: p.social_media_caption ?? null,
@@ -178,19 +187,25 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
       };
     };
 
-    Promise.all([
-      invoke<{ results?: Array<{ id: string; properties: Record<string, string | null> }> }>("search_latest_clips_by_platform", {
-        token, foundIn: "General Search", linkContains: "instagram",
-      }).then(parseClip).catch(() => null),
-      invoke<{ results?: Array<{ id: string; properties: Record<string, string | null> }> }>("search_latest_clips_by_platform", {
-        token, foundIn: "General Search", linkContains: "tiktok",
-      }).then(parseClip).catch(() => null),
-    ]).then(([insta, tiktok]) => {
+    try {
+      const [insta, tiktok] = await Promise.all([
+        invoke<{ results?: Array<{ id: string; properties: Record<string, string | null> }> }>("search_latest_clips_by_platform", {
+          token, foundIn: "General Search", linkContains: "instagram",
+        }).then(parseClip).catch(() => null),
+        invoke<{ results?: Array<{ id: string; properties: Record<string, string | null> }> }>("search_latest_clips_by_platform", {
+          token, foundIn: "General Search", linkContains: "tiktok",
+        }).then(parseClip).catch(() => null),
+      ]);
       setLatestInsta(insta);
       setLatestTiktok(tiktok);
+    } finally {
       setLatestLoading(false);
-    });
+    }
   }, [token]);
+
+  useEffect(() => {
+    void loadLatestClips();
+  }, [loadLatestClips]);
 
   const continueAfterCompliance = useCallback(async (urlText: string) => {
     const parsed: ParsedEntry[] = await invoke("parse_clip_urls", { raw: urlText });
@@ -763,6 +778,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
       });
       setSessionHistory(getSessions());
     }
+    void loadLatestClips();
   };
 
   const handleReset = () => {
@@ -813,7 +829,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
   return (
     <div className="flex flex-col h-full p-4 gap-4">
       {phase === "input" && (
-        <div className="flex flex-col gap-4 max-w-2xl mx-auto w-full pt-8 overflow-y-auto flex-1 min-h-0">
+        <div className="flex flex-col gap-4 w-full px-6 pt-8 overflow-y-auto flex-1 min-h-0">
           <div className="space-y-3">
             <h2 className="text-lg font-semibold">Create Clips</h2>
             <p className="text-sm text-muted-foreground">
@@ -880,7 +896,24 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
           {/* Latest ingested clips */}
           {(latestInsta || latestTiktok || latestLoading) && (
             <div className="mt-4 border-t pt-4 space-y-2">
-              <h3 className="text-sm font-medium">Latest General Search Clips</h3>
+              <div className="flex items-center justify-between gap-2">
+                <h3 className="text-sm font-medium">Latest General Search Clips</h3>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 w-7 p-0 cursor-pointer"
+                  onClick={() => void loadLatestClips()}
+                  disabled={latestLoading}
+                  title="Refresh latest clips"
+                >
+                  {latestLoading ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <RefreshCw className="h-3.5 w-3.5" />
+                  )}
+                </Button>
+              </div>
               {latestLoading ? (
                 <div className="flex items-center gap-2 text-xs text-muted-foreground">
                   <Loader2 className="h-3 w-3 animate-spin" /> Loading...
@@ -912,9 +945,9 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
                           {clip.creatorName && (
                             <p className="text-[11px] text-muted-foreground truncate">{clip.creatorName}</p>
                           )}
-                          {clip.dateFound && (
+                          {(clip.createDate ?? clip.dateFound) && (
                             <p className="text-[10px] text-muted-foreground">
-                              {new Date(clip.dateFound).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
+                              {new Date(clip.createDate ?? clip.dateFound ?? "").toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
                             </p>
                           )}
                           <div className="flex gap-2 text-[10px] text-muted-foreground">
