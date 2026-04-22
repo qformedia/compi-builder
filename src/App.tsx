@@ -220,6 +220,12 @@ function App() {
       if (!prev) return;
       const clips = prev.clips.map((c) => {
         if (c.hubspotId !== dp.clipId) return c;
+        // Ignore stale events from an in-flight download once the clip is
+        // already locally complete (e.g. user manually imported a file while
+        // an auto-download was still running in the background).
+        const isComplete = c.downloadStatus === "complete" && !!c.localFile;
+        const isDowngrade = dp.status === "downloading" || dp.status === "failed";
+        if (isComplete && isDowngrade) return c;
         return {
           ...c,
           downloadStatus: dp.status as ProjectClip["downloadStatus"],
@@ -254,7 +260,9 @@ function App() {
   useEffect(() => {
     if (!project) return;
     const pending = project.clips.filter(
-      (c) => c.downloadStatus === "pending" || c.downloadStatus === "failed",
+      (c) =>
+        (c.downloadStatus === "pending" || c.downloadStatus === "failed") &&
+        !c.localFile,
     );
     if (pending.length === 0) return;
 
