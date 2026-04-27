@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { Clock, Film, CheckCircle, Loader2, Sparkles, RefreshCw, X, RulerDimensionLine, AlertTriangle, Search, ListOrdered, MessageSquarePlus, Globe, Tags } from "lucide-react";
+import { Clock, Film, CheckCircle, Loader2, Sparkles, RefreshCw, X, RulerDimensionLine, AlertTriangle, Search, ListOrdered, MessageSquarePlus, Globe, Tags, ShieldAlert, ArrowRight } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { HubSpotIcon } from "@/components/ClipCard";
 import { fetchVideoProjectClips } from "@/lib/hubspot";
@@ -24,6 +24,7 @@ import { SearchTab } from "@/components/SearchTab";
 import { ArrangeTab, decodeEditingNotes } from "@/components/ArrangeTab";
 import { GeneralSearchTab } from "@/components/GeneralSearchTab";
 import { DataIntegrityPage } from "@/components/DataIntegrityPage";
+import { IntegrityProvider, useIntegrity } from "@/lib/data-integrity/use-data-integrity";
 import { TagClipsTab } from "@/components/TagClipsTab";
 import { fetchTagOptions, invalidateTagCache } from "@/lib/tags";
 import type { TagOption } from "@/lib/tags";
@@ -77,6 +78,49 @@ const DEFAULT_SETTINGS: AppSettings = {
   ownerEmail: "",
   ownerId: "",
 };
+
+function buildIntegrityAlertText(c: number, w: number): string {
+  if (c > 0 && w > 0) {
+    return `${c} critical and ${w} warning${w === 1 ? "" : "s"} need fixing`;
+  }
+  if (c > 0) {
+    return c === 1 ? "1 critical issue needs fixing" : `${c} critical issues need fixing`;
+  }
+  if (w === 1) {
+    return "1 warning needs fixing";
+  }
+  return `${w} warnings need fixing`;
+}
+
+function IntegrityAlertBanner({ onNavigate }: { onNavigate: () => void }) {
+  const { hasLoadedOnce, summary } = useIntegrity();
+  const c = summary.critical;
+  const w = summary.warning;
+  if (!hasLoadedOnce || c + w <= 0) {
+    return null;
+  }
+  const isCritical = c > 0;
+  return (
+    <button
+      type="button"
+      onClick={onNavigate}
+      className={`flex w-full cursor-pointer items-center justify-between gap-3 border-b px-4 py-2 text-left text-sm font-medium ${
+        isCritical
+          ? "bg-gradient-to-r from-red-500 to-rose-500 text-white"
+          : "bg-gradient-to-r from-amber-500 to-orange-500 text-white"
+      }`}
+    >
+      <span className="flex min-w-0 items-center gap-2">
+        <ShieldAlert className="h-4 w-4 flex-shrink-0" />
+        <span className="min-w-0">{buildIntegrityAlertText(c, w)}</span>
+      </span>
+      <span className="flex shrink-0 items-center gap-0.5 text-xs font-bold text-white/95">
+        Fix now
+        <ArrowRight className="h-3.5 w-3.5" />
+      </span>
+    </button>
+  );
+}
 
 function App() {
   const [settings, setSettings] = useState<AppSettings>(() => {
@@ -184,14 +228,41 @@ function App() {
   const uploadAttemptsRef = useRef<Map<string, number>>(new Map());
   const MAX_AUTO_UPLOAD_ATTEMPTS = 3;
 
+  // Render-visible set of clips currently queued OR uploading to HubSpot.
+  // Drives the per-clip "Uploading…" loader in ArrangeTab so users can tell
+  // the difference between "needs upload" and "upload already in progress".
+  const [uploadingClipIds, setUploadingClipIds] = useState<Set<string>>(() => new Set());
+
+  const markUploadActive = useCallback((clipId: string) => {
+    setUploadingClipIds((prev) => {
+      if (prev.has(clipId)) return prev;
+      const next = new Set(prev);
+      next.add(clipId);
+      return next;
+    });
+  }, []);
+
+  const markUploadInactive = useCallback((clipId: string) => {
+    setUploadingClipIds((prev) => {
+      if (!prev.has(clipId)) return prev;
+      const next = new Set(prev);
+      next.delete(clipId);
+      return next;
+    });
+  }, []);
+
   const processUploadQueue = useCallback(() => {
     if (uploadRunningRef.current) return;
     const entry = uploadQueueRef.current.shift();
     if (!entry) return;
     const proj = projectRef.current;
-    if (!proj || !settings.hubspotToken) return;
+    if (!proj || !settings.hubspotToken) {
+      markUploadInactive(entry.clipId);
+      return;
+    }
     const clip = proj.clips.find((c) => c.hubspotId === entry.clipId);
     if (clip?.originalClip) {
+      markUploadInactive(entry.clipId);
       setTimeout(processUploadQueue, 100);
       return;
     }
@@ -224,9 +295,10 @@ function App() {
       .finally(() => {
         uploadRunningRef.current = false;
         uploadInFlightRef.current = null;
+        markUploadInactive(entry.clipId);
         setTimeout(processUploadQueue, 2000);
       });
-  }, [settings.hubspotToken, settings.rootFolder]);
+  }, [settings.hubspotToken, settings.rootFolder, markUploadInactive]);
 
   // Single source of truth for "what should be auto-uploaded": any clip that
   // is downloaded locally but has no HubSpot CDN URL yet, and isn't already
@@ -244,9 +316,18 @@ function App() {
       const filePath = `${settings.rootFolder}/${proj.name}/${clip.localFile}`;
       uploadQueueRef.current.push({ clipId: clip.hubspotId, filePath });
       queued.add(clip.hubspotId);
+      markUploadActive(clip.hubspotId);
     }
     processUploadQueue();
-  }, [settings.hubspotToken, settings.rootFolder, processUploadQueue]);
+  }, [settings.hubspotToken, settings.rootFolder, processUploadQueue, markUploadActive]);
+
+  // Manual "Upload to HubSpot" trigger from ArrangeTab. Resets the per-clip
+  // retry budget (so users can force-retry after MAX_AUTO_UPLOAD_ATTEMPTS) and
+  // delegates to the central queue, sharing the same in-progress loader UI.
+  const enqueueClipUpload = useCallback((clipId: string) => {
+    uploadAttemptsRef.current.delete(clipId);
+    ensureUploadsQueued();
+  }, [ensureUploadsQueued]);
 
   useEffect(() => {
     const unlisten = listen<DownloadProgress>("download-progress", (event) => {
@@ -332,8 +413,11 @@ function App() {
 
   // Reset retry budget when switching projects so reopening gives a fresh
   // chance for any clip that exhausted MAX_AUTO_UPLOAD_ATTEMPTS earlier.
+  // Also clear the in-progress UI markers — leftover ids from another project
+  // would otherwise show stale loaders on unrelated clips.
   useEffect(() => {
     uploadAttemptsRef.current.clear();
+    setUploadingClipIds(new Set());
   }, [project?.name]);
 
   const saveSettings = (next: AppSettings) => {
@@ -739,6 +823,7 @@ function App() {
   }, []);
 
   return (
+    <IntegrityProvider token={settings.hubspotToken}>
     <div className="flex h-screen flex-col">
       {/* Header */}
       <header className="flex items-center justify-between border-b px-4 py-2">
@@ -805,6 +890,8 @@ function App() {
           </div>
         </div>
       )}
+
+      <IntegrityAlertBanner onNavigate={() => setActivePage("data-integrity")} />
 
       {/* Sidebar + Content */}
       <div className="flex flex-1 overflow-hidden">
@@ -935,6 +1022,8 @@ function App() {
                       removeClip={removeClipFromProject}
                       thumbWidth={thumbWidth}
                       suppressAutoPlay={finishDialogOpen}
+                      uploadingClipIds={uploadingClipIds}
+                      enqueueClipUpload={enqueueClipUpload}
                     />
                   </TabErrorBoundary>
                 </div>
@@ -1201,6 +1290,7 @@ function App() {
         </DialogContent>
       </Dialog>
     </div>
+    </IntegrityProvider>
   );
 }
 

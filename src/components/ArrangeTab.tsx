@@ -47,6 +47,12 @@ interface Props {
   /** When true, the player will not autoplay even if the clip key changes.
    *  Used to prevent unwanted playback when Finish Video renames localFiles. */
   suppressAutoPlay?: boolean;
+  /** Clips currently queued or uploading to HubSpot. Drives the per-clip
+   *  "Uploading…" loader so users can tell auto-upload is in progress. */
+  uploadingClipIds?: Set<string>;
+  /** Force-trigger a HubSpot upload for a clip (resets retry budget and
+   *  routes through the central upload queue in App.tsx). */
+  enqueueClipUpload?: (clipId: string) => void;
 }
 
 function Tip({ label, children }: { label: string; children: React.ReactNode }) {
@@ -113,7 +119,7 @@ const LEFT_MIN = 180;
 const LEFT_MAX = 560;
 const LEFT_DEFAULT = 288;
 
-export function ArrangeTab({ settings, project, setProject, isActive, removeClip, thumbWidth = THUMB_DEFAULT, suppressAutoPlay = false }: Props) {
+export function ArrangeTab({ settings, project, setProject, isActive, removeClip, thumbWidth = THUMB_DEFAULT, suppressAutoPlay = false, uploadingClipIds, enqueueClipUpload }: Props) {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [playerError, setPlayerError] = useState<string | null>(null);
   const playerRef = useRef<MediaPlayerInstance>(null);
@@ -123,7 +129,6 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
   const [reporting, setReporting] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
   const [scoreOpen, setScoreOpen] = useState(false);
-  const [uploadingClipId, setUploadingClipId] = useState<string | null>(null);
   const [leftWidth, setLeftWidth] = useState(LEFT_DEFAULT);
   const isDraggingDivider = useRef(false);
   const dragStartX = useRef(0);
@@ -397,18 +402,9 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
         rootFolder: settings.rootFolder,
         project: updated,
       }).catch(() => {});
-
-      // Upload manually imported file to HubSpot so teammates can download via CDN
-      if (!clip.originalClip && settings.hubspotToken) {
-        const absPath = `${settings.rootFolder}/${project.name}/${result.localFile}`;
-        invoke("upload_clip_video", {
-          token: settings.hubspotToken,
-          clipId: clip.hubspotId,
-          filePath: absPath,
-        }).then((hubspotUrl) => {
-          updateClipField(clip.hubspotId, { originalClip: hubspotUrl as string });
-        }).catch((e) => console.warn("Upload after import failed:", e));
-      }
+      // The new clip state (downloadStatus: complete + localFile set) is
+      // picked up by the central upload effect in App.tsx, which queues the
+      // upload through the shared HubSpot upload pipeline.
     } catch (e) {
       console.error("Import failed:", e);
     }
@@ -436,23 +432,14 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
     }
   }, [reporting]);
 
-  const uploadClipToHubSpot = useCallback(async (clip: ProjectClip) => {
-    if (!project || !settings.hubspotToken || !clip.localFile || clip.originalClip) return;
-    setUploadingClipId(clip.hubspotId);
-    try {
-      const absPath = resolveClipPath(settings.rootFolder, project.name, clip.localFile);
-      const hubspotUrl = await invoke<string>("upload_clip_video", {
-        token: settings.hubspotToken,
-        clipId: clip.hubspotId,
-        filePath: absPath,
-      });
-      updateClipField(clip.hubspotId, { originalClip: hubspotUrl });
-    } catch (e) {
-      console.warn("Manual video upload failed:", e);
-    } finally {
-      setUploadingClipId(null);
-    }
-  }, [project, settings, updateClipField]);
+  // Force-retry an upload via the central queue in App.tsx. Sharing the queue
+  // means the same loader UI applies whether the upload was kicked off
+  // automatically (post-download) or manually by clicking the orange button,
+  // and avoids the double-upload race that direct invoke would create.
+  const uploadClipToHubSpot = useCallback((clip: ProjectClip) => {
+    if (!settings.hubspotToken || !clip.localFile || clip.originalClip) return;
+    enqueueClipUpload?.(clip.hubspotId);
+  }, [settings.hubspotToken, enqueueClipUpload]);
 
   if (!project) {
     return (
@@ -683,12 +670,12 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
                     <Tip label="Video synced to HubSpot"><span className="flex items-center justify-center rounded p-1.5 text-green-600">
                       <Cloud className="h-3.5 w-3.5" />
                     </span></Tip>
-                  ) : uploadingClipId === selectedClip.hubspotId ? (
-                    <Tip label="Uploading to HubSpot..."><span className="flex items-center justify-center rounded p-1.5 text-blue-500">
-                      <CloudUpload className="h-3.5 w-3.5 animate-pulse" />
+                  ) : uploadingClipIds?.has(selectedClip.hubspotId) ? (
+                    <Tip label="Uploading to HubSpot..."><span className="flex items-center justify-center rounded p-1.5 text-blue-500" title="Uploading to HubSpot...">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
                     </span></Tip>
                   ) : (
-                    <Tip label="Upload to HubSpot"><button onClick={() => uploadClipToHubSpot(selectedClip)} className={`${iconBtn} text-orange-500 hover:text-orange-600`}>
+                    <Tip label="Upload to HubSpot"><button onClick={() => uploadClipToHubSpot(selectedClip)} className={`${iconBtn} text-orange-500 hover:text-orange-600`} title="Upload to HubSpot">
                       <CloudUpload className="h-3.5 w-3.5" />
                     </button></Tip>
                   )
