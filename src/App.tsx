@@ -175,6 +175,13 @@ function App() {
   // depend on projectRef having the latest localFile at dequeue time.
   const uploadQueueRef = useRef<Array<{ clipId: string; filePath: string }>>([]);
   const uploadRunningRef = useRef(false);
+  // Currently-uploading clip (so the auto-queue effect can dedup against it).
+  const uploadInFlightRef = useRef<string | null>(null);
+  // Per-session failed-upload attempts. Capped to avoid tight retry loops if
+  // HubSpot is rejecting the file (e.g. auth/permissions). Cleared on project
+  // change so reopening the project gives the user a fresh chance.
+  const uploadAttemptsRef = useRef<Map<string, number>>(new Map());
+  const MAX_AUTO_UPLOAD_ATTEMPTS = 3;
 
   const processUploadQueue = useCallback(() => {
     if (uploadRunningRef.current) return;
@@ -188,12 +195,14 @@ function App() {
       return;
     }
     uploadRunningRef.current = true;
+    uploadInFlightRef.current = entry.clipId;
     invoke<string>("upload_clip_video", {
       token: settings.hubspotToken,
       clipId: entry.clipId,
       filePath: entry.filePath,
     })
       .then((hubspotUrl) => {
+        uploadAttemptsRef.current.delete(entry.clipId);
         const current = projectRef.current;
         if (!current) return;
         const updatedClips = current.clips.map((c) =>
@@ -206,12 +215,37 @@ function App() {
           project: updated,
         }).catch(() => {});
       })
-      .catch((e) => console.warn("Video upload to HubSpot failed:", e))
+      .catch((e) => {
+        console.warn("Video upload to HubSpot failed:", e);
+        const prev = uploadAttemptsRef.current.get(entry.clipId) ?? 0;
+        uploadAttemptsRef.current.set(entry.clipId, prev + 1);
+      })
       .finally(() => {
         uploadRunningRef.current = false;
+        uploadInFlightRef.current = null;
         setTimeout(processUploadQueue, 2000);
       });
   }, [settings.hubspotToken, settings.rootFolder]);
+
+  // Single source of truth for "what should be auto-uploaded": any clip that
+  // is downloaded locally but has no HubSpot CDN URL yet, and isn't already
+  // queued/in-flight or out of retry budget. Re-runs whenever the project's
+  // clips list changes (new download finishes, sync, manual import, etc.).
+  const ensureUploadsQueued = useCallback(() => {
+    const proj = projectRef.current;
+    if (!proj || !settings.hubspotToken) return;
+    const queued = new Set(uploadQueueRef.current.map((e) => e.clipId));
+    for (const clip of proj.clips) {
+      if (clip.downloadStatus !== "complete" || !clip.localFile || clip.originalClip) continue;
+      if (queued.has(clip.hubspotId)) continue;
+      if (uploadInFlightRef.current === clip.hubspotId) continue;
+      if ((uploadAttemptsRef.current.get(clip.hubspotId) ?? 0) >= MAX_AUTO_UPLOAD_ATTEMPTS) continue;
+      const filePath = `${settings.rootFolder}/${proj.name}/${clip.localFile}`;
+      uploadQueueRef.current.push({ clipId: clip.hubspotId, filePath });
+      queued.add(clip.hubspotId);
+    }
+    processUploadQueue();
+  }, [settings.hubspotToken, settings.rootFolder, processUploadQueue]);
 
   useEffect(() => {
     const unlisten = listen<DownloadProgress>("download-progress", (event) => {
@@ -240,19 +274,11 @@ function App() {
         rootFolder: settings.rootFolder,
         project: updated,
       }).catch(() => {});
-
-      // Enqueue video upload to HubSpot after successful download
-      if (dp.status === "complete" && dp.localFile && settings.hubspotToken) {
-        const clip = prev.clips.find((c) => c.hubspotId === dp.clipId);
-        if (!clip?.originalClip) {
-          const filePath = `${settings.rootFolder}/${prev.name}/${dp.localFile}`;
-          uploadQueueRef.current.push({ clipId: dp.clipId, filePath });
-          processUploadQueue();
-        }
-      }
+      // Auto-upload to HubSpot is handled by the ensureUploadsQueued effect
+      // below, which reacts to the new project.clips reference produced here.
     });
     return () => { unlisten.then((fn) => fn()); };
-  }, [settings.rootFolder, settings.hubspotToken, processUploadQueue]);
+  }, [settings.rootFolder]);
 
   // ── Staggered auto-download on project open ────────────────────────────
   const downloadQueueRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -294,22 +320,20 @@ function App() {
     };
   }, [project?.name]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // ── Auto-upload already-downloaded clips that haven't been synced to HubSpot
+  // ── Auto-upload eligible clips to HubSpot ───────────────────────────────
+  // Whenever the project's clips list changes (new download completes, sync
+  // adds clips, manual import sets localFile, etc.), make sure any clip that
+  // is downloaded-but-not-yet-uploaded gets enqueued. This is the single
+  // source of truth for auto-upload eligibility.
   useEffect(() => {
-    if (!project || !settings.hubspotToken) return;
-    const needUpload = project.clips.filter(
-      (c) => c.downloadStatus === "complete" && c.localFile && !c.originalClip,
-    );
-    if (needUpload.length === 0) return;
-    const queued = new Set(uploadQueueRef.current.map((e) => e.clipId));
-    for (const clip of needUpload) {
-      if (!queued.has(clip.hubspotId) && clip.localFile) {
-        const filePath = `${settings.rootFolder}/${project.name}/${clip.localFile}`;
-        uploadQueueRef.current.push({ clipId: clip.hubspotId, filePath });
-      }
-    }
-    processUploadQueue();
-  }, [project?.name]); // eslint-disable-line react-hooks/exhaustive-deps
+    ensureUploadsQueued();
+  }, [project?.clips, ensureUploadsQueued]);
+
+  // Reset retry budget when switching projects so reopening gives a fresh
+  // chance for any clip that exhausted MAX_AUTO_UPLOAD_ATTEMPTS earlier.
+  useEffect(() => {
+    uploadAttemptsRef.current.clear();
+  }, [project?.name]);
 
   const saveSettings = (next: AppSettings) => {
     setSettings(next);
