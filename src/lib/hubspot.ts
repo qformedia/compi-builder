@@ -169,10 +169,20 @@ export async function fetchVideoProjectClips(
   return data.results.map(parseClip);
 }
 
-/** All External Clips with no creator linked (Data Integrity; backend auto-paginates). */
-export async function fetchClipsMissingCreator(token: string): Promise<Clip[]> {
-  const data = await invoke<HubSpotSearchResponse>("search_clips_missing_creator", { token });
-  return data.results.map(parseClip);
+/** One page of External Clips with no creator linked (Data Integrity). */
+export async function fetchClipsMissingCreator(
+  token: string,
+  after?: string,
+): Promise<{ clips: Clip[]; total: number; nextAfter?: string }> {
+  const data = await invoke<HubSpotSearchResponse>("search_clips_missing_creator", {
+    token,
+    after: after ?? null,
+  });
+  return {
+    clips: data.results.map(parseClip),
+    total: data.total,
+    nextAfter: data.paging?.next?.after,
+  };
 }
 
 /** Count External Clips with no creator linked without fetching all matching records. */

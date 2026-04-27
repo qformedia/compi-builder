@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState, type UIEvent } from "react";
 import { ChevronDown, CheckCircle2, AlertTriangle, RefreshCw, ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -55,10 +55,12 @@ export function DataIntegrityPage({ isActive, settings }: Props) {
   const {
     checkData,
     checkLoading,
+    checkPageLoading,
     lastRun,
     refreshAllLoading,
     summary,
     loadCheck,
+    loadMoreCheck,
     ensureFullLoaded,
     loadAll,
     syncVersion,
@@ -187,6 +189,7 @@ export function DataIntegrityPage({ isActive, settings }: Props) {
               settings={settings}
               data={checkData[check.id]}
               loading={checkLoading[check.id] === true}
+              loadingMore={checkPageLoading[check.id] === true}
               open={cardOpen[check.id] !== false}
               onToggleCard={() =>
                 setCardOpen((c) => ({ ...c, [check.id]: c[check.id] === false ? true : false }))
@@ -195,6 +198,9 @@ export function DataIntegrityPage({ isActive, settings }: Props) {
               onToggleSection={(k, o) => setSectionOpen((s) => ({ ...s, [k]: o }))}
               onRefresh={() => {
                 void loadCheck(check, true);
+              }}
+              onLoadMore={() => {
+                void loadMoreCheck(check);
               }}
               fixedCount={fixedThisSession[check.id] ?? 0}
               onFixedOne={() =>
@@ -226,11 +232,13 @@ function CheckCard<T extends { id: string }>({
   settings,
   data,
   loading,
+  loadingMore,
   open,
   onToggleCard,
   sectionOpen,
   onToggleSection,
   onRefresh,
+  onLoadMore,
   fixedCount,
   onFixedOne,
 }: {
@@ -239,11 +247,13 @@ function CheckCard<T extends { id: string }>({
   settings: AppSettings;
   data: IntegrityCheckData | undefined;
   loading: boolean;
+  loadingMore: boolean;
   open: boolean;
   onToggleCard: () => void;
   sectionOpen: Record<string, boolean>;
   onToggleSection: (key: string, o: boolean) => void;
   onRefresh: () => void;
+  onLoadMore: () => void;
   fixedCount: number;
   onFixedOne: () => void;
 }) {
@@ -263,7 +273,22 @@ function CheckCard<T extends { id: string }>({
     [counts],
   );
   const cardSev: Severity = counts.length ? maxSeverity(counts.map((s) => s.severity)) : "info";
+  const sectionTotals = useMemo(() => new Map(counts.map((section) => [section.id, section.total])), [counts]);
+  const loadedTotal = useMemo(
+    () => sections.reduce((a, s) => a + s.items.length, 0),
+    [sections],
+  );
+  const canLoadMore = Boolean(data?.nextAfter);
   const Row = check.Row;
+
+  const handleScroll = (event: UIEvent<HTMLDivElement>) => {
+    if (!canLoadMore || loadingMore) return;
+    const el = event.currentTarget;
+    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    if (distanceFromBottom < 240) {
+      onLoadMore();
+    }
+  };
 
   return (
     <Card className="gap-0 overflow-hidden py-0">
@@ -359,7 +384,7 @@ function CheckCard<T extends { id: string }>({
           )}
 
           {!loading && !hasErr && countTotal > 0 && sections.length > 0 && (
-            <div className="max-h-[60vh] overflow-y-auto">
+            <div className="max-h-[60vh] overflow-y-auto" onScroll={handleScroll}>
               {sections
                 .slice()
                 .sort((a, b) => SEV_RANK[b.severity] - SEV_RANK[a.severity])
@@ -371,7 +396,8 @@ function CheckCard<T extends { id: string }>({
                     : sectionOpen[sKey] === undefined
                       ? (section.defaultOpen ?? true)
                       : Boolean(sectionOpen[sKey]);
-                  if (section.items.length === 0) return null;
+                  const sectionTotal = sectionTotals.get(section.id) ?? section.items.length;
+                  if (section.items.length === 0 && sectionTotal === 0) return null;
 
                   return (
                     <section key={section.id} className="border-b last:border-0">
@@ -400,7 +426,9 @@ function CheckCard<T extends { id: string }>({
                               variant="secondary"
                               className="h-4 px-1.5 text-[10px] tabular-nums"
                             >
-                              {section.items.length}
+                              {section.items.length < sectionTotal
+                                ? `${section.items.length}/${sectionTotal}`
+                                : sectionTotal}
                             </Badge>
                           </span>
                           <ChevronDown
@@ -427,6 +455,30 @@ function CheckCard<T extends { id: string }>({
                     </section>
                   );
                 })}
+              <div className="flex items-center justify-center gap-2 border-t px-4 py-3 text-xs text-muted-foreground">
+                {loadingMore ? (
+                  <>
+                    <RefreshCw className="h-3.5 w-3.5 animate-spin" />
+                    Loading more clips...
+                  </>
+                ) : canLoadMore ? (
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    size="sm"
+                    className="h-7 cursor-pointer px-2 text-xs"
+                    onClick={onLoadMore}
+                  >
+                    Load more ({loadedTotal}/{countTotal})
+                  </Button>
+                ) : loadedTotal < countTotal ? (
+                  <span>
+                    Loaded {loadedTotal} of {countTotal} clips
+                  </span>
+                ) : (
+                  <span>All {countTotal} clips loaded</span>
+                )}
+              </div>
             </div>
           )}
         </CardContent>

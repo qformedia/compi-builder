@@ -34,12 +34,17 @@ export interface IntegritySectionCount {
   total: number;
 }
 
+export interface IntegritySectionPage<TItem extends { id: string }> {
+  sections: IntegritySection<TItem>[];
+  nextAfter?: string;
+}
+
 export interface IntegrityCheck<TItem extends { id: string }> {
   id: string;
   title: string;
   description: string;
   fetchCount: (token: string) => Promise<IntegritySectionCount[]>;
-  fetch: (token: string) => Promise<IntegritySection<TItem>[]>;
+  fetch: (token: string, after?: string) => Promise<IntegritySectionPage<TItem>>;
   Row: ComponentType<{
     item: TItem;
     token: string;

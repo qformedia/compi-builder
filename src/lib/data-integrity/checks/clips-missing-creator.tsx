@@ -1,15 +1,22 @@
-import { useState, useCallback } from "react";
+import { useCallback, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
+import { X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { ClipPreview } from "@/components/ClipPreview";
 import { CreatorSuggestionPanel } from "@/components/CreatorSuggestionPanel";
 import { SCORE_COLORS, HubSpotIcon, getPlatform, PlatformIcon } from "@/components/ClipCard";
+import {
+  setActivePreview,
+  useActivePreview,
+} from "@/lib/data-integrity/clip-preview-store";
 import { countClipsMissingCreator, fetchClipsMissingCreator } from "@/lib/hubspot";
 import type { AppSettings, Clip } from "@/types";
 import { cn } from "@/lib/utils";
-import type { IntegrityCheck, IntegritySection, IntegritySectionCount, Severity } from "../types";
+import type { IntegrityCheck, IntegritySectionCount, IntegritySectionPage, Severity } from "../types";
 
 const HUBSPOT_CLIP_RECORD = "https://app-eu1.hubspot.com/contacts/146859718/record/2-192287471";
+const PREVIEW_WIDTH_PX = 280;
 
 function clipUrlParts(link: string): { host: string; shortPath: string } {
   try {
@@ -21,6 +28,20 @@ function clipUrlParts(link: string): { host: string; shortPath: string } {
   } catch {
     return { host: "URL", shortPath: link.length > 48 ? `${link.slice(0, 45)}…` : link };
   }
+}
+
+function ClipUrlButton({ link, host, shortPath, className }: { link: string; host: string; shortPath: string; className?: string }) {
+  return (
+    <button
+      type="button"
+      className={cn("block max-w-full cursor-pointer truncate text-left text-xs hover:underline", className)}
+      title={link}
+      onClick={() => openUrl(link)}
+    >
+      <span className="font-medium text-foreground">{host}</span>
+      <span className="text-muted-foreground">{shortPath}</span>
+    </button>
+  );
 }
 
 function ClipsMissingCreatorRow({
@@ -43,6 +64,8 @@ function ClipsMissingCreatorRow({
   const moreTags = (clip.tags?.length ?? 0) - tags.length;
   const np = clip.numPublishedVideoProjects ?? 0;
   const showThumb = !!clip.fetchedThumbnail;
+  const activeClip = useActivePreview();
+  const isPreviewing = activeClip?.id === clip.id;
 
   const onLinked = useCallback(
     (name: string) => {
@@ -52,43 +75,77 @@ function ClipsMissingCreatorRow({
     [clip.id, onFixed],
   );
 
+  const closePreview = useCallback(() => setActivePreview(null), []);
+
   return (
     <li
       className={cn(
-        "group flex flex-wrap items-center gap-3 px-4 py-2 transition-colors hover:bg-muted/30 sm:flex-nowrap",
+        "group flex flex-wrap gap-3 px-4 py-2 transition-colors hover:bg-muted/30 sm:flex-nowrap",
+        isPreviewing ? "items-start" : "items-center",
         linked && "bg-emerald-50/40",
+        isPreviewing && "bg-muted/30",
       )}
     >
-      <button
-        type="button"
-        className="relative h-12 w-12 flex-shrink-0 overflow-hidden rounded-md border bg-muted"
-        onClick={() => openUrl(clip.link)}
-        title={clip.link}
-      >
-        {showThumb && clip.fetchedThumbnail ? (
-          <img
-            src={clip.fetchedThumbnail}
-            alt=""
-            className="h-full w-full object-cover"
-          />
-        ) : (
-          <span className="flex h-full w-full items-center justify-center text-muted-foreground">
-            <PlatformIcon platform={platform} className="h-5 w-5 opacity-50" />
-          </span>
-        )}
-      </button>
-
-      <div className="min-w-0 flex-1">
+      {isPreviewing ? (
+        <div
+          className="flex flex-shrink-0 flex-col gap-1.5"
+          style={{ width: PREVIEW_WIDTH_PX }}
+        >
+          <div className="flex items-center gap-1">
+            <ClipUrlButton
+              link={clip.link}
+              host={host}
+              shortPath={shortPath}
+              className="flex-1"
+            />
+            <button
+              type="button"
+              className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+              title="Close preview"
+              onClick={closePreview}
+            >
+              <X className="h-3 w-3" />
+            </button>
+          </div>
+          <div className="relative aspect-[9/16] w-full overflow-hidden rounded-md border bg-black">
+            <ClipPreview
+              clip={clip}
+              preferHubSpotPreview={settings.preferHubSpotPreview}
+              onClose={closePreview}
+            />
+          </div>
+        </div>
+      ) : (
         <button
           type="button"
-          className="block max-w-full cursor-pointer truncate text-left text-xs hover:underline"
-          title={clip.link}
-          onClick={() => openUrl(clip.link)}
+          className="relative h-12 w-12 flex-shrink-0 overflow-hidden rounded-md border bg-muted transition-colors hover:border-primary"
+          onClick={() => setActivePreview(clip)}
+          title="Preview clip"
         >
-          <span className="font-medium text-foreground">{host}</span>
-          <span className="text-muted-foreground">{shortPath}</span>
+          {showThumb && clip.fetchedThumbnail ? (
+            <img
+              src={clip.fetchedThumbnail}
+              alt=""
+              className="h-full w-full object-cover"
+            />
+          ) : (
+            <span className="flex h-full w-full items-center justify-center text-muted-foreground">
+              <PlatformIcon platform={platform} className="h-5 w-5 opacity-50" />
+            </span>
+          )}
         </button>
-        <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
+      )}
+
+      <div className="min-w-0 flex-1">
+        {!isPreviewing && (
+          <ClipUrlButton link={clip.link} host={host} shortPath={shortPath} />
+        )}
+        <div
+          className={cn(
+            "flex min-w-0 flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground",
+            !isPreviewing && "mt-1",
+          )}
+        >
           {clip.score && (
             <span
               className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${SCORE_COLORS[clip.score] ?? "bg-slate-600 text-white"}`}
@@ -124,6 +181,7 @@ function ClipsMissingCreatorRow({
             token={token}
             settings={settings}
             onLinked={onLinked}
+            onSuggestStart={() => setActivePreview(clip)}
           />
           <Button
             type="button"
@@ -141,26 +199,32 @@ function ClipsMissingCreatorRow({
   );
 }
 
-async function fetchClipsMissingCreatorSections(token: string): Promise<IntegritySection<Clip>[]> {
-  const all = await fetchClipsMissingCreator(token);
-  const inPublished = all.filter((c) => (c.numPublishedVideoProjects ?? 0) > 0);
-  const other = all.filter((c) => (c.numPublishedVideoProjects ?? 0) === 0);
-  return [
-    {
-      id: "in-published",
-      title: "In published videos",
-      severity: "critical" as Severity,
-      defaultOpen: true,
-      items: inPublished,
-    },
-    {
-      id: "other",
-      title: "Not yet published",
-      severity: "warning" as Severity,
-      defaultOpen: false,
-      items: other,
-    },
-  ];
+async function fetchClipsMissingCreatorSections(
+  token: string,
+  after?: string,
+): Promise<IntegritySectionPage<Clip>> {
+  const page = await fetchClipsMissingCreator(token, after);
+  const inPublished = page.clips.filter((c) => (c.numPublishedVideoProjects ?? 0) > 0);
+  const other = page.clips.filter((c) => (c.numPublishedVideoProjects ?? 0) === 0);
+  return {
+    sections: [
+      {
+        id: "in-published",
+        title: "In published videos",
+        severity: "critical" as Severity,
+        defaultOpen: true,
+        items: inPublished,
+      },
+      {
+        id: "other",
+        title: "Not yet published",
+        severity: "warning" as Severity,
+        defaultOpen: false,
+        items: other,
+      },
+    ],
+    nextAfter: page.nextAfter,
+  };
 }
 
 async function fetchClipsMissingCreatorCounts(token: string): Promise<IntegritySectionCount[]> {

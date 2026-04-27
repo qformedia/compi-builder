@@ -62,14 +62,39 @@ function platformDisplayFromKey(key: string): string {
   return PLATFORM_DISPLAY[key.toLowerCase()] ?? "Video";
 }
 
+/**
+ * Platforms where the backend's live author resolver actually works.
+ * Anything else (Xiaohongshu, Bilibili, Douyin, Kuaishou, Pinterest, …) goes
+ * straight to the HubSpot manual picker — yt-dlp can't extract authors there
+ * reliably, and the noisy errors aren't worth the cost.
+ *
+ * Compared case-insensitively against `getPlatform(url)`.
+ */
+const LIVE_RESOLVABLE_PLATFORMS: ReadonlySet<string> = new Set([
+  "tiktok",
+  "instagram",
+  "youtube",
+]);
+
+function canLiveResolve(url: string): boolean {
+  return LIVE_RESOLVABLE_PLATFORMS.has(getPlatform(url).toLowerCase());
+}
+
 interface Props {
   clip: Clip;
   token: string;
   settings: AppSettings;
   onLinked: (name: string) => void;
+  onSuggestStart?: () => void;
 }
 
-export function CreatorSuggestionPanel({ clip, token, settings, onLinked }: Props) {
+export function CreatorSuggestionPanel({
+  clip,
+  token,
+  settings,
+  onLinked,
+  onSuggestStart,
+}: Props) {
   const [st, setSt] = useState<PanelState>({ kind: "idle" });
   const [busy, setBusy] = useState(false);
   const [actionErr, setActionErr] = useState<string | null>(null);
@@ -106,6 +131,12 @@ export function CreatorSuggestionPanel({ clip, token, settings, onLinked }: Prop
 
   const runSuggest = useCallback(
     async (forceLive: boolean) => {
+      // Unsupported networks (Xiaohongshu, Bilibili, Douyin, Kuaishou, Pinterest)
+      // skip the live resolver entirely and drop straight into the HubSpot picker.
+      if (!canLiveResolve(clip.link)) {
+        setSt({ kind: "manual" });
+        return;
+      }
       setSt({ kind: "loading" });
       setActionErr(null);
       try {
@@ -320,26 +351,31 @@ export function CreatorSuggestionPanel({ clip, token, settings, onLinked }: Prop
     );
   }
 
+  const liveResolvable = canLiveResolve(clip.link);
+
   return (
     <div className="flex flex-col gap-1 sm:items-end">
       <div className="flex flex-wrap justify-end gap-1">
-        <Button
-          type="button"
-          size="sm"
-          variant="secondary"
-          className="h-7 cursor-pointer gap-1 text-[10px]"
-          onClick={() => {
-            void runSuggest(false);
-          }}
-        >
-          <Sparkles className="h-3 w-3" />
-          Suggest creator
-        </Button>
+        {liveResolvable && (
+          <Button
+            type="button"
+            size="sm"
+            variant="secondary"
+            className="h-7 cursor-pointer gap-1 text-[10px]"
+            onClick={() => {
+              onSuggestStart?.();
+              void runSuggest(false);
+            }}
+          >
+            <Sparkles className="h-3 w-3" />
+            Suggest creator
+          </Button>
+        )}
         <CreatorPicker
           token={token}
           value={null}
           onChange={onManualPick}
-          emptyButtonLabel="Pick manually…"
+          emptyButtonLabel={liveResolvable ? "Pick manually…" : "Pick creator…"}
         />
       </div>
     </div>

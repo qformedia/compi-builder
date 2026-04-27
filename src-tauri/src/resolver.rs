@@ -186,6 +186,13 @@ fn detect_resolver_platform_key(url: &str) -> &'static str {
     "other"
 }
 
+/// Platforms where we attempt live author resolution (oEmbed/embed/yt-dlp/SocialKit).
+/// Everything else falls back to a HubSpot manual pick — yt-dlp can't reliably
+/// extract authors for those networks and the noisy errors aren't worth the cost.
+fn is_live_resolvable(platform_key: &str) -> bool {
+    matches!(platform_key, "tiktok" | "instagram" | "youtube")
+}
+
 fn ig_profile_url(handle: &str) -> String {
     format!("https://www.instagram.com/{}/", handle)
 }
@@ -273,23 +280,13 @@ async fn resolve_instagram_oembed_and_embed(
     None
 }
 
-/// Default profile URL for a platform when yt-dlp doesn't return an `uploader_url`.
-fn fallback_profile_url(platform: &str, handle: &str) -> String {
-    match platform {
-        "youtube" => format!("https://www.youtube.com/@{}", handle),
-        "bilibili" => format!("https://space.bilibili.com/{}", handle),
-        // "other" profiles: yt-dlp sometimes returns just a host or empty.
-        _ => format!("https://{}", handle),
-    }
-}
-
-/// Run yt-dlp `--dump-single-json`, pick the best author fields, and emit an [`EnrichedProfile`].
-async fn resolve_via_ytdlp(
+/// Run yt-dlp `--dump-single-json` for a YouTube watch URL and emit an [`EnrichedProfile`].
+/// Only YouTube reaches this path — see [`is_live_resolvable`].
+async fn resolve_youtube_via_ytdlp(
     app: &AppHandle,
     url: &str,
     cookies_browser: &Option<String>,
     cookies_file: &Option<String>,
-    platform_key: &str,
 ) -> Result<EnrichedProfile, ResolveError> {
     wait_ytdlp().await;
     let json = ytdlp_dump_json(app, url, cookies_browser, cookies_file)
@@ -301,15 +298,9 @@ async fn resolve_via_ytdlp(
         .ok_or(ResolveError::UnresolvableUrl)?;
     let profile_url = p_opt
         .filter(|s| s.starts_with("http"))
-        .unwrap_or_else(|| fallback_profile_url(platform_key, &h));
-    let platform = match platform_key {
-        "youtube" | "pinterest" | "bilibili" | "xiaohongshu" | "douyin" | "kuaishou" => {
-            platform_key.to_string()
-        }
-        _ => "other".to_string(),
-    };
+        .unwrap_or_else(|| format!("https://www.youtube.com/@{}", h));
     Ok(EnrichedProfile {
-        platform,
+        platform: "youtube".to_string(),
         profile_url,
         handle: h,
         display_name: d_opt,
@@ -358,6 +349,9 @@ pub async fn resolve_creator_from_url(
     }
 
     let pkey = detect_resolver_platform_key(url);
+    if !is_live_resolvable(pkey) {
+        return Err(ResolveError::UnresolvableUrl);
+    }
     let out: EnrichedProfile = match pkey {
         "tiktok" => {
             let h = extract_tiktok_handle(url).ok_or(ResolveError::UnresolvableUrl)?;
@@ -409,12 +403,13 @@ pub async fn resolve_creator_from_url(
                     cached_at: None,
                 }
             } else if is_youtube_watchish(url) {
-                resolve_via_ytdlp(app, url, cookies_browser, cookies_file, "youtube").await?
+                resolve_youtube_via_ytdlp(app, url, cookies_browser, cookies_file).await?
             } else {
                 return Err(ResolveError::UnresolvableUrl);
             }
         }
-        _ => resolve_via_ytdlp(app, url, cookies_browser, cookies_file, pkey).await?,
+        // `is_live_resolvable` above guards anything except tiktok/instagram/youtube.
+        _ => unreachable!("non-live-resolvable platform reached match arm"),
     };
 
     // write HubSpot + mem cache (live paths only, not re-entry from hubspot_cache)
