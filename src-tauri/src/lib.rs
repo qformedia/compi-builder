@@ -6,7 +6,7 @@ use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 #[cfg(target_os = "macos")]
 use tauri::Manager;
@@ -1475,12 +1475,10 @@ async fn fetch_thumbnail(
 }
 
 /// Extract a thumbnail frame from a local video file using ffmpeg.
-/// Returns a base64-encoded JPEG string, or None if ffmpeg is not available.
-#[tauri::command]
-async fn extract_video_thumbnail(video_path: String) -> Result<Option<String>, String> {
-    let path = PathBuf::from(&video_path);
+/// Returns the raw JPEG bytes, or None if ffmpeg is not available / failed.
+async fn extract_video_thumbnail_bytes(path: &Path) -> Result<Option<Vec<u8>>, String> {
     if !path.exists() {
-        return Err(format!("Video file not found: {video_path}"));
+        return Err(format!("Video file not found: {}", path.display()));
     }
 
     let ffmpeg = which::which("ffmpeg")
@@ -1498,21 +1496,9 @@ async fn extract_video_thumbnail(video_path: String) -> Result<Option<String>, S
     let dir = tempfile::tempdir().map_err(|e| e.to_string())?;
     let out_path = dir.path().join("thumb.jpg");
 
-    // Extract a single frame at 1 second into the video
     let mut cmd = tokio::process::Command::new(&ffmpeg_path);
-    cmd.args([
-        "-ss",
-        "1",
-        "-i",
-        &video_path,
-        "-vframes",
-        "1",
-        "-q:v",
-        "3",
-        "-vf",
-        "scale=480:-1",
-        "-y",
-    ]);
+    cmd.arg("-ss").arg("1").arg("-i").arg(path.as_os_str());
+    cmd.args(["-vframes", "1", "-q:v", "3", "-vf", "scale=480:-1", "-y"]);
     cmd.arg(out_path.as_os_str());
     cmd.stdout(std::process::Stdio::null());
     cmd.stderr(std::process::Stdio::null());
@@ -1539,11 +1525,18 @@ async fn extract_video_thumbnail(video_path: String) -> Result<Option<String>, S
         return Ok(None);
     }
 
-    use base64::Engine;
     let bytes = fs::read(&out_path).map_err(|e| format!("Failed to read thumbnail: {e}"))?;
-    Ok(Some(
-        base64::engine::general_purpose::STANDARD.encode(&bytes),
-    ))
+    Ok(Some(bytes))
+}
+
+/// Extract a thumbnail frame from a local video file using ffmpeg.
+/// Returns a base64-encoded JPEG string, or None if ffmpeg is not available.
+#[tauri::command]
+async fn extract_video_thumbnail(video_path: String) -> Result<Option<String>, String> {
+    use base64::Engine;
+    let path = PathBuf::from(&video_path);
+    let bytes = extract_video_thumbnail_bytes(&path).await?;
+    Ok(bytes.map(|b| base64::engine::general_purpose::STANDARD.encode(&b)))
 }
 
 /// Fetch thumbnail URL for Chinese platforms via Evil0ctal API metadata endpoint.
@@ -2032,34 +2025,22 @@ async fn ytdlp_thumbnail_with(
         .map(|s| s.to_string()))
 }
 
-/// Download a thumbnail image, upload to HubSpot File Manager, and set it on the clip
-#[tauri::command]
-/// Shared: upload image bytes to HubSpot File Manager and update the clip's thumbnail property
-async fn upload_thumb_bytes_to_hubspot(
+/// Upload raw bytes to HubSpot File Manager and return the public file URL.
+async fn upload_bytes_to_hubspot_files(
     client: &reqwest::Client,
     token: &str,
-    clip_id: &str,
-    img_bytes: Vec<u8>,
-    content_type: &str,
+    bytes: Vec<u8>,
+    filename: &str,
+    mime: &str,
+    folder_path: &str,
 ) -> Result<String, String> {
-    if img_bytes.is_empty() {
-        return Err("Image data is empty".into());
+    if bytes.is_empty() {
+        return Err("File data is empty".into());
     }
 
-    let ext = if content_type.contains("png") {
-        "png"
-    } else if content_type.contains("webp") {
-        "webp"
-    } else if content_type.contains("gif") {
-        "gif"
-    } else {
-        "jpg"
-    };
-
-    let filename = format!("thumb_{}.{}", clip_id, ext);
-    let file_part = reqwest::multipart::Part::bytes(img_bytes)
-        .file_name(filename.clone())
-        .mime_str(content_type)
+    let file_part = reqwest::multipart::Part::bytes(bytes)
+        .file_name(filename.to_string())
+        .mime_str(mime)
         .map_err(|e| e.to_string())?;
 
     let options = serde_json::json!({
@@ -2072,10 +2053,10 @@ async fn upload_thumb_bytes_to_hubspot(
     let form = reqwest::multipart::Form::new()
         .part("file", file_part)
         .text("options", options.to_string())
-        .text("folderPath", "/thumbnails")
-        .text("fileName", filename);
+        .text("folderPath", folder_path.to_string())
+        .text("fileName", filename.to_string());
 
-    let upload_res = client
+    let res = client
         .post("https://api.hubapi.com/files/v3/files")
         .bearer_auth(token)
         .multipart(form)
@@ -2083,46 +2064,93 @@ async fn upload_thumb_bytes_to_hubspot(
         .await
         .map_err(|e| format!("Failed to upload to HubSpot: {}", e))?;
 
-    if !upload_res.status().is_success() {
-        let status = upload_res.status();
-        let body = upload_res.text().await.unwrap_or_default();
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
         return Err(format!("HubSpot file upload failed ({}): {}", status, body));
     }
 
-    let upload_json: serde_json::Value = upload_res
+    let json: serde_json::Value = res
         .json()
         .await
         .map_err(|e| format!("Failed to parse upload response: {}", e))?;
 
-    let file_url = upload_json
-        .get("url")
+    json.get("url")
         .and_then(|v| v.as_str())
-        .ok_or("No URL in upload response")?
-        .to_string();
+        .map(|s| s.to_string())
+        .ok_or_else(|| "No URL in upload response".to_string())
+}
 
-    let update_body = serde_json::json!({
-        "properties": {
-            "fetched_social_thumbnail": file_url
-        }
-    });
+/// PATCH a single string property on an External Clip record.
+async fn set_clip_property(
+    client: &reqwest::Client,
+    token: &str,
+    clip_id: &str,
+    property: &str,
+    value: &str,
+) -> Result<(), String> {
+    let body = serde_json::json!({ "properties": { property: value } });
 
-    let update_res = client
-        .patch(&format!(
+    let res = client
+        .patch(format!(
             "https://api.hubapi.com/crm/v3/objects/{}/{}",
             EXTERNAL_CLIPS_OBJECT_ID, clip_id
         ))
         .bearer_auth(token)
-        .json(&update_body)
+        .json(&body)
         .send()
         .await
         .map_err(|e| format!("Failed to update clip: {}", e))?;
 
-    if !update_res.status().is_success() {
-        let status = update_res.status();
-        let body = update_res.text().await.unwrap_or_default();
-        return Err(format!("HubSpot clip update failed ({}): {}", status, body));
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!(
+            "Failed to update clip {} ({}): {}",
+            property, status, body
+        ));
     }
+    Ok(())
+}
 
+fn extension_from_mime(mime: &str) -> &'static str {
+    if mime.contains("png") {
+        "png"
+    } else if mime.contains("webp") {
+        "webp"
+    } else if mime.contains("gif") {
+        "gif"
+    } else {
+        "jpg"
+    }
+}
+
+/// Upload image bytes to HubSpot File Manager and set them as the clip's thumbnail.
+async fn upload_thumb_bytes_to_hubspot(
+    client: &reqwest::Client,
+    token: &str,
+    clip_id: &str,
+    img_bytes: Vec<u8>,
+    content_type: &str,
+) -> Result<String, String> {
+    let filename = format!("thumb_{}.{}", clip_id, extension_from_mime(content_type));
+    let file_url = upload_bytes_to_hubspot_files(
+        client,
+        token,
+        img_bytes,
+        &filename,
+        content_type,
+        "/thumbnails",
+    )
+    .await?;
+    set_clip_property(
+        client,
+        token,
+        clip_id,
+        "fetched_social_thumbnail",
+        &file_url,
+    )
+    .await?;
     Ok(file_url)
 }
 
@@ -2216,31 +2244,7 @@ async fn update_clip_property(
         .timeout(std::time::Duration::from_secs(15))
         .build()
         .map_err(|e| e.to_string())?;
-
-    let body = serde_json::json!({
-        "properties": {
-            property_name: property_value
-        }
-    });
-
-    let res = client
-        .patch(&format!(
-            "https://api.hubapi.com/crm/v3/objects/{}/{}",
-            EXTERNAL_CLIPS_OBJECT_ID, clip_id
-        ))
-        .bearer_auth(&token)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to update clip: {}", e))?;
-
-    if !res.status().is_success() {
-        let status = res.status();
-        let text = res.text().await.unwrap_or_default();
-        return Err(format!("HubSpot update failed ({}): {}", status, text));
-    }
-
-    Ok(())
+    set_clip_property(&client, &token, &clip_id, &property_name, &property_value).await
 }
 
 /// Update a single property on a Video Project in HubSpot
@@ -2282,6 +2286,30 @@ async fn update_video_project_property(
     Ok(())
 }
 
+/// Build a reqwest client with a HubSpot-friendly long timeout (used for video uploads).
+fn build_hubspot_upload_client() -> Result<reqwest::Client, String> {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(180))
+        .build()
+        .map_err(|e| e.to_string())
+}
+
+/// Upload a local video file to HubSpot File Manager and set the clip's `original_clip` property.
+async fn upload_video_file_to_hubspot(
+    client: &reqwest::Client,
+    token: &str,
+    clip_id: &str,
+    path: &Path,
+) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("Failed to read file: {}", e))?;
+    let filename = format!("clip_{}.mp4", clip_id);
+    let file_url =
+        upload_bytes_to_hubspot_files(client, token, bytes, &filename, "video/mp4", "/clips")
+            .await?;
+    set_clip_property(client, token, clip_id, "original_clip", &file_url).await?;
+    Ok(file_url)
+}
+
 /// Upload a local video file to HubSpot File Manager and store the URL on the clip's original_clip property
 #[tauri::command]
 async fn upload_clip_video(
@@ -2293,77 +2321,113 @@ async fn upload_clip_video(
     if !path.exists() {
         return Err(format!("File not found: {}", file_path));
     }
+    let client = build_hubspot_upload_client()?;
+    upload_video_file_to_hubspot(&client, &token, &clip_id, &path).await
+}
 
-    let file_bytes = std::fs::read(&path).map_err(|e| format!("Failed to read file: {}", e))?;
-
-    let filename = format!("clip_{}.mp4", clip_id);
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(180))
-        .build()
-        .map_err(|e| e.to_string())?;
-
-    let file_part = reqwest::multipart::Part::bytes(file_bytes)
-        .file_name(filename.clone())
-        .mime_str("video/mp4")
-        .map_err(|e| e.to_string())?;
-
-    let options = serde_json::json!({
-        "access": "PUBLIC_NOT_INDEXABLE",
-        "overwrite": true,
-        "duplicateValidationStrategy": "NONE",
-        "duplicateValidationScope": "ENTIRE_PORTAL"
-    });
-
-    let form = reqwest::multipart::Form::new()
-        .part("file", file_part)
-        .text("options", options.to_string())
-        .text("folderPath", "/clips")
-        .text("fileName", filename);
-
-    let upload_res = client
-        .post("https://api.hubapi.com/files/v3/files")
-        .bearer_auth(&token)
-        .multipart(form)
-        .send()
+/// Run yt-dlp with the cookie cascade, applying the Instagram concurrency limiter and delay
+/// when the URL is an Instagram link. Centralises the rate-limit handling shared by the
+/// download-on-demand flows.
+async fn download_clip_with_rate_limits(
+    app: &AppHandle,
+    url: &str,
+    clips_dir: &Path,
+    clip_id: &str,
+    cookies_browser: &Option<String>,
+    cookies_file: &Option<String>,
+) -> Result<(), String> {
+    let clips_path = clips_dir.to_path_buf();
+    if url.contains("instagram.com") {
+        let _permit = INSTAGRAM_SEMAPHORE
+            .acquire()
+            .await
+            .map_err(|e| e.to_string())?;
+        let result = run_ytdlp_with_cookie_cascade(
+            app,
+            url,
+            &clips_path,
+            clip_id,
+            cookies_browser,
+            cookies_file,
+        )
+        .await;
+        instagram_delay().await;
+        result.map(|_| ())
+    } else {
+        run_ytdlp_with_cookie_cascade(
+            app,
+            url,
+            &clips_path,
+            clip_id,
+            cookies_browser,
+            cookies_file,
+        )
         .await
-        .map_err(|e| format!("Failed to upload video to HubSpot: {}", e))?;
+        .map(|_| ())
+    }
+}
 
-    if !upload_res.status().is_success() {
-        let status = upload_res.status();
-        let text = upload_res.text().await.unwrap_or_default();
-        return Err(format!("HubSpot file upload failed ({}): {}", status, text));
+/// Download a clip on demand, upload it to HubSpot, and persist original_clip.
+/// Best-effort: a thumbnail frame is extracted from the freshly downloaded video and
+/// uploaded as `fetched_social_thumbnail` if ffmpeg is available.
+#[tauri::command]
+async fn ensure_clip_video_uploaded(
+    app: AppHandle,
+    token: String,
+    clip_id: String,
+    url: String,
+    cookies_browser: Option<String>,
+    cookies_file: Option<String>,
+) -> Result<String, String> {
+    let temp_dir =
+        tempfile::tempdir().map_err(|e| format!("Failed to create temp download folder: {e}"))?;
+    let clips_dir = temp_dir.path().to_path_buf();
+
+    download_clip_with_rate_limits(
+        &app,
+        &url,
+        &clips_dir,
+        &clip_id,
+        &cookies_browser,
+        &cookies_file,
+    )
+    .await?;
+
+    let downloaded_rel = find_downloaded_file(&clips_dir, &clip_id)
+        .ok_or_else(|| "Downloaded video file was not found".to_string())?;
+    let downloaded_name = downloaded_rel
+        .strip_prefix("clips/")
+        .unwrap_or(&downloaded_rel);
+    let downloaded_path = clips_dir.join(downloaded_name);
+
+    let client = build_hubspot_upload_client()?;
+    let video_url =
+        upload_video_file_to_hubspot(&client, &token, &clip_id, &downloaded_path).await?;
+
+    if let Err(err) =
+        upload_video_thumbnail_best_effort(&client, &token, &clip_id, &downloaded_path).await
+    {
+        eprintln!("[ensure_clip_video_uploaded] {err}");
     }
 
-    let upload_json: serde_json::Value = upload_res
-        .json()
+    Ok(video_url)
+}
+
+/// Try to extract a frame from a local video and upload it as the clip's thumbnail.
+/// Returns `Ok(())` when no thumbnail is available (ffmpeg missing) so the caller can skip silently.
+async fn upload_video_thumbnail_best_effort(
+    client: &reqwest::Client,
+    token: &str,
+    clip_id: &str,
+    video_path: &Path,
+) -> Result<(), String> {
+    let Some(bytes) = extract_video_thumbnail_bytes(video_path).await? else {
+        return Ok(());
+    };
+    upload_thumb_bytes_to_hubspot(client, token, clip_id, bytes, "image/jpeg")
         .await
-        .map_err(|e| format!("Failed to parse upload response: {}", e))?;
-
-    let file_url = upload_json
-        .get("url")
-        .and_then(|v| v.as_str())
-        .ok_or("No URL in upload response")?
-        .to_string();
-
-    let update_body = serde_json::json!({
-        "properties": {
-            "original_clip": file_url
-        }
-    });
-
-    client
-        .patch(&format!(
-            "https://api.hubapi.com/crm/v3/objects/{}/{}",
-            EXTERNAL_CLIPS_OBJECT_ID, clip_id
-        ))
-        .bearer_auth(&token)
-        .json(&update_body)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to update clip original_clip: {}", e))?;
-
-    Ok(file_url)
+        .map(|_| ())
+        .map_err(|err| format!("thumbnail upload failed: {err}"))
 }
 
 // ── Project Commands ────────────────────────────────────────────────────────
@@ -4690,6 +4754,7 @@ pub fn run() {
             update_clip_property,
             update_video_project_property,
             upload_clip_video,
+            ensure_clip_video_uploaded,
             fetch_creators_batch,
             create_project,
             load_project,

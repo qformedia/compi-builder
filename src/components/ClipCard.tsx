@@ -314,7 +314,7 @@ export function ClipCard({
         onClick={onTogglePreview}
       >
         {useHubSpotVideo ? (
-          <HubSpotVideoPlayer src={clip.originalClip!} onClose={() => onTogglePreview?.()} />
+          <DirectVideoPlayer src={clip.originalClip!} onClose={() => onTogglePreview?.()} />
         ) : isActive && embedUrl ? (
           <>
             <iframe
@@ -712,9 +712,9 @@ export function ClipCard({
   );
 }
 
-// ── Compact HubSpot video player (fits in the small card thumbnail) ──────────
+// ── Compact direct video player (fits in the small card thumbnail) ───────────
 
-export function HubSpotVideoPlayer({ src, onClose }: { src: string; onClose: () => void }) {
+export function DirectVideoPlayer({ src, onClose }: { src: string; onClose: () => void }) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [paused, setPaused] = useState(false);
   const [progress, setProgress] = useState(0);

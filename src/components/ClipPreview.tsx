@@ -1,11 +1,11 @@
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { X } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { getEmbedUrl, HubSpotVideoPlayer } from "@/components/ClipCard";
+import { DirectVideoPlayer, getEmbedUrl } from "@/components/ClipCard";
 import type { Clip } from "@/types";
 
 interface ClipPreviewProps {
-  clip: Clip;
+  clip: Pick<Clip, "link" | "originalClip">;
   preferHubSpotPreview?: boolean;
   onClose: () => void;
 }
@@ -15,7 +15,7 @@ export function ClipPreview({ clip, preferHubSpotPreview, onClose }: ClipPreview
   const embedUrl = useHubSpotVideo ? null : getEmbedUrl(clip.link);
 
   if (useHubSpotVideo) {
-    return <HubSpotVideoPlayer src={clip.originalClip!} onClose={onClose} />;
+    return <DirectVideoPlayer src={clip.originalClip!} onClose={onClose} />;
   }
 
   if (embedUrl) {

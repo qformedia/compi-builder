@@ -23,8 +23,9 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { ClipPreview } from "@/components/ClipPreview";
 import { TagPicker } from "@/components/TagPicker";
-import { getEmbedUrl, HubSpotVideoPlayer } from "@/components/ClipCard";
+import { getEmbedUrl } from "@/components/ClipCard";
 import { resolveTagLabel } from "@/lib/tags";
 import { getPersistedThumb, persistThumb } from "@/lib/thumb-cache";
 import {
@@ -93,6 +94,13 @@ interface SocialTagModal {
   suggestion?: TagOption;
 }
 
+type PreviewUploadStatus = "queued" | "uploading" | "failed";
+
+interface PreviewUploadState {
+  status: PreviewUploadStatus;
+  error?: string;
+}
+
 interface Props {
   token: string;
   tagOptions: TagOption[];
@@ -105,6 +113,29 @@ interface Owner {
   email: string;
   firstName: string;
   lastName: string;
+}
+
+interface CreatorLinkProps {
+  name: string;
+  profileUrl: string | null;
+  className?: string;
+}
+
+/** Renders a creator name as a profile-opening button when `profileUrl` is set, otherwise as plain text. */
+function CreatorLink({ name, profileUrl, className }: CreatorLinkProps) {
+  if (!profileUrl) {
+    return <span className={className} title={name}>{name}</span>;
+  }
+  return (
+    <button
+      type="button"
+      onClick={() => openUrl(profileUrl)}
+      className={`${className ?? ""} hover:underline cursor-pointer text-left`}
+      title={`Open ${name} profile`}
+    >
+      {name}
+    </button>
+  );
 }
 
 export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Props) {
@@ -122,7 +153,24 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
   const thumbFetchedRef = useRef(new Set<string>());
   const thumbQueueRef = useRef<string[]>([]);
   const thumbActiveRef = useRef(0);
+  const clipsRef = useRef<UntaggedClip[]>([]);
+  const previewUploadQueueRef = useRef<string[]>([]);
+  const previewUploadActiveRef = useRef(false);
+  const previewUploadQueuedRef = useRef(new Set<string>());
+  const [previewUploadStates, setPreviewUploadStates] = useState<Record<string, PreviewUploadState>>({});
   const MAX_CONCURRENT_THUMBS = 3;
+
+  useEffect(() => {
+    clipsRef.current = clips;
+  }, [clips]);
+
+  const clearPreviewUploadState = useCallback((clipId: string) => {
+    setPreviewUploadStates((prev) => {
+      const next = { ...prev };
+      delete next[clipId];
+      return next;
+    });
+  }, []);
 
   // ── Social metrics backfill queue ──────────────────────────────────
   interface MetricsQueueItem { clipId: string; link: string; platform: "instagram" | "tiktok" | "other" }
@@ -698,15 +746,86 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
     return <div ref={ref} className="absolute inset-0" />;
   };
 
+  const drainPreviewUploadQueue = useRef<() => void>(() => {});
+  drainPreviewUploadQueue.current = () => {
+    if (previewUploadActiveRef.current) return;
+
+    const clipId = previewUploadQueueRef.current.shift();
+    if (!clipId) return;
+
+    const clip = clipsRef.current.find((c) => c.id === clipId);
+    if (!clip || clip.originalClip) {
+      previewUploadQueuedRef.current.delete(clipId);
+      clearPreviewUploadState(clipId);
+      drainPreviewUploadQueue.current();
+      return;
+    }
+
+    previewUploadActiveRef.current = true;
+    setPreviewUploadStates((prev) => ({
+      ...prev,
+      [clipId]: { status: "uploading" },
+    }));
+
+    (async () => {
+      try {
+        const hubspotUrl = await invoke<string>("ensure_clip_video_uploaded", {
+          token,
+          clipId,
+          url: clip.link,
+          cookiesBrowser: settings.cookiesBrowser || null,
+          cookiesFile: settings.cookiesFile || null,
+        });
+
+        setClips((prev) =>
+          prev.map((c) => (c.id === clipId ? { ...c, originalClip: hubspotUrl } : c)),
+        );
+        clearPreviewUploadState(clipId);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        setPreviewUploadStates((prev) => ({
+          ...prev,
+          [clipId]: { status: "failed", error: message },
+        }));
+      } finally {
+        previewUploadQueuedRef.current.delete(clipId);
+        previewUploadActiveRef.current = false;
+        drainPreviewUploadQueue.current();
+      }
+    })();
+  };
+
+  const enqueuePreviewUpload = useCallback((clip: UntaggedClip) => {
+    if (!token || clip.originalClip) return;
+
+    const current = previewUploadStates[clip.id];
+    if (current?.status === "queued" || current?.status === "uploading") return;
+    if (previewUploadQueuedRef.current.has(clip.id)) return;
+
+    previewUploadQueuedRef.current.add(clip.id);
+    previewUploadQueueRef.current.push(clip.id);
+    setPreviewUploadStates((prev) => ({
+      ...prev,
+      [clip.id]: { status: "queued" },
+    }));
+    drainPreviewUploadQueue.current();
+  }, [previewUploadStates, token]);
+
+  const handlePreviewToggle = useCallback((clip: UntaggedClip) => {
+    const isOpen = previewId === clip.id;
+    setPreviewId(isOpen ? null : clip.id);
+    if (!isOpen) enqueuePreviewUpload(clip);
+  }, [enqueuePreviewUpload, previewId]);
+
   const previewClip = previewId ? clips.find((c) => c.id === previewId) : null;
   const previewEmbed = previewClip ? getEmbedUrl(previewClip.link) : null;
   const preferHubSpotPreview = settings.preferHubSpotPreview !== false;
-  const useHubSpotInPreview = preferHubSpotPreview && Boolean(previewClip?.originalClip);
   const showLeftPreviewPanel =
     !!previewClip &&
     (preferHubSpotPreview
       ? Boolean(previewClip.originalClip || previewEmbed)
       : Boolean(previewEmbed));
+  const previewUploadState = previewClip ? previewUploadStates[previewClip.id] : undefined;
 
   return (
     <div className="flex h-full overflow-hidden">
@@ -716,32 +835,44 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
           <div className="flex items-center justify-between px-3 py-2 border-b flex-shrink-0">
             <div className="flex items-center gap-2 min-w-0">
               <PlatformIcon platform={previewClip.platform} />
-              <span className="text-xs font-medium truncate" title={previewClip.creatorName}>
-                {previewClip.creatorName}
-              </span>
+              <CreatorLink
+                name={previewClip.creatorName}
+                profileUrl={previewClip.creatorMainLink}
+                className="text-xs font-medium truncate"
+              />
             </div>
-            <Button variant="ghost" size="sm" onClick={() => setPreviewId(null)} className="h-6 px-2 text-xs cursor-pointer">
-              Close
-            </Button>
+            <div className="flex items-center gap-2">
+              {(previewUploadState?.status === "queued" || previewUploadState?.status === "uploading") && (
+                <span
+                  className="flex-shrink-0"
+                  title={previewUploadState.status === "queued" ? "Queued for upload" : "Downloading & uploading to HubSpot…"}
+                >
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />
+                </span>
+              )}
+              {previewUploadState?.status === "failed" && (
+                <button
+                  type="button"
+                  onClick={() => enqueuePreviewUpload(previewClip)}
+                  className="flex h-5 items-center gap-1 rounded-full bg-destructive px-1.5 text-[10px] font-medium text-destructive-foreground cursor-pointer"
+                  title={previewUploadState.error || "Retry upload"}
+                >
+                  <AlertTriangle className="h-3 w-3" />
+                  Retry
+                </button>
+              )}
+              <Button variant="ghost" size="sm" onClick={() => setPreviewId(null)} className="h-6 px-2 text-xs cursor-pointer">
+                Close
+              </Button>
+            </div>
           </div>
           <div className="relative flex-1 min-h-0 w-full">
-            {useHubSpotInPreview && previewClip.originalClip ? (
-              <HubSpotVideoPlayer
-                key={previewClip.id}
-                src={previewClip.originalClip}
-                onClose={() => setPreviewId(null)}
-              />
-            ) : (
-              previewEmbed && (
-                <iframe
-                  key={previewClip.id}
-                  src={previewEmbed}
-                  className="w-full h-full border-0"
-                  allow="autoplay; encrypted-media"
-                  allowFullScreen
-                />
-              )
-            )}
+            <ClipPreview
+              key={`${previewClip.id}-${previewClip.originalClip ?? "embed"}`}
+              clip={previewClip}
+              preferHubSpotPreview={preferHubSpotPreview}
+              onClose={() => setPreviewId(null)}
+            />
           </div>
           {previewClip.caption && (
             <div className="px-3 py-2 border-t max-h-24 overflow-auto flex-shrink-0">
@@ -931,7 +1062,7 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
                         )}
                         {canOpenPreview && (
                           <button
-                            onClick={() => setPreviewId(isPreviewing ? null : clip.id)}
+                            onClick={() => handlePreviewToggle(clip)}
                             className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 hover:opacity-100 transition-opacity cursor-pointer"
                           >
                             <Play className="h-4 w-4 text-white drop-shadow" />
@@ -981,7 +1112,11 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
 
                         {/* Creator + date */}
                         <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
-                          <span className="truncate max-w-[160px]" title={clip.creatorName}>{clip.creatorName}</span>
+                          <CreatorLink
+                            name={clip.creatorName}
+                            profileUrl={clip.creatorMainLink}
+                            className="truncate max-w-[160px]"
+                          />
                           {clip.dateFound && <span>·</span>}
                           {clip.dateFound && <span>{clip.dateFound}</span>}
                         </div>
