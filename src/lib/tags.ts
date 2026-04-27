@@ -7,6 +7,27 @@ export interface TagOption {
 
 let cachedOptions: TagOption[] | null = null;
 
+/** Parse HubSpot social media tags from legacy comma-separated and current semicolon-separated values. */
+export function parseHashtagList(raw: string | null | undefined): string[] {
+  if (!raw) return [];
+
+  const seen = new Set<string>();
+  const tags: string[] = [];
+
+  for (const part of raw.split(/[,;]/)) {
+    const tag = part.trim().replace(/^#+/, "");
+    if (!tag) continue;
+
+    const key = tag.toLowerCase();
+    if (seen.has(key)) continue;
+
+    seen.add(key);
+    tags.push(tag);
+  }
+
+  return tags;
+}
+
 /** Fetch tag options from HubSpot (cached after first call) */
 export async function fetchTagOptions(token: string): Promise<TagOption[]> {
   if (cachedOptions) return cachedOptions;

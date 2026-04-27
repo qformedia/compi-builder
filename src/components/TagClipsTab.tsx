@@ -26,7 +26,7 @@ import {
 import { ClipPreview } from "@/components/ClipPreview";
 import { TagPicker } from "@/components/TagPicker";
 import { getEmbedUrl } from "@/components/ClipCard";
-import { resolveTagLabel } from "@/lib/tags";
+import { parseHashtagList, resolveTagLabel } from "@/lib/tags";
 import { getPersistedThumb, persistThumb } from "@/lib/thumb-cache";
 import {
   Loader2,
@@ -1131,8 +1131,7 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
                         {/* Social media tags (clickable to match/create HubSpot tags) */}
                         {clip.socialMediaTags && (
                           <div className="flex flex-wrap gap-1 mt-0.5">
-                            {clip.socialMediaTags.split(";").filter((t) => t.trim()).map((tag, idx) => {
-                              const trimmed = tag.trim();
+                            {parseHashtagList(clip.socialMediaTags).map((trimmed, idx) => {
                               const { exact } = findTagMatch(trimmed);
                               const alreadyAdded = exact && clip.pendingTags.includes(exact.value);
                               return (
