@@ -21,13 +21,42 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$SCRIPT_DIR/.."
 cd "$ROOT"
 
-require_clean_working_tree() {
-  if [ -n "$(git status --porcelain)" ]; then
-    echo "==> Error: working tree is not clean."
-    echo "    Commit or discard all changes (including untracked files) before releasing,"
-    echo "    so the tag includes every new file. Refusing to bump version or tag."
+require_clean_working_tree_except_changelog() {
+  local unexpected=0
+  local line path
+
+  while IFS= read -r line; do
+    [ -z "$line" ] && continue
+    path="${line:3}"
+
+    case "$path" in
+      CHANGELOG.md) ;;
+      *)
+        unexpected=1
+        ;;
+    esac
+  done < <(git status --porcelain)
+
+  if [ "$unexpected" -ne 0 ]; then
+    echo "==> Error: working tree has changes outside CHANGELOG.md."
+    echo "    Commit or discard all feature/fix work before releasing,"
+    echo "    so the tag includes every new source file. Refusing to bump version or tag."
     echo ""
     git status --short
+    exit 1
+  fi
+}
+
+require_changelog_entry() {
+  if [ ! -f CHANGELOG.md ]; then
+    echo "==> Error: CHANGELOG.md is missing."
+    echo "    Add a plain-language entry for v$VERSION before releasing."
+    exit 1
+  fi
+
+  if ! grep -Fq "## v$VERSION " CHANGELOG.md; then
+    echo "==> Error: CHANGELOG.md has no entry for v$VERSION."
+    echo "    Run the release-changelog skill (or add the section by hand) before releasing."
     exit 1
   fi
 }
@@ -38,10 +67,10 @@ verify_bump_touches_only_version_files() {
   while IFS= read -r f; do
     [ -z "$f" ] && continue
     case "$f" in
-      package.json|package-lock.json|src-tauri/tauri.conf.json|src-tauri/Cargo.toml|src-tauri/Cargo.lock) ;;
+      CHANGELOG.md|package.json|package-lock.json|src-tauri/tauri.conf.json|src-tauri/Cargo.toml|src-tauri/Cargo.lock) ;;
       *)
         echo "==> Error: after version bump, unexpected path changed: $f"
-        echo "    Only the standard version files should differ. Refusing to commit or tag."
+        echo "    Only the standard version files and CHANGELOG.md should differ. Refusing to commit or tag."
         git status --short
         exit 1
         ;;
@@ -51,8 +80,11 @@ verify_bump_touches_only_version_files() {
   )
 }
 
-echo "==> Verifying a clean working tree (required to avoid partial tags)"
-require_clean_working_tree
+echo "==> Verifying only CHANGELOG.md is pending (required to avoid partial tags)"
+require_clean_working_tree_except_changelog
+
+echo "==> Verifying CHANGELOG.md entry for v$VERSION"
+require_changelog_entry
 
 echo "==> Bumping version to $VERSION"
 
@@ -88,7 +120,7 @@ npm run typecheck
 
 echo "==> Committing and tagging v$VERSION"
 # Include Cargo.lock when it is part of the version bump (safe no-op if unchanged)
-git add package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
+git add CHANGELOG.md package.json package-lock.json src-tauri/tauri.conf.json src-tauri/Cargo.toml src-tauri/Cargo.lock
 
 git commit -m "release v$VERSION"
 git tag "v$VERSION"

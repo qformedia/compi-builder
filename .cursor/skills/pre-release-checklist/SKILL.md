@@ -57,29 +57,35 @@ Same diagnosis approach as Step 1. Common frontend test issues:
 
 `scripts/release.sh` (via `npm run release`) will **refuse to run** if the working tree is not clean, so a tag cannot be pushed without a new file that was left untracked or uncommitted.
 
-Before the version bump, commit and push (or at least commit) all changes that belong in the release, then confirm:
+Before drafting the changelog and bumping the version, commit and push (or at least commit) all feature/fix changes that belong in the release, then confirm:
 
 ```bash
 git status   # should show: nothing to commit, working tree clean
 ```
 
-**Do not** plan to “fold” feature work into the same commit as the version bump with `git add -A` at the last second unless you already committed everything else first. The release script only stages the standard version files (`package.json`, `package-lock.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, and `src-tauri/Cargo.lock` if it changed).
+**Do not** plan to “fold” feature work into the same commit as the version bump with `git add -A` at the last second unless you already committed everything else first. The release script only stages `CHANGELOG.md` and the standard version files (`package.json`, `package-lock.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, and `src-tauri/Cargo.lock` if it changed).
 
-## Step 4 — Decide version and run the release command
+## Step 4 — Decide version and draft changelog
 
 Decide the next version number with the `release-version-bump` skill. The default is a PATCH bump; escalate to MINOR/MAJOR only when appropriate.
 
-Then bump, typecheck, commit the version change, tag, and push in one step:
+Then use the `release-changelog` skill to draft a plain-language `CHANGELOG.md` entry for the new version from the commits and diff since the previous tag. This entry is required because GitHub release notes and app updater notes are generated from it.
+
+At this point, `git status --short` should show only `CHANGELOG.md` as modified. Any other changed file means feature/fix work is not safely committed yet.
+
+## Step 5 — Run the release command
+
+Bump, typecheck, commit the version/changelog change, tag, and push in one step:
 
 ```bash
 npm run release -- X.Y.Z
 ```
 
-The script: bumps all version fields, verifies only those files differ, runs `npm run typecheck`, then commits, tags `vX.Y.Z`, and `git push && git push --tags`.
+The script: verifies the changelog entry exists, bumps all version fields, verifies only `CHANGELOG.md` and version files differ, runs `npm run typecheck`, then commits, tags `vX.Y.Z`, and `git push && git push --tags`.
 
 The tag push triggers the CI release pipeline (macOS + Windows builds).
 
-## Step 5 — Verify CI passes
+## Step 6 — Verify CI passes
 
 After pushing, check the GitHub Actions run for the release tag. If it fails, fix the issue, delete the remote tag, move it, and re-push:
 

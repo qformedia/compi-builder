@@ -115,14 +115,15 @@ The built app will be in `src-tauri/target/release/bundle/`.
 
 ## Releasing a New Version
 
-1. **Commit all feature and fix work first** and ensure `git status` is clean (no modified, staged, or untracked files). A release tag must include every new file; the release command refuses to run on a dirty tree.
-2. Decide the next version number, then from the repo root run:
+1. **Commit all feature and fix work first** and ensure only `CHANGELOG.md` is pending. A release tag must include every new file; the release command refuses to run if feature/fix work is still uncommitted.
+2. Add the plain-language entry for the new version to `CHANGELOG.md`.
+3. Decide the next version number, then from the repo root run:
 
 ```bash
 npm run release -- 0.X.XX
 ```
 
-This bumps the version in `package.json`, `tauri.conf.json`, and `Cargo.toml` (and `package-lock.json` via npm), runs `npm run typecheck` (same check as CI), then commits the version-only change, creates a `v0.X.XX` tag, and pushes. GitHub Actions will then build the release artifacts.
+This verifies the changelog entry exists, bumps the version in `package.json`, `tauri.conf.json`, and `Cargo.toml` (and `package-lock.json` via npm), runs `npm run typecheck` (same check as CI), then commits the version and changelog change, creates a `v0.X.XX` tag, and pushes. GitHub Actions will build the release artifacts and publish the matching `CHANGELOG.md` section as the release notes.
 
 ## Feedback System Setup (Supabase)
 

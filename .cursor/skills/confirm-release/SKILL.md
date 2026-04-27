@@ -19,7 +19,7 @@ Use this skill any time the agent is about to:
 It applies even when:
 
 - The user already said "release" earlier in the conversation. Implicit approval from a previous turn is not enough; confirm again right before the irreversible step, with the actual diff in front of them.
-- The agent is following the `pre-release-checklist` skill. This gate sits between Step 3 (version decided, files bumped) and Step 4 (commit, tag, push).
+- The agent is following the `pre-release-checklist` skill. This gate sits after the changelog has been drafted and before the irreversible release command or tag push.
 - The change is "small" (a typo fix, a copy tweak). The user wants to know about every release, not just risky ones.
 
 It does **not** apply to:
@@ -34,9 +34,10 @@ Send one concise message (no tool call) that contains:
 
 1. **Proposed version** and the previous tag (`v0.9.2 → v0.9.3`).
 2. **One-line headline** describing the release theme (the pre-release-checklist commit message subject is fine).
-3. **Commits since the last tag**, copied verbatim from `git log --oneline <last-tag>..HEAD`. Include every commit that will be in the tag, not just the ones the agent authored — the user needs to see if unrelated work is riding along.
-4. **Verification status**: whether `cargo test`, `npm test`, and `npm run typecheck` passed locally.
-5. **Explicit ask**: "Ready to push `vX.Y.Z`?" or equivalent. Do not start any push until the user replies with an affirmative ("yes", "go", "release it", "ship it", "approved", or similar).
+3. **Draft changelog** copied from the new `CHANGELOG.md` section for this version. This is the exact text GitHub release notes and the app updater will use.
+4. **Commits since the last tag**, copied verbatim from `git log --oneline <last-tag>..HEAD`. Include every commit that will be in the tag, not just the ones the agent authored — the user needs to see if unrelated work is riding along.
+5. **Verification status**: whether `cargo test`, `npm test`, and `npm run typecheck` passed locally.
+6. **Explicit ask**: "Ready to push `vX.Y.Z`?" or equivalent. Do not start any push until the user replies with an affirmative ("yes", "go", "release it", "ship it", "approved", or similar).
 
 Keep the message short — bullets, no prose padding. The user reads this every release.
 
@@ -46,6 +47,9 @@ Keep the message short — bullets, no prose padding. The user reads this every 
 Ready to release **vX.Y.Z** (was `v<previous>`)?
 
 **Headline**: <commit subject of the release commit>
+
+**Changelog draft**:
+<paste the CHANGELOG.md section for vX.Y.Z>
 
 **Commits in this tag**:
 - <hash> <subject>

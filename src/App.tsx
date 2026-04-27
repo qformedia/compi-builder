@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/dialog";
 import { SettingsPage } from "@/components/SettingsPage";
 import { Sidebar, type Page } from "@/components/Sidebar";
+import { ChangelogDialog } from "@/components/ChangelogDialog";
 import { FeedbackDialog } from "@/components/FeedbackDialog";
 import { SearchTab } from "@/components/SearchTab";
 import { ArrangeTab, decodeEditingNotes } from "@/components/ArrangeTab";
@@ -166,6 +167,7 @@ function App() {
     return saved ? { ...DEFAULT_SETTINGS, ...JSON.parse(saved) } : DEFAULT_SETTINGS;
   });
   const [feedbackOpen, setFeedbackOpen] = useState(false);
+  const [changelogOpen, setChangelogOpen] = useState(false);
   const [project, setProject] = useState<Project | null>(null);
   const [activePage, setActivePage] = useState<Page>("videos");
   const [activeVideoTab, setActiveVideoTab] = useState("search");
@@ -938,6 +940,7 @@ function App() {
           onPageChange={setActivePage}
           collapsed={sidebarCollapsed}
           onToggleCollapse={handleToggleSidebar}
+          onOpenChangelog={() => setChangelogOpen(true)}
         />
 
         <main className="flex flex-1 flex-col overflow-hidden">
@@ -1165,6 +1168,11 @@ function App() {
       <FeedbackDialog
         open={feedbackOpen}
         onOpenChange={setFeedbackOpen}
+      />
+
+      <ChangelogDialog
+        open={changelogOpen}
+        onOpenChange={setChangelogOpen}
       />
 
       {/* Finish Video Dialog */}

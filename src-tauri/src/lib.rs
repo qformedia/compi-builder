@@ -3572,23 +3572,7 @@ async fn search_clips_missing_creator(
             .insert("after".into(), serde_json::json!(a));
     }
 
-    let res = client
-        .post(&search_url)
-        .bearer_auth(&token)
-        .json(&body)
-        .send()
-        .await
-        .map_err(|e| format!("Clips-missing-creator search failed: {e}"))?;
-
-    if !res.status().is_success() {
-        let status = res.status();
-        let text = res.text().await.unwrap_or_default();
-        return Err(format!("HubSpot search error ({}): {}", status, text));
-    }
-
-    res.json()
-        .await
-        .map_err(|e| format!("Failed to parse search response: {e}"))
+    send_missing_creator_search(&client, &search_url, &token, body, "search").await
 }
 
 /// Count External Clips with no creator linked without fetching all rows.
@@ -3617,24 +3601,7 @@ async fn count_clips_missing_creator(token: String) -> Result<serde_json::Value,
             "limit": 1
         });
 
-        let res = client
-            .post(search_url)
-            .bearer_auth(token)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| format!("Clips-missing-creator count failed: {e}"))?;
-
-        if !res.status().is_success() {
-            let status = res.status();
-            let text = res.text().await.unwrap_or_default();
-            return Err(format!("HubSpot count error ({}): {}", status, text));
-        }
-
-        let page: serde_json::Value = res
-            .json()
-            .await
-            .map_err(|e| format!("Failed to parse count response: {e}"))?;
+        let page = send_missing_creator_search(client, search_url, token, body, "count").await?;
 
         Ok(page.get("total").and_then(|v| v.as_u64()).unwrap_or(0))
     }
@@ -3645,6 +3612,7 @@ async fn count_clips_missing_creator(token: String) -> Result<serde_json::Value,
     ];
 
     let total_missing = search_total(&client, &search_url, &token, base_filters.clone()).await?;
+    tokio::time::sleep(std::time::Duration::from_millis(350)).await;
 
     let mut published_filters = base_filters;
     published_filters.push(serde_json::json!({
@@ -3659,6 +3627,44 @@ async fn count_clips_missing_creator(token: String) -> Result<serde_json::Value,
         "inPublished": in_published,
         "other": other
     }))
+}
+
+async fn send_missing_creator_search(
+    client: &reqwest::Client,
+    search_url: &str,
+    token: &str,
+    body: serde_json::Value,
+    context: &str,
+) -> Result<serde_json::Value, String> {
+    let mut delay_ms = 1_250;
+
+    for attempt in 0..=3 {
+        let res = client
+            .post(search_url)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Clips-missing-creator {context} failed: {e}"))?;
+
+        if res.status().is_success() {
+            return res
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse {context} response: {e}"));
+        }
+
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        if status != reqwest::StatusCode::TOO_MANY_REQUESTS || attempt == 3 {
+            return Err(format!("HubSpot {context} error ({}): {}", status, text));
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        delay_ms *= 2;
+    }
+
+    Err(format!("HubSpot {context} error: retry budget exhausted"))
 }
 
 /// Search for External Clips that have a link but are missing social media metrics

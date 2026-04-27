@@ -171,6 +171,8 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v5
+
       - name: Download all build artifacts
         uses: actions/download-artifact@v7
         with:
@@ -190,6 +192,17 @@ jobs:
             [ -f "assets/$f" ] || { echo "MISSING: $f"; exit 1; }
           done
 
+      - name: Extract release notes from changelog
+        run: |
+          TAG="${{ github.ref_name }}"
+          awk -v tag="## ${TAG} " '
+            index($0, tag) == 1 { found=1; print; next }
+            found && /^## v[0-9]/ { exit }
+            found { print }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md > release-notes.md
+          test -s release-notes.md
+
       - name: Create release on public repo
         env:
           GH_TOKEN: ${{ secrets.RELEASE_TOKEN }}
@@ -200,7 +213,7 @@ jobs:
           gh release create "$TAG" assets/* \
             --repo qformedia/compi-builder-releases \
             --title "CompiFlow ${TAG}" \
-            --notes "See the assets below to download and install this version."
+            --notes-file release-notes.md
 
       - name: Generate and upload latest.json
         env:
@@ -210,13 +223,14 @@ jobs:
           VERSION="${TAG#v}"
           BASE="https://github.com/qformedia/compi-builder-releases/releases/download/${TAG}"
           PUB_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          NOTES="$(cat release-notes.md)"
 
           SIG_MAC=$(cat assets/CompiFlow_mac.app.tar.gz.sig)
           SIG_WIN=$(cat assets/CompiFlow_win-setup.exe.sig)
 
           jq -n \
             --arg version "$VERSION" \
-            --arg notes "CompiFlow ${TAG}" \
+            --arg notes "$NOTES" \
             --arg pub_date "$PUB_DATE" \
             --arg sig_mac "$SIG_MAC" \
             --arg url_mac "${BASE}/CompiFlow_mac.app.tar.gz" \

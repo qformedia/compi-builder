@@ -1,12 +1,15 @@
-import { Film, Briefcase, Settings, PanelLeftClose, PanelLeft, ShieldAlert } from "lucide-react";
+import { Film, Briefcase, Settings, PanelLeftClose, PanelLeft, ShieldAlert, History } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export type Page = "videos" | "clips" | "data-integrity" | "settings";
 
-interface NavItem {
-  id: Page;
+interface SidebarItem {
   label: string;
   icon: React.ComponentType<{ className?: string }>;
+}
+
+interface NavItem extends SidebarItem {
+  id: Page;
 }
 
 const NAV_ITEMS: NavItem[] = [
@@ -15,14 +18,24 @@ const NAV_ITEMS: NavItem[] = [
   { id: "data-integrity", label: "Integrity", icon: ShieldAlert },
 ];
 
+const CHANGELOG_ITEM: SidebarItem = { label: "Changelog", icon: History };
+const SETTINGS_ITEM: NavItem = { id: "settings", label: "Settings", icon: Settings };
+
 interface Props {
   activePage: Page;
   onPageChange: (page: Page) => void;
   collapsed: boolean;
   onToggleCollapse: () => void;
+  onOpenChangelog: () => void;
 }
 
-export function Sidebar({ activePage, onPageChange, collapsed, onToggleCollapse }: Props) {
+export function Sidebar({
+  activePage,
+  onPageChange,
+  collapsed,
+  onToggleCollapse,
+  onOpenChangelog,
+}: Props) {
   return (
     <aside
       className={cn(
@@ -55,12 +68,19 @@ export function Sidebar({ activePage, onPageChange, collapsed, onToggleCollapse 
 
         <div className="flex-1" />
 
+        <SidebarButton
+          item={CHANGELOG_ITEM}
+          active={false}
+          collapsed={collapsed}
+          onClick={onOpenChangelog}
+        />
+
         <div className="border-t border-border -mx-2 mb-1" />
         <SidebarButton
-          item={{ id: "settings", label: "Settings", icon: Settings }}
-          active={activePage === "settings"}
+          item={SETTINGS_ITEM}
+          active={activePage === SETTINGS_ITEM.id}
           collapsed={collapsed}
-          onClick={() => onPageChange("settings")}
+          onClick={() => onPageChange(SETTINGS_ITEM.id)}
         />
         <div className="h-2" />
       </nav>
@@ -74,7 +94,7 @@ function SidebarButton({
   collapsed,
   onClick,
 }: {
-  item: NavItem;
+  item: SidebarItem;
   active: boolean;
   collapsed: boolean;
   onClick: () => void;
