@@ -46,31 +46,36 @@ All tests must pass. If any fail, diagnose carefully:
 npx tsc --noEmit && npx vitest run
 ```
 
+(Release script also runs `npm run typecheck` before creating the tag, but you should still verify tests locally here.)
+
 Same diagnosis approach as Step 1. Common frontend test issues:
 
 - Tests that query by `title` or text content break when labels change. Prefer querying by `data-testid` for structural elements and `title` for interactive buttons (since `title` doubles as the tooltip).
 - Tests that check exact element counts break when layout changes add/remove wrappers. Prefer semantic queries (`getByRole`, `getByTitle`) over structural ones.
 
-## Step 3 — Decide and bump the version in all three files
+## Step 3 — Commit all work; clean working tree
 
-First, decide the next version number by following the `release-version-bump` skill. The default is a PATCH bump (third number); only escalate to MINOR for notable feature releases, and only escalate to MAJOR when the user explicitly asks.
+`scripts/release.sh` (via `npm run release`) will **refuse to run** if the working tree is not clean, so a tag cannot be pushed without a new file that was left untracked or uncommitted.
 
-Then update the version in all three files — they must match exactly:
-
-| File | Field |
-|------|-------|
-| `src-tauri/tauri.conf.json` | `"version"` |
-| `package.json` | `"version"` |
-| `src-tauri/Cargo.toml` | `version` |
-
-## Step 4 — Commit, tag, push
+Before the version bump, commit and push (or at least commit) all changes that belong in the release, then confirm:
 
 ```bash
-git add -A
-git commit -m "release vX.Y.Z\n\n<summary of changes>"
-git tag vX.Y.Z
-git push origin main --tags
+git status   # should show: nothing to commit, working tree clean
 ```
+
+**Do not** plan to “fold” feature work into the same commit as the version bump with `git add -A` at the last second unless you already committed everything else first. The release script only stages the standard version files (`package.json`, `package-lock.json`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, and `src-tauri/Cargo.lock` if it changed).
+
+## Step 4 — Decide version and run the release command
+
+Decide the next version number with the `release-version-bump` skill. The default is a PATCH bump; escalate to MINOR/MAJOR only when appropriate.
+
+Then bump, typecheck, commit the version change, tag, and push in one step:
+
+```bash
+npm run release -- X.Y.Z
+```
+
+The script: bumps all version fields, verifies only those files differ, runs `npm run typecheck`, then commits, tags `vX.Y.Z`, and `git push && git push --tags`.
 
 The tag push triggers the CI release pipeline (macOS + Windows builds).
 
@@ -84,6 +89,10 @@ git push origin :refs/tags/vX.Y.Z
 git tag vX.Y.Z
 git push origin vX.Y.Z
 ```
+
+## Common release / CI failures
+
+- **Type check fails on tag, “Cannot find module …”** — a new file was committed in spirit but never added to git before the tag. The release script now blocks a dirty working tree; always commit (including new files) before `npm run release`, and use the pre-push typecheck the script runs.
 
 ## Common test failures after UI changes
 
