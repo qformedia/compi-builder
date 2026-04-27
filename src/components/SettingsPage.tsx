@@ -264,6 +264,22 @@ export function SettingsPage({ settings, onSave, onCheckUpdate }: Props) {
             </div>
 
             <div className="grid gap-2">
+              <Label htmlFor="socialkit">SocialKit (optional)</Label>
+              <Input
+                id="socialkit"
+                type="password"
+                value={draft.socialkitApiKey}
+                onChange={(e) => setDraft({ ...draft, socialkitApiKey: e.target.value })}
+                placeholder="access key from socialkit.dev"
+                autoComplete="off"
+              />
+              <p className="text-xs text-muted-foreground">
+                Used as a fallback when free Instagram resolution fails. Leave empty to skip — those
+                clips fall back to the manual creator picker.
+              </p>
+            </div>
+
+            <div className="grid gap-2">
               <Label htmlFor="cookies">Manual cookies.txt file</Label>
               <div className="flex gap-2">
                 <Input

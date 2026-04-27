@@ -37,4 +37,7 @@ regex = "1"
 base64 = "0.22"
 which = "7"
 tempfile = "3"
+lru = "0.12"
+chrono = { version = "0.4", default-features = false, features = ["std", "now"] }
+strsim = "0.11"
 

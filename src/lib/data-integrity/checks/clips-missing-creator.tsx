@@ -1,16 +1,13 @@
 import { useState, useCallback } from "react";
-import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { AlertTriangle, CheckCircle2, Loader2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { CreatorPicker } from "@/components/CreatorPicker";
+import { CreatorSuggestionPanel } from "@/components/CreatorSuggestionPanel";
 import { SCORE_COLORS, HubSpotIcon, getPlatform, PlatformIcon } from "@/components/ClipCard";
-import { fetchClipsMissingCreator } from "@/lib/hubspot";
-import type { Clip } from "@/types";
-import type { CreatorOption } from "@/lib/hubspot";
+import { countClipsMissingCreator, fetchClipsMissingCreator } from "@/lib/hubspot";
+import type { AppSettings, Clip } from "@/types";
 import { cn } from "@/lib/utils";
-import type { IntegrityCheck, IntegritySection, Severity } from "../types";
+import type { IntegrityCheck, IntegritySection, IntegritySectionCount, Severity } from "../types";
 
 const HUBSPOT_CLIP_RECORD = "https://app-eu1.hubspot.com/contacts/146859718/record/2-192287471";
 
@@ -29,15 +26,17 @@ function clipUrlParts(link: string): { host: string; shortPath: string } {
 function ClipsMissingCreatorRow({
   item: clip,
   token,
+  settings,
   onFixed,
 }: {
   item: Clip;
   token: string;
+  settings: AppSettings;
   onFixed: (id: string, summary?: string) => void;
 }) {
-  const [associating, setAssociating] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [fixedName, setFixedName] = useState<string | null>(null);
+  // Tracks success purely for the row's green tint — `CreatorSuggestionPanel`
+  // owns its own "Fixed → name" badge once linked.
+  const [linked, setLinked] = useState(false);
   const platform = getPlatform(clip.link);
   const { host, shortPath } = clipUrlParts(clip.link);
   const tags = clip.tags?.slice(0, 3) ?? [];
@@ -45,33 +44,19 @@ function ClipsMissingCreatorRow({
   const np = clip.numPublishedVideoProjects ?? 0;
   const showThumb = !!clip.fetchedThumbnail;
 
-  const onPick = useCallback(
-    async (creator: CreatorOption | null) => {
-      if (!creator) return;
-      setError(null);
-      setAssociating(true);
-      try {
-        await invoke("associate_clip_to_creator", {
-          token,
-          clipId: clip.id,
-          creatorId: creator.id,
-        });
-        setFixedName(creator.name);
-        onFixed(clip.id, creator.name);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        setAssociating(false);
-      }
+  const onLinked = useCallback(
+    (name: string) => {
+      setLinked(true);
+      onFixed(clip.id, name);
     },
-    [clip.id, token, onFixed],
+    [clip.id, onFixed],
   );
 
   return (
     <li
       className={cn(
         "group flex flex-wrap items-center gap-3 px-4 py-2 transition-colors hover:bg-muted/30 sm:flex-nowrap",
-        fixedName && "bg-emerald-50/40",
+        linked && "bg-emerald-50/40",
       )}
     >
       <button
@@ -94,10 +79,15 @@ function ClipsMissingCreatorRow({
       </button>
 
       <div className="min-w-0 flex-1">
-        <div className="truncate text-xs" title={clip.link}>
+        <button
+          type="button"
+          className="block max-w-full cursor-pointer truncate text-left text-xs hover:underline"
+          title={clip.link}
+          onClick={() => openUrl(clip.link)}
+        >
           <span className="font-medium text-foreground">{host}</span>
           <span className="text-muted-foreground">{shortPath}</span>
-        </div>
+        </button>
         <div className="mt-1 flex min-w-0 flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground">
           {clip.score && (
             <span
@@ -129,24 +119,12 @@ function ClipsMissingCreatorRow({
               Used {np}×
             </Badge>
           )}
-          {fixedName ? (
-            <span className="inline-flex max-w-[220px] items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-800">
-              <CheckCircle2 className="h-3 w-3 flex-shrink-0" />
-              <span className="truncate">Fixed → {fixedName}</span>
-            </span>
-          ) : associating ? (
-            <span className="inline-flex items-center gap-1.5 px-1 text-[11px] text-muted-foreground">
-              <Loader2 className="h-3 w-3 animate-spin" />
-              Linking…
-            </span>
-          ) : (
-            <CreatorPicker
-              token={token}
-              value={null}
-              onChange={onPick}
-              emptyButtonLabel="Pick creator…"
-            />
-          )}
+          <CreatorSuggestionPanel
+            clip={clip}
+            token={token}
+            settings={settings}
+            onLinked={onLinked}
+          />
           <Button
             type="button"
             variant="ghost"
@@ -158,21 +136,6 @@ function ClipsMissingCreatorRow({
             <HubSpotIcon className="h-3.5 w-3.5" />
           </Button>
         </div>
-        {error && (
-          <div className="flex max-w-full items-start justify-end gap-1 text-right text-[10px] text-destructive">
-            <AlertTriangle className="h-3 w-3 flex-shrink-0" />
-            <span className="min-w-0 break-words leading-tight">{error}</span>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="h-5 shrink-0 cursor-pointer px-1 text-[10px]"
-              onClick={() => setError(null)}
-            >
-              Dismiss
-            </Button>
-          </div>
-        )}
       </div>
     </li>
   );
@@ -200,11 +163,32 @@ async function fetchClipsMissingCreatorSections(token: string): Promise<Integrit
   ];
 }
 
+async function fetchClipsMissingCreatorCounts(token: string): Promise<IntegritySectionCount[]> {
+  const counts = await countClipsMissingCreator(token);
+  return [
+    {
+      id: "in-published",
+      title: "In published videos",
+      severity: "critical" as Severity,
+      defaultOpen: true,
+      total: counts.inPublished,
+    },
+    {
+      id: "other",
+      title: "Not yet published",
+      severity: "warning" as Severity,
+      defaultOpen: false,
+      total: counts.other,
+    },
+  ];
+}
+
 export const clipsMissingCreatorCheck: IntegrityCheck<Clip> = {
   id: "clips-missing-creator",
   title: "Clips without creator",
   description:
     "Clips with no creator linked. Critical when already in a published video — the credit is publicly missing.",
+  fetchCount: fetchClipsMissingCreatorCounts,
   fetch: fetchClipsMissingCreatorSections,
   Row: ClipsMissingCreatorRow,
 };

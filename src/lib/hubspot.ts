@@ -14,6 +14,11 @@ interface HubSpotSearchResponse {
   capped?: boolean;
 }
 
+interface ClipsMissingCreatorCountResponse {
+  inPublished: number;
+  other: number;
+}
+
 /** Search External Clips by tags (and optionally scores) via the Rust backend */
 export async function searchClipsByTags(
   token: string,
@@ -168,6 +173,13 @@ export async function fetchVideoProjectClips(
 export async function fetchClipsMissingCreator(token: string): Promise<Clip[]> {
   const data = await invoke<HubSpotSearchResponse>("search_clips_missing_creator", { token });
   return data.results.map(parseClip);
+}
+
+/** Count External Clips with no creator linked without fetching all matching records. */
+export async function countClipsMissingCreator(
+  token: string,
+): Promise<ClipsMissingCreatorCountResponse> {
+  return invoke<ClipsMissingCreatorCountResponse>("count_clips_missing_creator", { token });
 }
 
 function parseClip(record: {

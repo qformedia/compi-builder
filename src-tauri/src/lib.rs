@@ -1,9 +1,13 @@
 mod helpers;
+mod resolver;
+mod socialkit;
 
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
+use std::time::Duration;
 #[cfg(target_os = "macos")]
 use tauri::Manager;
 use tauri::{AppHandle, Emitter};
@@ -18,6 +22,11 @@ use helpers::{
     parse_social_urls, probe_duration, providers_for_url, remove_existing_clip_files, strip_prefix,
     SocialPlatform,
 };
+
+use chrono::Utc;
+use strsim::jaro_winkler;
+
+pub use resolver::EnrichedProfile;
 
 /// Rate limiter: max 1 concurrent Instagram yt-dlp request
 static INSTAGRAM_SEMAPHORE: Lazy<Semaphore> = Lazy::new(|| Semaphore::new(1));
@@ -2946,7 +2955,7 @@ async fn resolve_instagram_info(
 }
 
 /// Run yt-dlp --dump-json to get metadata without downloading
-async fn ytdlp_dump_json(
+pub(crate) async fn ytdlp_dump_json(
     app: &AppHandle,
     url: &str,
     cookies_browser: &Option<String>,
@@ -3565,8 +3574,7 @@ async fn search_clips_missing_creator(token: String) -> Result<serde_json::Value
             "limit": 100
         });
         if let Some(ref a) = after {
-            body
-                .as_object_mut()
+            body.as_object_mut()
                 .unwrap()
                 .insert("after".into(), serde_json::json!(a));
         }
@@ -3615,6 +3623,76 @@ async fn search_clips_missing_creator(token: String) -> Result<serde_json::Value
     Ok(serde_json::json!({
         "total": total,
         "results": all_results
+    }))
+}
+
+/// Count External Clips with no creator linked without fetching all rows.
+/// Used by Data Integrity alerts to avoid auto-paginating HubSpot search results.
+#[tauri::command]
+async fn count_clips_missing_creator(token: String) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let search_url = format!(
+        "https://api.hubapi.com/crm/v3/objects/{}/search",
+        EXTERNAL_CLIPS_OBJECT_ID
+    );
+
+    async fn search_total(
+        client: &reqwest::Client,
+        search_url: &str,
+        token: &str,
+        filters: Vec<serde_json::Value>,
+    ) -> Result<u64, String> {
+        let body = serde_json::json!({
+            "filterGroups": [{ "filters": filters }],
+            "properties": ["hs_object_id"],
+            "limit": 1
+        });
+
+        let res = client
+            .post(search_url)
+            .bearer_auth(token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Clips-missing-creator count failed: {e}"))?;
+
+        if !res.status().is_success() {
+            let status = res.status();
+            let text = res.text().await.unwrap_or_default();
+            return Err(format!("HubSpot count error ({}): {}", status, text));
+        }
+
+        let page: serde_json::Value = res
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse count response: {e}"))?;
+
+        Ok(page.get("total").and_then(|v| v.as_u64()).unwrap_or(0))
+    }
+
+    let base_filters = vec![
+        serde_json::json!({ "propertyName": "creator_id", "operator": "NOT_HAS_PROPERTY" }),
+        serde_json::json!({ "propertyName": "link_not_working_anymore", "operator": "NEQ", "value": "true" }),
+    ];
+
+    let total_missing = search_total(&client, &search_url, &token, base_filters.clone()).await?;
+
+    let mut published_filters = base_filters;
+    published_filters.push(serde_json::json!({
+        "propertyName": "num_of_published_video_project",
+        "operator": "GT",
+        "value": "0"
+    }));
+    let in_published = search_total(&client, &search_url, &token, published_filters).await?;
+    let other = total_missing.saturating_sub(in_published);
+
+    Ok(serde_json::json!({
+        "inPublished": in_published,
+        "other": other
     }))
 }
 
@@ -3680,6 +3758,680 @@ async fn search_clips_missing_metrics(
     res.json()
         .await
         .map_err(|e| format!("Failed to parse search response: {e}"))
+}
+
+const SK_CACHE_TTL_DAYS: i64 = 7;
+
+/// HubSpot `sk_*` read for Tier-0 resolution (7-day TTL on `sk_last_enriched`).
+pub(crate) struct SkCacheRead {
+    pub handle: String,
+    pub profile_url: String,
+    pub display_name: Option<String>,
+    pub avatar: Option<String>,
+    pub last_enriched: chrono::DateTime<Utc>,
+    pub platform: String,
+}
+
+fn infer_platform_key_from_social_url(url: &str) -> String {
+    let u = url.to_lowercase();
+    if u.contains("instagram.com") {
+        "instagram".into()
+    } else if u.contains("tiktok.com") {
+        "tiktok".into()
+    } else if u.contains("youtu.be") || u.contains("youtube.com") {
+        "youtube".into()
+    } else if u.contains("pinterest.") {
+        "pinterest".into()
+    } else if u.contains("bilibili.com") {
+        "bilibili".into()
+    } else if u.contains("xiaohongshu.com") {
+        "xiaohongshu".into()
+    } else {
+        "other".into()
+    }
+}
+
+fn parse_hs_datetime_prop(s: &str) -> Option<chrono::DateTime<Utc>> {
+    let t = s.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if let Ok(n) = t.parse::<i64>() {
+        if t.chars().count() >= 13 {
+            return chrono::DateTime::from_timestamp_millis(n);
+        }
+        return chrono::DateTime::from_timestamp(n, 0);
+    }
+    if let Ok(d) = chrono::DateTime::parse_from_rfc3339(t) {
+        return Some(d.with_timezone(&Utc));
+    }
+    None
+}
+
+/// GET `sk_*` for Tier 0. Returns [None] if stale, incomplete, or missing fields.
+pub(crate) async fn read_sk_creator_cache(
+    token: &str,
+    clip_id: &str,
+) -> Result<Option<SkCacheRead>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let props: [&str; 5] = [
+        "sk_creator_handle",
+        "sk_creator_profile_url",
+        "sk_creator_display_name",
+        "sk_creator_avatar",
+        "sk_last_enriched",
+    ];
+    let q = props
+        .iter()
+        .map(|p| format!("properties={}", urlencoding::encode(p)))
+        .collect::<Vec<_>>()
+        .join("&");
+    let u = format!(
+        "https://api.hubapi.com/crm/v3/objects/{}/{}?{}",
+        EXTERNAL_CLIPS_OBJECT_ID, clip_id, q
+    );
+    let res = client
+        .get(&u)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| format!("Fetch clip failed: {e}"))?;
+    if res.status() == 404 {
+        return Ok(None);
+    }
+    if !res.status().is_success() {
+        let t = res.text().await.unwrap_or_default();
+        return Err(format!("Fetch clip: {t}"));
+    }
+    let body: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| format!("Parse fetch clip: {e}"))?;
+    let p = body
+        .get("properties")
+        .cloned()
+        .unwrap_or(serde_json::json!({}));
+    let handle = p
+        .get("sk_creator_handle")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let profile_url = p
+        .get("sk_creator_profile_url")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty() && s.starts_with("http"));
+    let le_raw = p.get("sk_last_enriched").and_then(|v| v.as_str());
+    let le = le_raw.and_then(parse_hs_datetime_prop);
+    if handle.is_none() || profile_url.is_none() {
+        return Ok(None);
+    }
+    if le.is_none() {
+        // Property missing or not parseable → treat as no cache, live resolve
+        return Ok(None);
+    }
+    let le = le.unwrap();
+    if Utc::now() - le > chrono::Duration::days(SK_CACHE_TTL_DAYS) {
+        return Ok(None);
+    }
+    let platform = infer_platform_key_from_social_url(profile_url.as_ref().unwrap());
+    let display_name = p
+        .get("sk_creator_display_name")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let avatar = p
+        .get("sk_creator_avatar")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    Ok(Some(SkCacheRead {
+        handle: handle.unwrap().to_string(),
+        profile_url: profile_url.unwrap().to_string(),
+        display_name,
+        avatar,
+        last_enriched: le,
+        platform,
+    }))
+}
+
+/// Live-resolve writeback for `sk_creator_*` + `sk_status` + `sk_last_enriched` (n8n-compatible).
+pub(crate) async fn write_clip_sk_creator_cache(
+    token: &str,
+    clip_id: &str,
+    profile: &EnrichedProfile,
+) -> Result<(), String> {
+    let now = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let mut props = serde_json::Map::new();
+    props.insert(
+        "sk_creator_handle".to_string(),
+        serde_json::json!(profile.handle),
+    );
+    props.insert(
+        "sk_creator_profile_url".to_string(),
+        serde_json::json!(profile.profile_url),
+    );
+    if let Some(ref d) = profile.display_name {
+        if !d.is_empty() {
+            props.insert("sk_creator_display_name".to_string(), serde_json::json!(d));
+        }
+    }
+    if let Some(ref a) = profile.avatar {
+        if !a.is_empty() {
+            props.insert("sk_creator_avatar".to_string(), serde_json::json!(a));
+        }
+    }
+    props.insert("sk_status".to_string(), serde_json::json!("ok"));
+    props.insert("sk_last_enriched".to_string(), serde_json::json!(now));
+    update_clip_properties(
+        token.to_string(),
+        clip_id.to_string(),
+        serde_json::Value::Object(props),
+    )
+    .await
+}
+
+// ── Creator suggest (integrity check) — resolve + match + create ─────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreatorMatch {
+    pub creator_id: String,
+    pub name: String,
+    pub main_link: Option<String>,
+    pub instagram: Option<String>,
+    pub tiktok: Option<String>,
+    pub confidence: String,
+    pub reason: String,
+    pub other_platform_url: Option<String>,
+}
+
+const CREATOR_LOOKUP_PROPS: &[&str] = &["name", "main_link", "instagram", "tiktok", "status"];
+
+const CREATOR_SEARCH_GAP: Duration = Duration::from_millis(100);
+const FUZZY_NAME_THRESHOLD: f64 = 0.85;
+const SUGGEST_MAX_MATCHES: usize = 3;
+
+fn match_rank(conf: &str) -> u8 {
+    match conf {
+        "high" => 0,
+        "highish" => 1,
+        "medium" => 2,
+        _ => 3,
+    }
+}
+
+fn instagram_handle_urls(handle: &str) -> [String; 2] {
+    [
+        format!("https://www.instagram.com/{}/", handle),
+        format!("https://www.instagram.com/{}", handle),
+    ]
+}
+
+fn tiktok_handle_urls(handle: &str) -> [String; 2] {
+    [
+        format!("https://www.tiktok.com/@{}", handle),
+        format!("https://tiktok.com/@{}", handle),
+    ]
+}
+
+async fn hubspot_search_one_creator(
+    client: &reqwest::Client,
+    token: &str,
+    prop: &str,
+    op: &str,
+    value: &str,
+) -> Result<Option<serde_json::Value>, String> {
+    let body = serde_json::json!({
+        "filterGroups": [{ "filters": [{ "propertyName": prop, "operator": op, "value": value }] }],
+        "properties": CREATOR_LOOKUP_PROPS,
+        "limit": 3
+    });
+    let url = format!(
+        "https://api.hubapi.com/crm/v3/objects/{}/search",
+        CREATORS_OBJECT_ID
+    );
+    let res = client
+        .post(&url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Creator search: {e}"))?;
+    if !res.status().is_success() {
+        return Ok(None);
+    }
+    let v: serde_json::Value = res.json().await.map_err(|e| format!("Search parse: {e}"))?;
+    Ok(v.get("results")
+        .and_then(|r| r.as_array())
+        .and_then(|a| a.first())
+        .cloned())
+}
+
+/// Build a [`CreatorMatch`] from one HubSpot search row plus a confidence/reason.
+fn creator_match_from_row(
+    row: &serde_json::Value,
+    conf: &str,
+    reason: impl Into<String>,
+    other_platform_url: Option<String>,
+) -> Option<CreatorMatch> {
+    let id = row.get("id").and_then(|i| i.as_str())?.to_string();
+    if id.is_empty() {
+        return None;
+    }
+    let p = row.get("properties");
+    let pick = |k: &str| {
+        p.and_then(|x| x.get(k))
+            .and_then(|v| v.as_str())
+            .map(String::from)
+    };
+    Some(CreatorMatch {
+        creator_id: id,
+        name: pick("name").unwrap_or_default(),
+        main_link: pick("main_link"),
+        instagram: pick("instagram"),
+        tiktok: pick("tiktok"),
+        confidence: conf.to_string(),
+        reason: reason.into(),
+        other_platform_url,
+    })
+}
+
+/// Insert/upgrade `m` into `by_id`, keeping the strongest confidence per creator.
+fn upsert_match(by_id: &mut HashMap<String, CreatorMatch>, m: CreatorMatch) {
+    match by_id.get(&m.creator_id) {
+        Some(existing) if match_rank(&m.confidence) >= match_rank(&existing.confidence) => {}
+        _ => {
+            by_id.insert(m.creator_id.clone(), m);
+        }
+    }
+}
+
+/// Run a single EQ search against `prop`, then upsert the resulting match.
+/// Skips searches we've already done (same `(prop, value)`) to keep the call count low.
+#[allow(clippy::too_many_arguments)]
+async fn search_and_record_eq(
+    client: &reqwest::Client,
+    token: &str,
+    seen: &mut HashSet<(String, String)>,
+    by_id: &mut HashMap<String, CreatorMatch>,
+    prop: &str,
+    value: &str,
+    conf: &str,
+    reason: &str,
+    other_platform_url: Option<String>,
+) {
+    if !seen.insert((prop.to_string(), value.to_string())) {
+        return;
+    }
+    if let Ok(Some(row)) = hubspot_search_one_creator(client, token, prop, "EQ", value).await {
+        if let Some(m) = creator_match_from_row(&row, conf, reason, other_platform_url) {
+            upsert_match(by_id, m);
+        }
+    }
+    tokio::time::sleep(CREATOR_SEARCH_GAP).await;
+}
+
+/// Same-platform candidate URLs to probe (profile URL plus canonical handle forms).
+fn same_platform_search_urls(
+    platform: &str,
+    profile_url: &str,
+    handle: &str,
+) -> Option<(&'static str, Vec<String>)> {
+    match platform {
+        "instagram" => {
+            let mut v: Vec<String> = std::iter::once(profile_url.to_string())
+                .chain(instagram_handle_urls(handle))
+                .collect();
+            v.sort();
+            v.dedup();
+            Some(("instagram", v))
+        }
+        "tiktok" => {
+            let mut v: Vec<String> = std::iter::once(profile_url.to_string())
+                .chain(tiktok_handle_urls(handle))
+                .collect();
+            v.sort();
+            v.dedup();
+            Some(("tiktok", v))
+        }
+        _ => None,
+    }
+}
+
+/// Cross-platform "same handle on the other network" probe set.
+fn cross_platform_search_urls(platform: &str, handle: &str) -> Option<(&'static str, Vec<String>)> {
+    match platform {
+        "instagram" => Some(("tiktok", tiktok_handle_urls(handle).to_vec())),
+        "tiktok" => Some(("instagram", instagram_handle_urls(handle).to_vec())),
+        _ => None,
+    }
+}
+
+/// Rank HubSpot creators for an enriched post author (never auto-apply; UI only).
+#[tauri::command]
+async fn match_creators_for_handle(
+    token: String,
+    profile_url: String,
+    handle: String,
+    display_name: Option<String>,
+    platform: String,
+) -> Result<Vec<CreatorMatch>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(25))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let plat = platform.to_lowercase();
+    let mut by_id: HashMap<String, CreatorMatch> = HashMap::new();
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+
+    // 1+2) Same-platform: profile URL + canonical handle URLs.
+    if let Some((field, urls)) = same_platform_search_urls(&plat, &profile_url, &handle) {
+        let reason = format!(
+            "Exact match on this creator's {} field",
+            if field == "instagram" {
+                "Instagram"
+            } else {
+                "TikTok"
+            }
+        );
+        for u in &urls {
+            search_and_record_eq(
+                &client, &token, &mut seen, &mut by_id, field, u, "high", &reason, None,
+            )
+            .await;
+        }
+    }
+
+    // 3) Cross-platform: same handle on the other network — verify-required.
+    if let Some((field, urls)) = cross_platform_search_urls(&plat, &handle) {
+        let reason = format!(
+            "Same handle is registered on this creator's {} — verify same person",
+            if field == "instagram" {
+                "Instagram"
+            } else {
+                "TikTok"
+            }
+        );
+        for u in &urls {
+            search_and_record_eq(
+                &client,
+                &token,
+                &mut seen,
+                &mut by_id,
+                field,
+                u,
+                "medium",
+                &reason,
+                Some(field.to_string()),
+            )
+            .await;
+        }
+    }
+
+    // 3') Non-IG/TT platforms: search the generic `main_link` field.
+    if same_platform_search_urls(&plat, &profile_url, &handle).is_none() {
+        if let Ok(Some(row)) =
+            hubspot_search_one_creator(&client, &token, "main_link", "CONTAINS_TOKEN", &handle)
+                .await
+        {
+            if let Some(m) = creator_match_from_row(
+                &row,
+                "high",
+                "main_link search matched this post author handle",
+                None,
+            ) {
+                upsert_match(&mut by_id, m);
+            }
+        }
+        tokio::time::sleep(CREATOR_SEARCH_GAP).await;
+    }
+
+    // 4) Display-name fuzzy fallback (low confidence; capped to keep results focused).
+    if let Some(dn) = display_name.as_deref().filter(|s| s.len() >= 2) {
+        let token_q = dn.split_whitespace().next().unwrap_or(dn).to_string();
+        if let Ok(list) = search_creators(token.clone(), token_q).await {
+            if let Some(results) = list.get("results").and_then(|r| r.as_array()) {
+                for row in results {
+                    let name = row
+                        .get("properties")
+                        .and_then(|x| x.get("name"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    let score = jaro_winkler(&dn.to_lowercase(), &name.to_lowercase());
+                    if score < FUZZY_NAME_THRESHOLD {
+                        continue;
+                    }
+                    let reason = format!(
+                        "Display name is similar to HubSpot (score {:.0}%)",
+                        score * 100.0
+                    );
+                    if let Some(m) = creator_match_from_row(row, "low", reason, None) {
+                        if by_id.contains_key(&m.creator_id) || by_id.len() < SUGGEST_MAX_MATCHES {
+                            upsert_match(&mut by_id, m);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let mut out: Vec<CreatorMatch> = by_id.into_values().collect();
+    out.sort_by_key(|m| match_rank(&m.confidence));
+    out.truncate(SUGGEST_MAX_MATCHES);
+    Ok(out)
+}
+
+/// Inspect HubSpot for an exact creator match on a given field; map first hit into an error.
+async fn duplicate_check_eq(
+    client: &reqwest::Client,
+    token: &str,
+    seen: &mut HashSet<(String, String)>,
+    prop: &str,
+    op: &str,
+    value: &str,
+    msg_template: &str,
+) -> Result<(), String> {
+    if !seen.insert((prop.to_string(), value.to_string())) {
+        return Ok(());
+    }
+    let hit = hubspot_search_one_creator(client, token, prop, op, value)
+        .await
+        .ok()
+        .flatten();
+    tokio::time::sleep(CREATOR_SEARCH_GAP).await;
+    if let Some(c) = hit {
+        let id = c.get("id").and_then(|i| i.as_str()).unwrap_or("?");
+        return Err(msg_template.replace("{id}", id));
+    }
+    Ok(())
+}
+
+const DUP_MSG_HANDLE: &str =
+    "A creator with this handle already exists in HubSpot (id {id}). Open them and apply the clip to that record.";
+const DUP_MSG_MAIN_LINK: &str =
+    "Possible duplicate (main link): id {id}. Verify and apply the existing record.";
+
+/// HubSpot label for `main_account` (display value) given our internal platform key.
+fn hubspot_main_account_label(platform_key: &str) -> &'static str {
+    match platform_key {
+        "instagram" => "Instagram",
+        "tiktok" => "TikTok",
+        "youtube" => "YouTube",
+        "pinterest" => "Pinterest",
+        "bilibili" => "Bilibili",
+        "xiaohongshu" => "Xiaohongshu",
+        "douyin" => "Douyin",
+        "kuaishou" => "Kuaishou",
+        _ => "Other",
+    }
+}
+
+/// POST a new creator with the supplied properties; returns `{ id, name }`.
+async fn hubspot_create_creator_record(
+    token: &str,
+    properties: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::new();
+    let url = format!(
+        "https://api.hubapi.com/crm/v3/objects/{}",
+        CREATORS_OBJECT_ID
+    );
+    let res = client
+        .post(&url)
+        .bearer_auth(token)
+        .json(&serde_json::json!({ "properties": properties }))
+        .send()
+        .await
+        .map_err(|e| format!("Failed to create creator: {e}"))?;
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!(
+            "HubSpot create creator error ({}): {}",
+            status, text
+        ));
+    }
+    let body: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse create response: {e}"))?;
+    let id = body.get("id").and_then(|i| i.as_str()).unwrap_or("");
+    let name = properties
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    Ok(serde_json::json!({ "id": id, "name": name }))
+}
+
+/// Pre-flight for duplicates, then create. Non-IG/TT uses `main_link`.
+#[tauri::command]
+async fn create_creator_from_enrichment(
+    token: String,
+    profile: EnrichedProfile,
+) -> Result<serde_json::Value, String> {
+    let handle = profile.handle.trim();
+    if handle.is_empty() {
+        return Err("Missing handle".to_string());
+    }
+
+    let client = reqwest::Client::new();
+    let mut seen: HashSet<(String, String)> = HashSet::new();
+
+    // Pre-flight A: exact URL collisions on instagram, tiktok, then main_link variants.
+    let insta = instagram_handle_urls(handle);
+    let ttv = tiktok_handle_urls(handle);
+    for u in &insta {
+        duplicate_check_eq(
+            &client,
+            &token,
+            &mut seen,
+            "instagram",
+            "EQ",
+            u,
+            DUP_MSG_HANDLE,
+        )
+        .await?;
+    }
+    for u in &ttv {
+        duplicate_check_eq(
+            &client,
+            &token,
+            &mut seen,
+            "tiktok",
+            "EQ",
+            u,
+            DUP_MSG_HANDLE,
+        )
+        .await?;
+    }
+    let main_link_probes = [
+        profile.profile_url.as_str(),
+        insta[0].as_str(),
+        ttv[0].as_str(),
+    ];
+    for u in main_link_probes {
+        duplicate_check_eq(
+            &client,
+            &token,
+            &mut seen,
+            "main_link",
+            "CONTAINS_TOKEN",
+            u,
+            DUP_MSG_MAIN_LINK,
+        )
+        .await?;
+    }
+
+    // Pre-flight B: fuzzy display-name match.
+    if let Some(d) = profile.display_name.as_deref().filter(|s| !s.is_empty()) {
+        if let Ok(v) = search_creators(token.clone(), d.to_string()).await {
+            if let Some(arr) = v.get("results").and_then(|r| r.as_array()) {
+                for c in arr {
+                    let name = c
+                        .get("properties")
+                        .and_then(|p| p.get("name"))
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("");
+                    if jaro_winkler(&name.to_lowercase(), &d.to_lowercase()) >= FUZZY_NAME_THRESHOLD
+                    {
+                        return Err(
+                            "Possible duplicate already in HubSpot — a creator with a very similar name was found. Apply the existing one instead, or check HubSpot first."
+                                .to_string(),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    let name = profile
+        .display_name
+        .clone()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| handle.to_string());
+    let plat = profile.platform.to_lowercase();
+    let main_account = hubspot_main_account_label(&plat);
+
+    let mut props = serde_json::json!({
+        "name": name,
+        "main_account": main_account,
+        "status": "To Contact",
+        "main_link": profile.profile_url,
+    });
+    // For IG/TT also write the dedicated platform field — that's how `create_creator` does it.
+    if plat == "instagram" || plat == "tiktok" {
+        props[plat.as_str()] = serde_json::Value::String(profile.profile_url.clone());
+    }
+
+    hubspot_create_creator_record(&token, props).await
+}
+
+/// Resolve a clip URL to an author profile. Tier-0: HubSpot `sk_*` when fresh. Live: cascade.
+#[tauri::command]
+async fn resolve_creator_from_clip_url(
+    app: tauri::AppHandle,
+    token: String,
+    clip_id: String,
+    clip_url: String,
+    socialkit_api_key: Option<String>,
+    cookies_browser: Option<String>,
+    cookies_file: Option<String>,
+    force_live: Option<bool>,
+) -> Result<EnrichedProfile, String> {
+    resolver::resolve_creator_from_url(
+        &app,
+        &token,
+        &clip_id,
+        &clip_url,
+        socialkit_api_key.as_deref(),
+        &cookies_browser,
+        &cookies_file,
+        force_live.unwrap_or(false),
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 /// Update multiple properties on an External Clip in one call
@@ -3982,9 +4734,13 @@ pub fn run() {
             list_owners,
             find_clip_by_link,
             create_external_clip,
+            resolve_creator_from_clip_url,
+            match_creators_for_handle,
+            create_creator_from_enrichment,
             associate_clip_to_creator,
             search_untagged_clips,
             search_clips_missing_creator,
+            count_clips_missing_creator,
             search_clips_missing_metrics,
             update_clip_properties,
             update_creator_properties,

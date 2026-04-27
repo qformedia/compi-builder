@@ -112,6 +112,7 @@ const settings: AppSettings = {
   downloadProviders: DEFAULT_DOWNLOAD_PROVIDERS,
   ownerEmail: "",
   ownerId: "",
+  socialkitApiKey: "",
 };
 
 const projectWithDownloadedClip: Project = {

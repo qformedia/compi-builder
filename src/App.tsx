@@ -77,6 +77,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   downloadProviders: DEFAULT_DOWNLOAD_PROVIDERS,
   ownerEmail: "",
   ownerId: "",
+  socialkitApiKey: "",
 };
 
 function buildIntegrityAlertText(c: number, w: number): string {
@@ -93,9 +94,46 @@ function buildIntegrityAlertText(c: number, w: number): string {
 }
 
 function IntegrityAlertBanner({ onNavigate }: { onNavigate: () => void }) {
-  const { hasLoadedOnce, summary } = useIntegrity();
+  const { errors, hasLoadedOnce, loadAll, summary } = useIntegrity();
   const c = summary.critical;
   const w = summary.warning;
+  const firstError = errors[0];
+  if (firstError) {
+    const text =
+      firstError.kind === "rateLimit"
+        ? "HubSpot rate limit hit while checking integrity"
+        : `Couldn't check data integrity: ${firstError.checkTitle}`;
+    return (
+      <div className="flex w-full items-center justify-between gap-3 border-b bg-gradient-to-r from-amber-500 to-orange-500 px-4 py-2 text-left text-sm font-medium text-white">
+        <button
+          type="button"
+          onClick={onNavigate}
+          className="flex min-w-0 flex-1 cursor-pointer items-center gap-2 text-left"
+        >
+          <ShieldAlert className="h-4 w-4 flex-shrink-0" />
+          <span className="min-w-0 truncate">{text}</span>
+        </button>
+        <div className="flex shrink-0 items-center gap-2">
+          <Button
+            type="button"
+            size="sm"
+            className="h-6 cursor-pointer bg-white px-3 text-xs font-bold text-orange-600 hover:bg-white/90"
+            onClick={() => void loadAll({ force: true })}
+          >
+            Retry
+          </Button>
+          <button
+            type="button"
+            onClick={onNavigate}
+            className="flex cursor-pointer items-center gap-0.5 text-xs font-bold text-white/95"
+          >
+            Open
+            <ArrowRight className="h-3.5 w-3.5" />
+          </button>
+        </div>
+      </div>
+    );
+  }
   if (!hasLoadedOnce || c + w <= 0) {
     return null;
   }
@@ -1047,7 +1085,10 @@ function App() {
             ) : (
               <div className="flex-1 overflow-hidden">
                 <TabErrorBoundary name="Data integrity">
-                  <DataIntegrityPage settings={settings} />
+                  <DataIntegrityPage
+                    isActive={activePage === "data-integrity"}
+                    settings={settings}
+                  />
                 </TabErrorBoundary>
               </div>
             )}

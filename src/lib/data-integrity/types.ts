@@ -1,4 +1,5 @@
 import type { ComponentType } from "react";
+import type { AppSettings } from "@/types";
 
 export type Severity = "critical" | "warning" | "info";
 
@@ -25,14 +26,24 @@ export interface IntegritySection<TItem extends { id: string }> {
   items: TItem[];
 }
 
+export interface IntegritySectionCount {
+  id: string;
+  title: string;
+  severity: Severity;
+  defaultOpen?: boolean;
+  total: number;
+}
+
 export interface IntegrityCheck<TItem extends { id: string }> {
   id: string;
   title: string;
   description: string;
+  fetchCount: (token: string) => Promise<IntegritySectionCount[]>;
   fetch: (token: string) => Promise<IntegritySection<TItem>[]>;
   Row: ComponentType<{
     item: TItem;
     token: string;
     onFixed: (id: string, summary?: string) => void;
+    settings: AppSettings;
   }>;
 }

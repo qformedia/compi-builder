@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useState } from "react";
 import { ChevronDown, CheckCircle2, AlertTriangle, RefreshCw, ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
 import { INTEGRITY_CHECKS, type IntegrityCheck, type IntegritySection, type Severity, maxSeverity } from "@/lib/data-integrity";
+import { useIntegrity, type IntegrityCheckData } from "@/lib/data-integrity/use-data-integrity";
 import type { AppSettings } from "@/types";
 
 const SEV_RANK: Record<Severity, number> = { info: 0, warning: 1, critical: 2 };
@@ -40,11 +41,8 @@ function severityTextClass(sev: Severity): string {
   }
 }
 
-interface CheckData {
-  sections: IntegritySection<Record<string, unknown> & { id: string }>[];
-}
-
 interface Props {
+  isActive: boolean;
   settings: AppSettings;
 }
 
@@ -52,112 +50,88 @@ function formatTime(d: Date): string {
   return d.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
 }
 
-export function DataIntegrityPage({ settings }: Props) {
+export function DataIntegrityPage({ isActive, settings }: Props) {
   const token = settings.hubspotToken;
-  const [checkData, setCheckData] = useState<Record<string, CheckData | { error: string }>>({});
-  const [checkLoading, setCheckLoading] = useState<Record<string, boolean>>({});
+  const {
+    checkData,
+    checkLoading,
+    lastRun,
+    refreshAllLoading,
+    summary,
+    loadCheck,
+    ensureFullLoaded,
+    loadAll,
+    syncVersion,
+    consumeCheckFetchSyncBatch,
+  } = useIntegrity();
   const [cardOpen, setCardOpen] = useState<Record<string, boolean>>({});
   const [sectionOpen, setSectionOpen] = useState<Record<string, boolean>>({});
-  const [lastRun, setLastRun] = useState<Date | null>(null);
-  const [refreshAllLoading, setRefreshAllLoading] = useState(false);
   const [fixedThisSession, setFixedThisSession] = useState<Record<string, number>>({});
 
-  const loadCheck = useCallback(
-    async (check: (typeof INTEGRITY_CHECKS)[number], resetSectionKeys: boolean) => {
-      if (!token) return;
-      const id = check.id;
-      setCheckLoading((l) => ({ ...l, [id]: true }));
-      try {
-        const sections = await check.fetch(token);
-        setCheckData((prev) => ({ ...prev, [id]: { sections: sections as CheckData["sections"] } }));
+  // Apply section/collapse defaults after each check fetch (mirrors previous inline loadCheck logic).
+  useLayoutEffect(() => {
+    const batch = consumeCheckFetchSyncBatch();
+    for (const { checkId, reset, sections, total } of batch) {
+      if (reset) {
         setSectionOpen((s) => {
           const next: Record<string, boolean> = { ...s };
-          if (resetSectionKeys) {
-            for (const k of Object.keys(next)) {
-              if (k.startsWith(`${id}::`)) {
-                delete next[k];
-              }
+          for (const k of Object.keys(next)) {
+            if (k.startsWith(`${checkId}::`)) {
+              delete next[k];
             }
-            for (const sec of sections) {
-              next[`${id}::${sec.id}`] = sec.defaultOpen ?? true;
-            }
-          } else {
-            for (const sec of sections) {
-              const key = `${id}::${sec.id}`;
-              if (!(key in next)) {
-                next[key] = sec.defaultOpen ?? true;
-              }
+          }
+          for (const sec of sections) {
+            next[`${checkId}::${sec.id}`] = sec.defaultOpen ?? true;
+          }
+          return next;
+        });
+      } else {
+        setSectionOpen((s) => {
+          const next: Record<string, boolean> = { ...s };
+          for (const sec of sections) {
+            const key = `${checkId}::${sec.id}`;
+            if (!(key in next)) {
+              next[key] = sec.defaultOpen ?? true;
             }
           }
           return next;
         });
-        const total = sections.reduce((a, s) => a + s.items.length, 0);
-        setCardOpen((c) => {
-          if (c[id] === undefined) {
-            return { ...c, [id]: total > 0 };
-          }
-          return c;
-        });
-      } catch (e) {
-        setCheckData((prev) => ({
-          ...prev,
-          [id]: { error: e instanceof Error ? e.message : String(e) },
-        }));
-      } finally {
-        setCheckLoading((l) => ({ ...l, [id]: false }));
-        setLastRun(new Date());
       }
-    },
-    [token],
-  );
-
-  const loadAll = useCallback(
-    async (options?: { resetSectionKeys: boolean }) => {
-      if (!token) return;
-      const reset = options?.resetSectionKeys ?? true;
-      setRefreshAllLoading(true);
-      await Promise.all(INTEGRITY_CHECKS.map((c) => loadCheck(c, reset)));
-      setRefreshAllLoading(false);
-    },
-    [token, loadCheck],
-  );
+      setCardOpen((c) => {
+        if (c[checkId] === undefined) {
+          return { ...c, [checkId]: total > 0 };
+        }
+        return c;
+      });
+    }
+  }, [syncVersion, consumeCheckFetchSyncBatch]);
 
   useEffect(() => {
-    if (token) {
-      void loadAll({ resetSectionKeys: true });
-    }
-  }, [token, loadAll]);
-
-  const summary = useMemo(() => {
-    let c = 0;
-    let w = 0;
-    let i = 0;
+    if (!isActive) return;
     for (const check of INTEGRITY_CHECKS) {
-      const d = checkData[check.id];
-      if (!d || "error" in d) continue;
-      for (const s of d.sections) {
-        const n = s.items.length;
-        if (n === 0) continue;
-        if (s.severity === "critical") c += n;
-        else if (s.severity === "warning") w += n;
-        else i += n;
+      const data = checkData[check.id];
+      const countTotal =
+        data?.counts?.reduce((sum, section) => sum + section.total, 0) ??
+        data?.sections?.reduce((sum, section) => sum + section.items.length, 0) ??
+        0;
+      if (countTotal > 0) {
+        void ensureFullLoaded(check, true);
       }
     }
-    return { critical: c, warning: w, info: i };
-  }, [checkData]);
+  }, [checkData, ensureFullLoaded, isActive]);
 
   const sortedChecks = useMemo(() => {
     return [...INTEGRITY_CHECKS].sort((a, b) => {
       const da = checkData[a.id];
       const db = checkData[b.id];
       const sevA =
-        !da || "error" in da
+        !da
           ? ("info" as Severity)
-          : maxSeverity(da.sections.map((s) => s.severity));
+          : maxSeverity((da.counts ?? da.sections ?? []).map((s) => s.severity));
       const sevB =
-        !db || "error" in db
+        !db
           ? ("info" as Severity)
-          : maxSeverity(db.sections.map((s) => s.severity));
+          : maxSeverity((db.counts ?? db.sections ?? []).map((s) => s.severity));
       return SEV_RANK[sevB] - SEV_RANK[sevA];
     });
   }, [checkData]);
@@ -210,6 +184,7 @@ export function DataIntegrityPage({ settings }: Props) {
               key={check.id}
               check={check}
               token={token}
+              settings={settings}
               data={checkData[check.id]}
               loading={checkLoading[check.id] === true}
               open={cardOpen[check.id] !== false}
@@ -248,6 +223,7 @@ function SummaryStat({ sev, count, label }: { sev: Severity; count: number; labe
 function CheckCard<T extends { id: string }>({
   check,
   token,
+  settings,
   data,
   loading,
   open,
@@ -260,7 +236,8 @@ function CheckCard<T extends { id: string }>({
 }: {
   check: IntegrityCheck<T>;
   token: string;
-  data: CheckData | { error: string } | undefined;
+  settings: AppSettings;
+  data: IntegrityCheckData | undefined;
   loading: boolean;
   open: boolean;
   onToggleCard: () => void;
@@ -270,17 +247,22 @@ function CheckCard<T extends { id: string }>({
   fixedCount: number;
   onFixedOne: () => void;
 }) {
-  const hasErr = data && "error" in data;
-  const errMsg = hasErr ? (data as { error: string }).error : undefined;
-  const sections: IntegritySection<Record<string, unknown> & { id: string }>[] = !data || "error" in data
-    ? []
-    : (data as CheckData).sections;
+  const hasErr = Boolean(data?.error);
+  const errMsg = data?.error?.message;
+  const sections: IntegritySection<Record<string, unknown> & { id: string }>[] = data?.sections ?? [];
+  const counts = data?.counts ?? sections.map((section) => ({
+    id: section.id,
+    title: section.title,
+    severity: section.severity,
+    defaultOpen: section.defaultOpen,
+    total: section.items.length,
+  }));
 
   const countTotal = useMemo(
-    () => sections.reduce((a, s) => a + s.items.length, 0),
-    [sections],
+    () => counts.reduce((a, s) => a + s.total, 0),
+    [counts],
   );
-  const cardSev: Severity = sections.length ? maxSeverity(sections.map((s) => s.severity)) : "info";
+  const cardSev: Severity = counts.length ? maxSeverity(counts.map((s) => s.severity)) : "info";
   const Row = check.Row;
 
   return (
@@ -368,7 +350,15 @@ function CheckCard<T extends { id: string }>({
             </div>
           )}
 
-          {!loading && !hasErr && countTotal > 0 && (
+          {!loading && !hasErr && countTotal > 0 && sections.length === 0 && (
+            <div className="space-y-1.5 px-4 py-3">
+              {[0, 1, 2].map((i) => (
+                <div key={i} className="h-12 animate-pulse rounded-md bg-muted/60" />
+              ))}
+            </div>
+          )}
+
+          {!loading && !hasErr && countTotal > 0 && sections.length > 0 && (
             <div className="max-h-[60vh] overflow-y-auto">
               {sections
                 .slice()
@@ -428,6 +418,7 @@ function CheckCard<T extends { id: string }>({
                               key={item.id}
                               item={item as T}
                               token={token}
+                              settings={settings}
                               onFixed={(_id, _summary) => onFixedOne()}
                             />
                           ))}

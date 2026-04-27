@@ -87,6 +87,11 @@ export interface AppSettings {
   ownerEmail: string;
   /** Cached HubSpot numeric owner ID resolved from ownerEmail */
   ownerId: string;
+  /**
+   * Optional key for socialkit.dev — Instagram-only fallback when oEmbed + embed
+   * scrape both fail. Leave empty to use manual pick on those edge cases.
+   */
+  socialkitApiKey: string;
 }
 
 export type FeedbackType = "bug" | "feature";
