@@ -22,6 +22,7 @@ import {
   Link as LinkIcon,
   Check,
   AlertCircle,
+  ChevronsUpDown,
 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { cn } from "@/lib/utils";
@@ -42,8 +43,27 @@ import type { CreatorOption, VideoProjectSummary } from "@/lib/hubspot";
 import { fetchTagOptions } from "@/lib/tags";
 import type { TagOption } from "@/lib/tags";
 import type { AppSettings, Clip, Project, ProjectClip } from "@/types";
+import {
+  Command,
+  CommandGroup,
+  CommandItem,
+  CommandList,
+} from "@/components/ui/command";
 
 const SCORE_OPTIONS = ["XL", "L", "M", "S", "XS"] as const;
+
+const LICENSE_TYPE_OPTIONS = [
+  "Recurrent",
+  "Ask First",
+  "Limited Recurrency",
+  "Singular",
+  "Money Involved",
+] as const;
+type LicenseTypeOption = (typeof LICENSE_TYPE_OPTIONS)[number];
+
+const normaliseLicenseType = (s?: string) => (s ?? "").trim().toLowerCase();
+
+const ASK_FIRST_LICENSE_NORMAL = normaliseLicenseType("Ask First");
 
 /** Cap total clips in the tag search list to bound memory (see load more). */
 const MAX_INITIAL_CLIPS = 500;
@@ -54,6 +74,62 @@ function normaliseDateRange(from: string, to: string): { dateFrom: string | null
   let t = to.trim() || null;
   if (f && t && f > t) [f, t] = [t, f];
   return { dateFrom: f, dateTo: t };
+}
+
+function LicenseTypePicker({
+  selected,
+  onChange,
+}: {
+  selected: LicenseTypeOption[];
+  onChange: (values: LicenseTypeOption[]) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const toggle = (value: LicenseTypeOption) => {
+    onChange(
+      selected.includes(value) ? selected.filter((v) => v !== value) : [...selected, value],
+    );
+  };
+  const label =
+    selected.length === 0
+      ? "License: any"
+      : selected.length === LICENSE_TYPE_OPTIONS.length
+        ? "License: all"
+        : `License: ${selected.length}/${LICENSE_TYPE_OPTIONS.length}`;
+
+  return (
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <Button variant="outline" size="sm" className="h-6 gap-0.5 px-2 text-[11px]">
+          {label}
+          <ChevronsUpDown className="h-3 w-3 shrink-0 opacity-50" />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent className="w-56 p-0" align="start">
+        <Command>
+          <CommandList>
+            <CommandGroup>
+              {LICENSE_TYPE_OPTIONS.map((opt) => {
+                const active = selected.includes(opt);
+                return (
+                  <CommandItem key={opt} value={opt} onSelect={() => toggle(opt)}>
+                    <span className={active ? "font-semibold" : ""}>
+                      {active ? "✓ " : "  "}
+                      {opt}
+                    </span>
+                  </CommandItem>
+                );
+              })}
+            </CommandGroup>
+            {selected.length > 0 && (
+              <CommandGroup>
+                <CommandItem onSelect={() => onChange([])}>Clear filter</CommandItem>
+              </CommandGroup>
+            )}
+          </CommandList>
+        </Command>
+      </PopoverContent>
+    </Popover>
+  );
 }
 
 interface Props {
@@ -259,6 +335,8 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
   }, [settings.hubspotToken]);
   const [selectedScores, setSelectedScores] = useState<string[]>([]);
   const [neverUsed, setNeverUsed] = useState(false);
+  const [selectedLicenseTypes, setSelectedLicenseTypes] = useState<LicenseTypeOption[]>([]);
+  const [requireAvailableAskFirst, setRequireAvailableAskFirst] = useState(false);
   // Initial search results (used to determine creator order)
   const [initialClips, setInitialClips] = useState<Clip[]>([]);
   const [total, setTotal] = useState(0);
@@ -280,18 +358,56 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
 
   const thumbCache = useRef(new Map<string, string | null>());
 
+  const hasAskFirstLicenseSelected = selectedLicenseTypes.some(
+    (type) => normaliseLicenseType(type) === ASK_FIRST_LICENSE_NORMAL,
+  );
+  const effectiveRequireAvailableAskFirst =
+    requireAvailableAskFirst && hasAskFirstLicenseSelected;
+
+  useEffect(() => {
+    if (!hasAskFirstLicenseSelected && requireAvailableAskFirst) {
+      setRequireAvailableAskFirst(false);
+    }
+  }, [hasAskFirstLicenseSelected, requireAvailableAskFirst]);
+
+  const matchesLicenseFilters = useCallback(
+    (clip: Clip) => {
+      const lt = normaliseLicenseType(clip.licenseType);
+      const matchesSelectedType =
+        selectedLicenseTypes.length === 0 ||
+        selectedLicenseTypes.some((opt) => normaliseLicenseType(opt) === lt);
+
+      if (!matchesSelectedType) return false;
+
+      if (effectiveRequireAvailableAskFirst && lt === ASK_FIRST_LICENSE_NORMAL) {
+        return clip.availableAskFirst === true;
+      }
+
+      return true;
+    },
+    [selectedLicenseTypes, effectiveRequireAvailableAskFirst],
+  );
+
+  const visibleInitialClips = useMemo(
+    () => initialClips.filter(matchesLicenseFilters),
+    [initialClips, matchesLicenseFilters],
+  );
+
+  const hasLicenseClientFilter =
+    selectedLicenseTypes.length > 0 || effectiveRequireAvailableAskFirst;
+
   // Extract unique creator names in order of first appearance (= most recent clip first)
   const creatorOrder = useMemo(() => {
     const seen = new Set<string>();
     const order: string[] = [];
-    for (const clip of initialClips) {
+    for (const clip of visibleInitialClips) {
       if (!seen.has(clip.creatorName)) {
         seen.add(clip.creatorName);
         order.push(clip.creatorName);
       }
     }
     return order;
-  }, [initialClips]);
+  }, [visibleInitialClips]);
 
   // For each creator, get the clips to display:
   // - If fully loaded from creatorClipsMap, use that
@@ -299,20 +415,27 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
   const getCreatorClips = useCallback(
     (creatorName: string): Clip[] => {
       if (creatorClipsMap.has(creatorName)) {
-        return creatorClipsMap.get(creatorName)!;
+        return creatorClipsMap.get(creatorName)!.filter(matchesLicenseFilters);
       }
-      return initialClips.filter((c) => c.creatorName === creatorName);
+      return initialClips
+        .filter((c) => c.creatorName === creatorName)
+        .filter(matchesLicenseFilters);
     },
-    [initialClips, creatorClipsMap],
+    [initialClips, creatorClipsMap, matchesLicenseFilters],
   );
 
   // Get first clip for a creator (for creator-level metadata like creatorId, mainLink)
   const getFirstClip = useCallback(
     (creatorName: string): Clip | undefined => {
-      return creatorClipsMap.get(creatorName)?.[0]
-        ?? initialClips.find((c) => c.creatorName === creatorName);
+      const fromMap = creatorClipsMap.get(creatorName);
+      if (fromMap) {
+        return fromMap.find((c) => matchesLicenseFilters(c));
+      }
+      return initialClips.find(
+        (c) => c.creatorName === creatorName && matchesLicenseFilters(c),
+      );
     },
-    [initialClips, creatorClipsMap],
+    [initialClips, creatorClipsMap, matchesLicenseFilters],
   );
 
   const search = async (loadMore = false) => {
@@ -637,6 +760,28 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
 
           <span className="mx-2 text-muted-foreground/30">|</span>
 
+          <LicenseTypePicker
+            selected={selectedLicenseTypes}
+            onChange={setSelectedLicenseTypes}
+          />
+
+          {hasAskFirstLicenseSelected && (
+            <button
+              type="button"
+              onClick={() => setRequireAvailableAskFirst((v) => !v)}
+              className={`rounded px-2 py-0.5 text-[11px] font-medium cursor-pointer transition-all ${
+                requireAvailableAskFirst
+                  ? "bg-orange-500 text-white"
+                  : "bg-muted text-muted-foreground hover:bg-muted/80"
+              }`}
+              title="When active, Ask First clips must have Available Ask First enabled in HubSpot"
+            >
+              Available Ask First
+            </button>
+          )}
+
+          <span className="mx-2 text-muted-foreground/30">|</span>
+
           <CreatorPicker
             token={settings.hubspotToken}
             value={selectedCreator}
@@ -695,7 +840,9 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
 
       {initialClips.length > 0 && (
         <p className="text-sm text-muted-foreground">
-          {total} clip{total !== 1 ? "s" : ""} found
+          {hasLicenseClientFilter
+            ? `${visibleInitialClips.length} of ${total} clip${total !== 1 ? "s" : ""} (filtered)`
+            : `${total} clip${total !== 1 ? "s" : ""} found`}
         </p>
       )}
 
