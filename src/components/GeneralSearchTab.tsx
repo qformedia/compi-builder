@@ -93,9 +93,52 @@ interface ClipEntry {
 
 type Phase = "input" | "review" | "creating" | "done";
 
+type SearchType = "General Search" | "Specific Search";
+
 interface Props {
   settings: AppSettings;
   onSettingsChange: (settings: AppSettings) => void;
+}
+
+/**
+ * Two-button segmented control for picking the HubSpot "Found in" value.
+ * Rendered with `shrink-0` so it stays visible when the parent flex column
+ * is forced to shrink at smaller window heights.
+ */
+function SearchTypeToggle({
+  value,
+  onChange,
+}: {
+  value: SearchType;
+  onChange: (next: SearchType) => void;
+}) {
+  const options: Array<{ key: SearchType; activeBg: string }> = [
+    { key: "General Search", activeBg: "bg-[rgb(106,120,209)]" },
+    { key: "Specific Search", activeBg: "bg-[rgb(0,164,189)]" },
+  ];
+  return (
+    <div className="flex shrink-0 rounded-md overflow-hidden border bg-muted">
+      {options.map(({ key, activeBg }, i) => {
+        const active = value === key;
+        return (
+          <button
+            key={key}
+            type="button"
+            onClick={() => onChange(key)}
+            className={`flex-1 px-3 py-2 text-xs font-medium cursor-pointer transition-colors ${
+              i > 0 ? "border-l" : ""
+            } ${
+              active
+                ? `${activeBg} text-white`
+                : "bg-background text-foreground hover:bg-accent"
+            }`}
+          >
+            {key}
+          </button>
+        );
+      })}
+    </div>
+  );
 }
 
 export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
@@ -119,7 +162,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
   const [emailError, setEmailError] = useState<string | null>(null);
   const [owners, setOwners] = useState<Array<{ id: string; email: string; firstName: string; lastName: string }>>([]);
   const [selectedOwnerId, setSelectedOwnerId] = useState(settings.ownerId || "");
-  const [searchType, setSearchType] = useState<"General Search" | "Specific Search">("General Search");
+  const [searchType, setSearchType] = useState<SearchType>("General Search");
   const [sessionHistory, setSessionHistory] = useState<ClipSessionRecord[]>([]);
   const [historyVisible, setHistoryVisible] = useState(5);
   const [expandedSession, setExpandedSession] = useState<string | null>(null);
@@ -829,7 +872,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
   return (
     <div className="flex flex-col h-full p-4 gap-4">
       {phase === "input" && (
-        <div className="flex flex-col gap-4 w-full px-6 pt-8 overflow-y-auto flex-1 min-h-0">
+        <div className="flex flex-col gap-4 w-full px-6 pt-8 overflow-y-auto flex-1 min-h-0 [&>*]:shrink-0">
           <div className="space-y-3">
             <h2 className="text-lg font-semibold">Create Clips</h2>
             <p className="text-sm text-muted-foreground">
@@ -854,30 +897,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
             )}
           </div>
 
-          <div className="flex rounded-md overflow-hidden border">
-            <button
-              onClick={() => setSearchType("General Search")}
-              className="flex-1 px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors"
-              style={
-                searchType === "General Search"
-                  ? { backgroundColor: "rgb(106, 120, 209)", color: "#fff" }
-                  : {}
-              }
-            >
-              General Search
-            </button>
-            <button
-              onClick={() => setSearchType("Specific Search")}
-              className="flex-1 px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors border-l"
-              style={
-                searchType === "Specific Search"
-                  ? { backgroundColor: "rgb(0, 164, 189)", color: "#fff" }
-                  : {}
-              }
-            >
-              Specific Search
-            </button>
-          </div>
+          <SearchTypeToggle value={searchType} onChange={setSearchType} />
 
           <Button
             onClick={handleParse}
