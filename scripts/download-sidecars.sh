@@ -17,13 +17,17 @@ echo "==> Downloading yt-dlp sidecars into $BIN_DIR"
 
 # ── macOS (universal binary works on both Intel and Apple Silicon) ────────────
 echo "  Downloading yt-dlp for macOS..."
-curl -fSL "$YT_DLP_BASE/yt-dlp_macos" -o "$BIN_DIR/yt-dlp-aarch64-apple-darwin"
-cp "$BIN_DIR/yt-dlp-aarch64-apple-darwin" "$BIN_DIR/yt-dlp-x86_64-apple-darwin"
-chmod +x "$BIN_DIR/yt-dlp-aarch64-apple-darwin" "$BIN_DIR/yt-dlp-x86_64-apple-darwin"
+TMP_ZIP="$(mktemp -t compiflow-ytdlp-macos.XXXXXX.zip)"
+curl -fSL "$YT_DLP_BASE/yt-dlp_macos.zip" -o "$TMP_ZIP"
+rm -f "$BIN_DIR/yt-dlp-aarch64-apple-darwin" "$BIN_DIR/yt-dlp-x86_64-apple-darwin"
+mkdir -p "$BIN_DIR/yt-dlp_macos"
+/usr/bin/find "$BIN_DIR/yt-dlp_macos" -mindepth 1 -depth ! -name ".gitkeep" -exec rm -rf {} +
+unzip -q "$TMP_ZIP" -d "$BIN_DIR/yt-dlp_macos"
+rm -f "$TMP_ZIP"
+test -x "$BIN_DIR/yt-dlp_macos/yt-dlp_macos"
 if command -v codesign >/dev/null 2>&1; then
-  codesign --sign - --force --timestamp=none \
-    "$BIN_DIR/yt-dlp-aarch64-apple-darwin" \
-    "$BIN_DIR/yt-dlp-x86_64-apple-darwin"
+  codesign --sign - --force --timestamp=none --deep "$BIN_DIR/yt-dlp_macos/yt-dlp_macos"
+  codesign --verify --deep --strict --verbose=2 "$BIN_DIR/yt-dlp_macos/yt-dlp_macos"
 fi
 
 # ── Windows x64 ─────────────────────────────────────────────────────────────
@@ -32,6 +36,6 @@ curl -fSL "$YT_DLP_BASE/yt-dlp.exe" -o "$BIN_DIR/yt-dlp-x86_64-pc-windows-msvc.e
 
 echo ""
 echo "==> Done! Sidecar binaries:"
-ls -lh "$BIN_DIR"/yt-dlp-*
+ls -lh "$BIN_DIR"/yt-dlp-* "$BIN_DIR"/yt-dlp_macos/yt-dlp_macos
 echo ""
 echo "You can now build the app with: npm run tauri build"

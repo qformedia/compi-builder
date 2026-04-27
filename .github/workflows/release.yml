@@ -102,11 +102,14 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           mkdir -p src-tauri/binaries
-          curl -fSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos \
-            -o src-tauri/binaries/yt-dlp-aarch64-apple-darwin
-          chmod +x src-tauri/binaries/yt-dlp-aarch64-apple-darwin
-          codesign --sign - --force --timestamp=none \
-            src-tauri/binaries/yt-dlp-aarch64-apple-darwin
+          curl -fSL https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos.zip \
+            -o yt-dlp_macos.zip
+          rm -rf src-tauri/binaries/yt-dlp_macos
+          mkdir -p src-tauri/binaries/yt-dlp_macos
+          unzip -q yt-dlp_macos.zip -d src-tauri/binaries/yt-dlp_macos
+          test -x src-tauri/binaries/yt-dlp_macos/yt-dlp_macos
+          codesign --sign - --force --timestamp=none --deep src-tauri/binaries/yt-dlp_macos/yt-dlp_macos
+          codesign --verify --deep --strict --verbose=2 src-tauri/binaries/yt-dlp_macos/yt-dlp_macos
 
       - name: Download yt-dlp sidecar (Windows)
         if: runner.os == 'Windows'

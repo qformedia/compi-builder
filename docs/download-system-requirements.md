@@ -20,8 +20,8 @@ Tauri events.
 
 | Platform | Architecture | yt-dlp binary |
 |----------|-------------|---------------|
-| macOS | aarch64 (Apple Silicon) | `yt-dlp_macos` (universal) |
-| macOS | x86_64 (Intel) | `yt-dlp_macos` (universal) |
+| macOS | aarch64 (Apple Silicon) | `binaries/yt-dlp_macos/yt-dlp_macos` (universal onedir resource) |
+| macOS | x86_64 (Intel) | `binaries/yt-dlp_macos/yt-dlp_macos` (universal onedir resource) |
 | Windows | x86_64 | `yt-dlp.exe` |
 
 Both platforms must produce identical, playable MP4 output.
@@ -62,13 +62,20 @@ Rust: download_clip()
 
 ## 4. yt-dlp Binary Resolution
 
-1. **Sidecar** (`binaries/yt-dlp`): Tauri resolves the correct binary by
-   target triple (e.g. `yt-dlp-aarch64-apple-darwin`).
-2. **System fallback**: If the sidecar fails, `find_system_ytdlp()` checks
+1. **Explicit override** (`COMPIFLOW_YTDLP_PATH`): If set, CompiFlow runs this
+   exact executable. This is the break-glass path for support or power users.
+2. **Bundled downloader**:
+   - macOS: `binaries/yt-dlp_macos/yt-dlp_macos` is bundled as a pre-extracted
+     onedir resource via `tauri.macos.conf.json`.
+   - Windows: Tauri resolves the `binaries/yt-dlp` sidecar by target triple
+     (e.g. `yt-dlp-x86_64-pc-windows-msvc.exe`).
+3. **System fallback**: Only in debug builds. `find_system_ytdlp()` checks
    `/opt/homebrew/bin/yt-dlp`, `/usr/local/bin/yt-dlp` (macOS), then
-   `which::which("yt-dlp")`.
-3. Both paths inject an augmented `PATH` on macOS so yt-dlp can find helper
-   runtimes (e.g. deno for YouTube).
+   `which::which("yt-dlp")`. Release builds do not silently fall back to a
+   user's Homebrew/pip install because that can let a broken local yt-dlp
+   hijack CompiFlow downloads.
+4. macOS paths inject an augmented `PATH` so yt-dlp can find helper runtimes
+   (e.g. deno for YouTube).
 
 ## 5. yt-dlp Arguments (Critical)
 
@@ -151,6 +158,7 @@ This logic lives in `helpers::format_selection_for_url()` and is tested.
 | `video is unavailable` / `removed` | Video no longer available |
 | `private video` | Video is private |
 | `urlopen error` / `connection` | Network error |
+| `No module named expat` / `_MEI` / `[PYI-` | Bundled yt-dlp runtime failed to start; restart/reinstall guidance |
 | Fallback | Last non-empty stderr line |
 
 ### Platform-specific errors
@@ -162,7 +170,13 @@ This logic lives in `helpers::format_selection_for_url()` and is tested.
 ### macOS
 - `.app` bundles don't inherit the user's shell `PATH`.
 - `augmented_path()` prepends `/opt/homebrew/bin` and `/usr/local/bin`.
-- Applied to both sidecar and system fallback via `.env("PATH", ...)`.
+- Applied to bundled yt-dlp and debug-only system fallback via `.env("PATH", ...)`.
+- yt-dlp is shipped as the official `yt-dlp_macos.zip` onedir artifact instead
+  of the onefile artifact. This avoids per-run PyInstaller extraction into
+  `_MEI*` temp folders, which can fail on macOS with runtime import errors such
+  as `No module named expat`.
+- `unquarantine_path()` runs recursively over the bundled yt-dlp directory once
+  per process.
 
 ### Windows
 - Chromium cookie DB locking requires the copy workaround.

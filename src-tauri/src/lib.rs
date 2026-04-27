@@ -1,21 +1,21 @@
 mod helpers;
 
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use tauri::{AppHandle, Emitter};
 #[cfg(target_os = "macos")]
 use tauri::Manager;
+use tauri::{AppHandle, Emitter};
+#[cfg(not(target_os = "macos"))]
 use tauri_plugin_shell::ShellExt;
-use once_cell::sync::Lazy;
 use tokio::sync::Semaphore;
 
 use helpers::{
-    build_filter_groups, strip_prefix, find_file_by_id, find_downloaded_file,
-    probe_duration, friendly_download_error, format_selection_for_url,
-    remove_existing_clip_files, providers_for_url, detect_platform,
-    parse_social_urls, extract_instagram_shortcode, extract_instagram_username_from_html,
-    extract_instagram_caption_from_html, extract_meta_content_text,
+    build_filter_groups, detect_platform, extract_instagram_caption_from_html,
+    extract_instagram_shortcode, extract_instagram_username_from_html, extract_meta_content_text,
+    find_downloaded_file, find_file_by_id, format_selection_for_url, friendly_download_error,
+    parse_social_urls, probe_duration, providers_for_url, remove_existing_clip_files, strip_prefix,
     SocialPlatform,
 };
 
@@ -69,7 +69,10 @@ pub struct Project {
     #[serde(rename = "createdAt")]
     pub created_at: String,
     pub clips: Vec<ProjectClip>,
-    #[serde(rename = "hubspotVideoProjectId", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        rename = "hubspotVideoProjectId",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub hubspot_video_project_id: Option<String>,
 }
 
@@ -94,21 +97,38 @@ const VIDEO_PROJECTS_OBJECT_ID: &str = "2-192286893";
 
 /// Shared clip properties requested from HubSpot
 const CLIP_PROPERTIES: &[&str] = &[
-    "link", "tags", "creator_name", "creator_status", "creator_main_link", "creator_id",
-    "score", "edited_duration", "date_found", "link_not_working_anymore",
-    "available_ask_first", "num_of_published_video_project",
-    "clip_mix_link_1", "clip_mix_link_2", "clip_mix_link_3",
-    "clip_mix_link_4", "clip_mix_link_5", "clip_mix_link_6",
-    "clip_mix_link_7", "clip_mix_link_8", "clip_mix_link_9",
-    "clip_mix_link_10", "notes", "creator_license_type", "creator_notes",
-    "fetched_social_thumbnail", "original_clip",
+    "link",
+    "tags",
+    "creator_name",
+    "creator_status",
+    "creator_main_link",
+    "creator_id",
+    "score",
+    "edited_duration",
+    "date_found",
+    "link_not_working_anymore",
+    "available_ask_first",
+    "num_of_published_video_project",
+    "clip_mix_link_1",
+    "clip_mix_link_2",
+    "clip_mix_link_3",
+    "clip_mix_link_4",
+    "clip_mix_link_5",
+    "clip_mix_link_6",
+    "clip_mix_link_7",
+    "clip_mix_link_8",
+    "clip_mix_link_9",
+    "clip_mix_link_10",
+    "notes",
+    "creator_license_type",
+    "creator_notes",
+    "fetched_social_thumbnail",
+    "original_clip",
 ];
 
 /// Fetch the options for the "tags" property (label + internal value)
 #[tauri::command]
-async fn fetch_tag_options(
-    token: String,
-) -> Result<serde_json::Value, String> {
+async fn fetch_tag_options(token: String) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
     let url = format!(
         "https://api.hubapi.com/crm/v3/properties/{}/tags",
@@ -128,18 +148,23 @@ async fn fetch_tag_options(
         return Err(format!("HubSpot property error ({}): {}", status, text));
     }
 
-    let body: serde_json::Value = res.json().await
+    let body: serde_json::Value = res
+        .json()
+        .await
         .map_err(|e| format!("Failed to parse property: {e}"))?;
 
-    let options = body.get("options")
+    let options = body
+        .get("options")
         .and_then(|o| o.as_array())
         .map(|arr| {
             arr.iter()
                 .filter(|o| o.get("hidden").and_then(|h| h.as_bool()).unwrap_or(false) == false)
-                .map(|o| serde_json::json!({
-                    "label": o.get("label").and_then(|v| v.as_str()).unwrap_or(""),
-                    "value": o.get("value").and_then(|v| v.as_str()).unwrap_or("")
-                }))
+                .map(|o| {
+                    serde_json::json!({
+                        "label": o.get("label").and_then(|v| v.as_str()).unwrap_or(""),
+                        "value": o.get("value").and_then(|v| v.as_str()).unwrap_or("")
+                    })
+                })
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
@@ -165,13 +190,19 @@ async fn create_tag_option(token: String, label: String, value: String) -> Resul
     if !get_res.status().is_success() {
         let status = get_res.status();
         let text = get_res.text().await.unwrap_or_default();
-        return Err(format!("HubSpot property fetch error ({}): {}", status, text));
+        return Err(format!(
+            "HubSpot property fetch error ({}): {}",
+            status, text
+        ));
     }
 
-    let mut body: serde_json::Value = get_res.json().await
+    let mut body: serde_json::Value = get_res
+        .json()
+        .await
         .map_err(|e| format!("Failed to parse property: {e}"))?;
 
-    let options = body.get_mut("options")
+    let options = body
+        .get_mut("options")
         .and_then(|o| o.as_array_mut())
         .ok_or("No options array in property")?;
 
@@ -222,7 +253,10 @@ async fn search_clips(
         date_to.as_deref(),
     );
 
-    let props: Vec<serde_json::Value> = CLIP_PROPERTIES.iter().map(|p| serde_json::json!(p)).collect();
+    let props: Vec<serde_json::Value> = CLIP_PROPERTIES
+        .iter()
+        .map(|p| serde_json::json!(p))
+        .collect();
 
     let mut body = serde_json::json!({
         "filterGroups": filter_groups,
@@ -232,7 +266,9 @@ async fn search_clips(
     });
 
     if let Some(after_val) = after {
-        body.as_object_mut().unwrap().insert("after".into(), serde_json::json!(after_val));
+        body.as_object_mut()
+            .unwrap()
+            .insert("after".into(), serde_json::json!(after_val));
     }
 
     let url = format!(
@@ -300,7 +336,10 @@ async fn search_creator_clips(
         }
     }
 
-    let props: Vec<serde_json::Value> = CLIP_PROPERTIES.iter().map(|p| serde_json::json!(p)).collect();
+    let props: Vec<serde_json::Value> = CLIP_PROPERTIES
+        .iter()
+        .map(|p| serde_json::json!(p))
+        .collect();
     let url = format!(
         "https://api.hubapi.com/crm/v3/objects/{}/search",
         EXTERNAL_CLIPS_OBJECT_ID
@@ -320,7 +359,9 @@ async fn search_creator_clips(
         });
 
         if let Some(ref after_val) = after {
-            body.as_object_mut().unwrap().insert("after".into(), serde_json::json!(after_val));
+            body.as_object_mut()
+                .unwrap()
+                .insert("after".into(), serde_json::json!(after_val));
         }
 
         let res = client
@@ -338,7 +379,9 @@ async fn search_creator_clips(
             return Err(format!("HubSpot API error ({}): {}", status, text));
         }
 
-        let page: serde_json::Value = res.json().await
+        let page: serde_json::Value = res
+            .json()
+            .await
             .map_err(|e| format!("Failed to parse response: {e}"))?;
 
         let next_after = page
@@ -377,10 +420,7 @@ async fn search_creator_clips(
 
 /// Search Creator records by name or main_link (OR across both fields).
 #[tauri::command]
-async fn search_creators(
-    token: String,
-    query: String,
-) -> Result<serde_json::Value, String> {
+async fn search_creators(token: String, query: String) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
     let url = format!(
         "https://api.hubapi.com/crm/v3/objects/{}/search",
@@ -444,7 +484,9 @@ async fn fetch_clip_video_projects(
         return Err(format!("HubSpot associations error ({}): {}", status, text));
     }
 
-    let body: serde_json::Value = res.json().await
+    let body: serde_json::Value = res
+        .json()
+        .await
         .map_err(|e| format!("Failed to parse associations: {e}"))?;
 
     let project_ids: Vec<String> = body
@@ -487,7 +529,9 @@ async fn fetch_clip_video_projects(
         return Err(format!("HubSpot batch read error ({}): {}", status, text));
     }
 
-    let batch_result: serde_json::Value = res2.json().await
+    let batch_result: serde_json::Value = res2
+        .json()
+        .await
         .map_err(|e| format!("Failed to parse batch read: {e}"))?;
 
     let projects = batch_result
@@ -515,10 +559,7 @@ async fn fetch_clip_video_projects(
 
 /// Search Video Projects by name (for "Open from HubSpot" flow)
 #[tauri::command]
-async fn search_video_projects(
-    token: String,
-    query: String,
-) -> Result<serde_json::Value, String> {
+async fn search_video_projects(token: String, query: String) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
     let url = format!(
         "https://api.hubapi.com/crm/v3/objects/{}/search",
@@ -597,7 +638,9 @@ async fn fetch_video_project_clips(
             return Err(format!("HubSpot associations error ({}): {}", status, text));
         }
 
-        let body: serde_json::Value = res.json().await
+        let body: serde_json::Value = res
+            .json()
+            .await
             .map_err(|e| format!("Failed to parse associations: {e}"))?;
 
         if let Some(results) = body.get("results").and_then(|r| r.as_array()) {
@@ -630,7 +673,10 @@ async fn fetch_video_project_clips(
         EXTERNAL_CLIPS_OBJECT_ID
     );
 
-    let props: Vec<serde_json::Value> = CLIP_PROPERTIES.iter().map(|p| serde_json::json!(p)).collect();
+    let props: Vec<serde_json::Value> = CLIP_PROPERTIES
+        .iter()
+        .map(|p| serde_json::json!(p))
+        .collect();
 
     let mut all_results: Vec<serde_json::Value> = Vec::new();
 
@@ -656,7 +702,9 @@ async fn fetch_video_project_clips(
             return Err(format!("HubSpot batch read error ({}): {}", status, text));
         }
 
-        let batch_result: serde_json::Value = res2.json().await
+        let batch_result: serde_json::Value = res2
+            .json()
+            .await
             .map_err(|e| format!("Failed to parse batch read: {e}"))?;
 
         if let Some(results) = batch_result.get("results").and_then(|r| r.as_array()) {
@@ -688,14 +736,16 @@ async fn batch_associate_clips(
 
     let inputs: Vec<serde_json::Value> = clip_ids
         .iter()
-        .map(|clip_id| serde_json::json!({
-            "from": { "id": clip_id },
-            "to": { "id": project_id },
-            "types": [{
-                "associationCategory": category,
-                "associationTypeId": type_id
-            }]
-        }))
+        .map(|clip_id| {
+            serde_json::json!({
+                "from": { "id": clip_id },
+                "to": { "id": project_id },
+                "types": [{
+                    "associationCategory": category,
+                    "associationTypeId": type_id
+                }]
+            })
+        })
         .collect();
 
     for chunk in inputs.chunks(100) {
@@ -779,9 +829,16 @@ async fn fetch_creators_batch(
         CREATORS_OBJECT_ID
     );
     let props = vec![
-        "main_link", "main_account", "name",
-        "douyin_id", "kuaishou_id", "xiaohongshu_id",
-        "special_requests", "notes", "license_checked", "license_type",
+        "main_link",
+        "main_account",
+        "name",
+        "douyin_id",
+        "kuaishou_id",
+        "xiaohongshu_id",
+        "special_requests",
+        "notes",
+        "license_checked",
+        "license_type",
     ];
 
     let mut all_results: Vec<serde_json::Value> = Vec::new();
@@ -807,7 +864,9 @@ async fn fetch_creators_batch(
             return Err(format!("Creator batch read error ({}): {}", status, text));
         }
 
-        let batch_result: serde_json::Value = res.json().await
+        let batch_result: serde_json::Value = res
+            .json()
+            .await
             .map_err(|e| format!("Failed to parse creator batch: {e}"))?;
 
         if let Some(results) = batch_result.get("results").and_then(|r| r.as_array()) {
@@ -854,7 +913,9 @@ async fn create_video_project(
         return Err(format!("HubSpot create error ({}): {}", status, text));
     }
 
-    let created: serde_json::Value = res.json().await
+    let created: serde_json::Value = res
+        .json()
+        .await
         .map_err(|e| format!("Failed to parse create response: {e}"))?;
 
     let project_id = created
@@ -901,10 +962,12 @@ async fn disassociate_clip_from_project(
 
     let inputs: Vec<serde_json::Value> = clip_ids
         .iter()
-        .map(|clip_id| serde_json::json!({
-            "from": { "id": clip_id },
-            "to": [{ "id": project_id }]
-        }))
+        .map(|clip_id| {
+            serde_json::json!({
+                "from": { "id": clip_id },
+                "to": [{ "id": project_id }]
+            })
+        })
         .collect();
 
     for chunk in inputs.chunks(100) {
@@ -921,7 +984,10 @@ async fn disassociate_clip_from_project(
         if !res.status().is_success() {
             let status = res.status();
             let text = res.text().await.unwrap_or_default();
-            return Err(format!("Failed to disassociate clips ({}): {}", status, text));
+            return Err(format!(
+                "Failed to disassociate clips ({}): {}",
+                status, text
+            ));
         }
     }
     Ok(())
@@ -958,7 +1024,8 @@ async fn order_clips(
             find_file_by_id(&clips_dir, id_prefix).unwrap_or(abs_path.clone())
         };
 
-        let file_name = actual_path.file_name()
+        let file_name = actual_path
+            .file_name()
             .ok_or(format!("Invalid file path: {}", actual_path.display()))?
             .to_string_lossy()
             .to_string();
@@ -999,7 +1066,6 @@ async fn order_clips(
     }))
 }
 
-
 /// Generate a CSV file matching the HubSpot workspace report format.
 /// The frontend passes pre-merged clip+creator data as JSON objects.
 /// Clips with `"missing": true` get a warning row; all other fields are preserved.
@@ -1036,11 +1102,15 @@ async fn generate_clips_csv(
     for (i, clip) in clips.iter().enumerate() {
         // Each clip carries its 1-based project position (passed from frontend).
         // Fall back to loop index + 1 if not provided.
-        let order = clip.get("order")
+        let order = clip
+            .get("order")
             .and_then(|v| v.as_u64())
             .unwrap_or((i + 1) as u64);
 
-        let is_missing = clip.get("missing").and_then(|v| v.as_bool()).unwrap_or(false);
+        let is_missing = clip
+            .get("missing")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
         let download_status = get(clip, "downloadStatus");
 
         if is_missing {
@@ -1048,33 +1118,38 @@ async fn generate_clips_csv(
             // leave all creator/duration fields empty.
             let warning_note = format!(
                 "\u{26A0} MISSING \u{2014} {}",
-                if download_status.is_empty() { "not downloaded".to_string() } else { download_status }
+                if download_status.is_empty() {
+                    "not downloaded".to_string()
+                } else {
+                    download_status
+                }
             );
             let fields = [
                 format!("{}", order),
-                String::new(),                      // Duration
-                escape(&warning_note),              // Editing Notes (warning)
+                String::new(),         // Duration
+                escape(&warning_note), // Editing Notes (warning)
                 escape(&get(clip, "link")),
-                String::new(),                      // Main Link
-                String::new(),                      // Main Account
-                String::new(),                      // Name
-                String::new(),                      // Douyin ID
-                String::new(),                      // Kuaishou ID
-                String::new(),                      // Xiaohongshu ID
-                String::new(),                      // Clip Mix Links
-                String::new(),                      // Special Requests
-                String::new(),                      // Notes
-                String::new(),                      // License Checked
-                String::new(),                      // License Type
-                String::new(),                      // Available Ask First
-                String::new(),                      // Score
+                String::new(), // Main Link
+                String::new(), // Main Account
+                String::new(), // Name
+                String::new(), // Douyin ID
+                String::new(), // Kuaishou ID
+                String::new(), // Xiaohongshu ID
+                String::new(), // Clip Mix Links
+                String::new(), // Special Requests
+                String::new(), // Notes
+                String::new(), // License Checked
+                String::new(), // License Type
+                String::new(), // Available Ask First
+                String::new(), // Score
                 escape(&get(clip, "externalClipId")),
                 escape(&get(clip, "creatorId")),
                 escape(&get(clip, "videoProjectId")),
             ];
             csv_content.push_str(&fields.join(","));
         } else {
-            let duration = clip.get("duration")
+            let duration = clip
+                .get("duration")
                 .and_then(|v| v.as_f64())
                 .map(|d| format!("{:.0}", d))
                 .unwrap_or_default();
@@ -1106,8 +1181,7 @@ async fn generate_clips_csv(
         csv_content.push('\n');
     }
 
-    fs::write(&csv_path, &csv_content)
-        .map_err(|e| format!("Failed to write CSV: {e}"))?;
+    fs::write(&csv_path, &csv_content).map_err(|e| format!("Failed to write CSV: {e}"))?;
 
     Ok(csv_path.to_string_lossy().to_string())
 }
@@ -1155,7 +1229,8 @@ async fn order_and_zip_clips(
             find_file_by_id(&clips_dir, id_prefix).unwrap_or(abs_path.clone())
         };
 
-        let file_name = actual_path.file_name()
+        let file_name = actual_path
+            .file_name()
             .ok_or(format!("Invalid file path: {}", actual_path.display()))?
             .to_string_lossy()
             .to_string();
@@ -1177,8 +1252,12 @@ async fn order_and_zip_clips(
     if let Ok(entries) = fs::read_dir(&clips_dir) {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
-            if new_used_names.contains(&name) { continue; }
-            if name.starts_with("unused_") { continue; }
+            if new_used_names.contains(&name) {
+                continue;
+            }
+            if name.starts_with("unused_") {
+                continue;
+            }
             let clean = strip_prefix(&name);
             let new_name = format!("unused_{}", clean);
             let new_path = entry.path().with_file_name(&new_name);
@@ -1188,34 +1267,31 @@ async fn order_and_zip_clips(
 
     // Step C: Create zip archive
     let zip_path = project_dir.join(format!("{}.zip", project_name));
-    let zip_file = fs::File::create(&zip_path)
-        .map_err(|e| format!("Failed to create zip: {e}"))?;
+    let zip_file = fs::File::create(&zip_path).map_err(|e| format!("Failed to create zip: {e}"))?;
     let mut zip = zip::ZipWriter::new(zip_file);
-    let options = zip::write::SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Stored); // no compression for video
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored); // no compression for video
 
     // Add clip files (missing clips have no file, so nothing to add for them)
     for (name, path) in &zip_files {
-        let data = fs::read(path)
-            .map_err(|e| format!("Failed to read {}: {e}", name))?;
+        let data = fs::read(path).map_err(|e| format!("Failed to read {}: {e}", name))?;
         zip.start_file(name, options)
             .map_err(|e| format!("Zip error: {e}"))?;
-        std::io::Write::write_all(&mut zip, &data)
-            .map_err(|e| format!("Zip write error: {e}"))?;
+        std::io::Write::write_all(&mut zip, &data).map_err(|e| format!("Zip write error: {e}"))?;
     }
 
     // Add clips.csv if it exists
     let csv_path = project_dir.join("clips.csv");
     if csv_path.exists() {
-        let csv_data = fs::read(&csv_path)
-            .map_err(|e| format!("Failed to read CSV: {e}"))?;
+        let csv_data = fs::read(&csv_path).map_err(|e| format!("Failed to read CSV: {e}"))?;
         zip.start_file("clips.csv", options)
             .map_err(|e| format!("Zip CSV error: {e}"))?;
         std::io::Write::write_all(&mut zip, &csv_data)
             .map_err(|e| format!("Zip CSV write error: {e}"))?;
     }
 
-    zip.finish().map_err(|e| format!("Failed to finalize zip: {e}"))?;
+    zip.finish()
+        .map_err(|e| format!("Failed to finalize zip: {e}"))?;
 
     Ok(serde_json::json!({
         "dir": clips_dir.to_string_lossy().to_string(),
@@ -1223,7 +1299,6 @@ async fn order_and_zip_clips(
         "newPaths": new_rel_paths
     }))
 }
-
 
 /// Import a local file as a clip: copies it into the project's clips/ folder
 /// with the HubSpot clip ID prefix. Returns the relative path.
@@ -1239,10 +1314,9 @@ async fn import_clip_file(
     fs::create_dir_all(&clips_dir).map_err(|e| format!("Failed to create clips dir: {e}"))?;
 
     let source = PathBuf::from(&source_path);
-    let ext = source.extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("mp4");
-    let original_stem = source.file_stem()
+    let ext = source.extension().and_then(|e| e.to_str()).unwrap_or("mp4");
+    let original_stem = source
+        .file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("imported");
 
@@ -1251,8 +1325,7 @@ async fn import_clip_file(
     let dest_name = format!("{}_{}.{}", clip_id, truncated, ext);
     let dest_path = clips_dir.join(&dest_name);
 
-    fs::copy(&source, &dest_path)
-        .map_err(|e| format!("Failed to copy file: {e}"))?;
+    fs::copy(&source, &dest_path).map_err(|e| format!("Failed to copy file: {e}"))?;
 
     let rel_path = format!("clips/{}", dest_name);
     let local_duration = probe_duration(&dest_path.to_string_lossy());
@@ -1265,14 +1338,21 @@ async fn import_clip_file(
 
 /// Resolve a thumbnail URL for a video link via oEmbed, URL patterns, Evil0ctal API, or yt-dlp fallback
 #[tauri::command]
-async fn fetch_thumbnail(app: AppHandle, url: String, cookies_browser: Option<String>, cookies_file: Option<String>, evil0ctal_api_url: Option<String>) -> Result<Option<String>, String> {
+async fn fetch_thumbnail(
+    app: AppHandle,
+    url: String,
+    cookies_browser: Option<String>,
+    cookies_file: Option<String>,
+    evil0ctal_api_url: Option<String>,
+) -> Result<Option<String>, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| e.to_string())?;
 
     // Douyin / Kuaishou / Bilibili: use Evil0ctal API if configured (fast, no cookies needed)
-    let is_chinese_platform = url.contains("douyin.com") || url.contains("kuaishou.com") || url.contains("bilibili.com");
+    let is_chinese_platform =
+        url.contains("douyin.com") || url.contains("kuaishou.com") || url.contains("bilibili.com");
     if is_chinese_platform {
         if let Some(ref base_url) = evil0ctal_api_url {
             if !base_url.is_empty() {
@@ -1286,20 +1366,32 @@ async fn fetch_thumbnail(app: AppHandle, url: String, cookies_browser: Option<St
     // YouTube: construct thumbnail directly (instant, no API call)
     if url.contains("youtube.com") || url.contains("youtu.be") {
         let video_id = if url.contains("youtu.be/") {
-            url.split("youtu.be/").nth(1).and_then(|s| s.split(['?', '&']).next())
+            url.split("youtu.be/")
+                .nth(1)
+                .and_then(|s| s.split(['?', '&']).next())
         } else if url.contains("/shorts/") {
-            url.split("/shorts/").nth(1).and_then(|s| s.split(['?', '&']).next())
+            url.split("/shorts/")
+                .nth(1)
+                .and_then(|s| s.split(['?', '&']).next())
         } else {
-            url.split("v=").nth(1).and_then(|s| s.split(['&', '#']).next())
+            url.split("v=")
+                .nth(1)
+                .and_then(|s| s.split(['&', '#']).next())
         };
         if let Some(id) = video_id {
-            return Ok(Some(format!("https://img.youtube.com/vi/{}/hqdefault.jpg", id)));
+            return Ok(Some(format!(
+                "https://img.youtube.com/vi/{}/hqdefault.jpg",
+                id
+            )));
         }
     }
 
     // TikTok: oEmbed API (fast)
     if url.contains("tiktok.com") {
-        let oembed_url = format!("https://www.tiktok.com/oembed?url={}", urlencoding::encode(&url));
+        let oembed_url = format!(
+            "https://www.tiktok.com/oembed?url={}",
+            urlencoding::encode(&url)
+        );
         if let Ok(res) = client.get(&oembed_url).send().await {
             if let Ok(json) = res.json::<serde_json::Value>().await {
                 if let Some(thumb) = json.get("thumbnail_url").and_then(|v| v.as_str()) {
@@ -1319,14 +1411,19 @@ async fn fetch_thumbnail(app: AppHandle, url: String, cookies_browser: Option<St
     // Universal fallback: yt-dlp --dump-json
     // Try browser cookies → cookies file → no cookies (graceful degradation)
     let has_browser = cookies_browser.as_ref().map_or(false, |b| !b.is_empty());
-    let has_file = cookies_file.as_ref().map_or(false, |f| !f.is_empty() && PathBuf::from(f).exists());
+    let has_file = cookies_file
+        .as_ref()
+        .map_or(false, |f| !f.is_empty() && PathBuf::from(f).exists());
     let mut cookie_error: Option<String> = None;
     let is_instagram = url.contains("instagram.com");
 
     // 1. Try with browser cookies (rate-limited for Instagram)
     if has_browser {
         let result = if is_instagram {
-            let _permit = INSTAGRAM_SEMAPHORE.acquire().await.map_err(|e| e.to_string())?;
+            let _permit = INSTAGRAM_SEMAPHORE
+                .acquire()
+                .await
+                .map_err(|e| e.to_string())?;
             let r = ytdlp_thumbnail_with(&app, &url, &cookies_browser, &None).await;
             instagram_delay().await;
             r
@@ -1335,7 +1432,9 @@ async fn fetch_thumbnail(app: AppHandle, url: String, cookies_browser: Option<St
         };
         match result {
             Ok(Some(thumb)) => return Ok(Some(thumb)),
-            Err(err) => { cookie_error = Some(err); }
+            Err(err) => {
+                cookie_error = Some(err);
+            }
             Ok(None) => {}
         }
     }
@@ -1393,11 +1492,16 @@ async fn extract_video_thumbnail(video_path: String) -> Result<Option<String>, S
     // Extract a single frame at 1 second into the video
     let mut cmd = tokio::process::Command::new(&ffmpeg_path);
     cmd.args([
-        "-ss", "1",
-        "-i", &video_path,
-        "-vframes", "1",
-        "-q:v", "3",
-        "-vf", "scale=480:-1",
+        "-ss",
+        "1",
+        "-i",
+        &video_path,
+        "-vframes",
+        "1",
+        "-q:v",
+        "3",
+        "-vf",
+        "scale=480:-1",
         "-y",
     ]);
     cmd.arg(out_path.as_os_str());
@@ -1417,7 +1521,10 @@ async fn extract_video_thumbnail(video_path: String) -> Result<Option<String>, S
         cmd.env("PATH", &aug);
     }
 
-    let status = cmd.status().await.map_err(|e| format!("ffmpeg failed: {e}"))?;
+    let status = cmd
+        .status()
+        .await
+        .map_err(|e| format!("ffmpeg failed: {e}"))?;
     if !status.success() || !out_path.exists() {
         eprintln!("[extract_video_thumbnail] ffmpeg exited with {}", status);
         return Ok(None);
@@ -1425,17 +1532,28 @@ async fn extract_video_thumbnail(video_path: String) -> Result<Option<String>, S
 
     use base64::Engine;
     let bytes = fs::read(&out_path).map_err(|e| format!("Failed to read thumbnail: {e}"))?;
-    Ok(Some(base64::engine::general_purpose::STANDARD.encode(&bytes)))
+    Ok(Some(
+        base64::engine::general_purpose::STANDARD.encode(&bytes),
+    ))
 }
 
 /// Fetch thumbnail URL for Chinese platforms via Evil0ctal API metadata endpoint.
-async fn evil0ctal_thumbnail(client: &reqwest::Client, api_base_url: &str, video_url: &str) -> Option<String> {
+async fn evil0ctal_thumbnail(
+    client: &reqwest::Client,
+    api_base_url: &str,
+    video_url: &str,
+) -> Option<String> {
     let base = api_base_url.trim_end_matches('/');
-    let api_url = format!("{}/api/hybrid/video_data?url={}&minimal=true",
-        base, urlencoding::encode(video_url));
+    let api_url = format!(
+        "{}/api/hybrid/video_data?url={}&minimal=true",
+        base,
+        urlencoding::encode(video_url)
+    );
 
     let resp = client.get(&api_url).send().await.ok()?;
-    if !resp.status().is_success() { return None; }
+    if !resp.status().is_success() {
+        return None;
+    }
     let body: serde_json::Value = resp.json().await.ok()?;
     let data = body.get("data").unwrap_or(&body);
 
@@ -1465,7 +1583,10 @@ async fn instagram_embed_thumbnail(client: &reqwest::Client, url: &str) -> Optio
     );
     if let Ok(res) = client
         .get(&oembed_url)
-        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        )
         .send()
         .await
     {
@@ -1482,7 +1603,10 @@ async fn instagram_embed_thumbnail(client: &reqwest::Client, url: &str) -> Optio
 
     // Strategy 2: Embed page scraping
     let embed_path = if path_type.starts_with("reel") {
-        format!("https://www.instagram.com/reel/{}/embed/captioned/", shortcode)
+        format!(
+            "https://www.instagram.com/reel/{}/embed/captioned/",
+            shortcode
+        )
     } else {
         format!("https://www.instagram.com/p/{}/embed/captioned/", shortcode)
     };
@@ -1536,7 +1660,8 @@ async fn scrape_instagram_embed(client: &reqwest::Client, embed_url: &str) -> Op
 
 /// Extract an img src URL pointing to Instagram CDN from HTML
 fn extract_img_src(html: &str) -> Option<String> {
-    let re = regex::Regex::new(r#"<img[^>]+src="(https://[^"]*?(?:cdninstagram|fbcdn)[^"]*?)""#).ok()?;
+    let re =
+        regex::Regex::new(r#"<img[^>]+src="(https://[^"]*?(?:cdninstagram|fbcdn)[^"]*?)""#).ok()?;
     let caps = re.captures(html)?;
     let url = caps.get(1)?.as_str();
     Some(url.replace("&amp;", "&"))
@@ -1646,9 +1771,7 @@ fn apply_windows_cookie_workaround(args: &mut Vec<String>) {
         Err(_) => return,
     };
 
-    let temp_profile = std::env::temp_dir()
-        .join("compiflow_cookies")
-        .join(profile);
+    let temp_profile = std::env::temp_dir().join("compiflow_cookies").join(profile);
     if fs::create_dir_all(&temp_profile).is_err() {
         return;
     }
@@ -1661,6 +1784,7 @@ fn apply_windows_cookie_workaround(args: &mut Vec<String>) {
 
 #[cfg(target_os = "macos")]
 use helpers::augmented_path;
+#[cfg(debug_assertions)]
 use helpers::find_system_ytdlp;
 
 #[cfg(target_os = "macos")]
@@ -1671,69 +1795,48 @@ static STRIP_YTDLP_QUARANTINE: std::sync::Once = std::sync::Once::new();
 fn ensure_ytdlp_sidecar_unquarantined(app: &AppHandle) {
     STRIP_YTDLP_QUARANTINE.call_once(|| {
         if let Ok(dir) = app.path().resource_dir() {
-            let path = dir.join("binaries").join(helpers::ytdlp_sidecar_filename());
-            helpers::unquarantine_path(&path);
+            helpers::unquarantine_path(&dir.join("binaries").join("yt-dlp_macos"));
+            helpers::unquarantine_path(
+                &dir.join("binaries").join(helpers::ytdlp_sidecar_filename()),
+            );
         }
     });
 }
 
-/// Run yt-dlp with args, trying bundled sidecar first then system PATH as fallback
-async fn run_ytdlp(app: &AppHandle, args: &[String]) -> Result<YtDlpOutput, String> {
-    #[allow(unused_mut)]
-    let mut args = args.to_vec();
+fn configured_ytdlp_path() -> Result<Option<PathBuf>, String> {
+    let Some(raw) = std::env::var_os("COMPIFLOW_YTDLP_PATH") else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(raw);
+    if path.exists() {
+        Ok(Some(path))
+    } else {
+        Err(format!(
+            "COMPIFLOW_YTDLP_PATH points to {}, but that file does not exist.",
+            path.display()
+        ))
+    }
+}
 
-    #[cfg(target_os = "windows")]
-    apply_windows_cookie_workaround(&mut args);
-
-    #[cfg(target_os = "macos")]
-    ensure_ytdlp_sidecar_unquarantined(app);
-
-    // Try bundled sidecar first.
-    // yt-dlp may spawn helper runtimes (e.g. deno for YouTube's n-challenge),
-    // so we inject an augmented PATH that includes Homebrew directories.
-    match app.shell().sidecar("binaries/yt-dlp") {
-        Ok(cmd) => {
-            #[cfg(target_os = "macos")]
-            let cmd = cmd.env("PATH", augmented_path());
-            match cmd.args(&args).output().await {
-                Ok(out) => {
-                    return Ok(YtDlpOutput {
-                        success: out.status.success(),
-                        stdout: out.stdout,
-                        stderr: out.stderr,
-                    });
-                }
-                Err(e) => {
-                    eprintln!("[yt-dlp] sidecar execution failed: {e}");
-                }
-            }
-        }
-        Err(e) => {
-            eprintln!("[yt-dlp] sidecar not available: {e}");
-        }
+#[cfg(target_os = "macos")]
+fn bundled_macos_ytdlp_path(app: &AppHandle) -> Option<PathBuf> {
+    let path = app
+        .path()
+        .resource_dir()
+        .ok()?
+        .join(helpers::ytdlp_macos_resource_executable());
+    if path.exists() {
+        return Some(path);
     }
 
-    // Fallback: system-installed yt-dlp (works in dev mode).
-    // macOS .app bundles don't inherit the user's shell PATH, so we probe
-    // well-known Homebrew locations before falling back to bare PATH lookup.
-    let ytdlp_path = find_system_ytdlp().ok_or_else(|| {
-        #[cfg(target_os = "windows")]
-        {
-            "yt-dlp is not installed. Install it from https://github.com/yt-dlp/yt-dlp/releases"
-                .to_string()
-        }
-        #[cfg(target_os = "macos")]
-        {
-            "yt-dlp is not installed. Install it with: brew install yt-dlp".to_string()
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        {
-            "yt-dlp is not installed.".to_string()
-        }
-    })?;
+    let dev_path =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(helpers::ytdlp_macos_resource_executable());
+    dev_path.exists().then_some(dev_path)
+}
 
-    let mut cmd = tokio::process::Command::new(&ytdlp_path);
-    cmd.args(&args);
+async fn run_ytdlp_binary(path: &PathBuf, args: &[String]) -> Result<YtDlpOutput, String> {
+    let mut cmd = tokio::process::Command::new(path);
+    cmd.args(args);
     #[cfg(target_os = "macos")]
     cmd.env("PATH", augmented_path());
     #[cfg(target_os = "windows")]
@@ -1745,7 +1848,7 @@ async fn run_ytdlp(app: &AppHandle, args: &[String]) -> Result<YtDlpOutput, Stri
     let out = cmd
         .output()
         .await
-        .map_err(|e| format!("Failed to run yt-dlp at {}: {}", ytdlp_path.display(), e))?;
+        .map_err(|e| format!("Failed to run yt-dlp at {}: {}", path.display(), e))?;
 
     Ok(YtDlpOutput {
         success: out.status.success(),
@@ -1754,8 +1857,112 @@ async fn run_ytdlp(app: &AppHandle, args: &[String]) -> Result<YtDlpOutput, Stri
     })
 }
 
+/// Run yt-dlp with args. Release builds use CompiFlow's bundled downloader unless
+/// COMPIFLOW_YTDLP_PATH is set; dev builds may fall back to a system yt-dlp.
+async fn run_ytdlp(app: &AppHandle, args: &[String]) -> Result<YtDlpOutput, String> {
+    #[allow(unused_mut)]
+    let mut args = args.to_vec();
+
+    #[cfg(target_os = "windows")]
+    apply_windows_cookie_workaround(&mut args);
+
+    if let Some(path) = configured_ytdlp_path()? {
+        return run_ytdlp_binary(&path, &args).await;
+    }
+
+    #[cfg(target_os = "macos")]
+    ensure_ytdlp_sidecar_unquarantined(app);
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(path) = bundled_macos_ytdlp_path(app) {
+            return run_ytdlp_binary(&path, &args).await;
+        }
+        eprintln!("[yt-dlp] bundled macOS resource not available");
+    }
+
+    // Try bundled sidecar first.
+    // yt-dlp may spawn helper runtimes (e.g. deno for YouTube's n-challenge),
+    // so we inject an augmented PATH that includes Homebrew directories.
+    #[cfg(not(target_os = "macos"))]
+    match app.shell().sidecar("binaries/yt-dlp") {
+        Ok(cmd) => match cmd.args(&args).output().await {
+            Ok(out) => {
+                return Ok(YtDlpOutput {
+                    success: out.status.success(),
+                    stdout: out.stdout,
+                    stderr: out.stderr,
+                });
+            }
+            Err(e) => {
+                eprintln!("[yt-dlp] sidecar execution failed: {e}");
+            }
+        },
+        Err(e) => {
+            eprintln!("[yt-dlp] sidecar not available: {e}");
+        }
+    }
+
+    // Fallback: system-installed yt-dlp for development only. Release builds
+    // must not be hijacked by a broken Homebrew/pip install on the user's PATH.
+    #[cfg(debug_assertions)]
+    {
+        let ytdlp_path = find_system_ytdlp().ok_or_else(|| {
+            #[cfg(target_os = "windows")]
+            {
+                "yt-dlp is not installed. Install it from https://github.com/yt-dlp/yt-dlp/releases"
+                    .to_string()
+            }
+            #[cfg(target_os = "macos")]
+            {
+                "yt-dlp is not installed. Install it with: brew install yt-dlp".to_string()
+            }
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+            {
+                "yt-dlp is not installed.".to_string()
+            }
+        })?;
+        return run_ytdlp_binary(&ytdlp_path, &args).await;
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        #[cfg(target_os = "windows")]
+        {
+            Err(concat!(
+                "CompiFlow's bundled yt-dlp failed to start. ",
+                "Reinstall CompiFlow from the official installer, or set ",
+                "COMPIFLOW_YTDLP_PATH to a working yt-dlp binary."
+            )
+            .to_string())
+        }
+        #[cfg(target_os = "macos")]
+        {
+            Err(concat!(
+                "CompiFlow's bundled yt-dlp failed to start. ",
+                "Reinstall CompiFlow from the latest DMG, or set ",
+                "COMPIFLOW_YTDLP_PATH to a working yt-dlp binary."
+            )
+            .to_string())
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        {
+            Err(concat!(
+                "CompiFlow's bundled yt-dlp failed to start. ",
+                "Set COMPIFLOW_YTDLP_PATH to a working yt-dlp binary."
+            )
+            .to_string())
+        }
+    }
+}
+
 /// Run yt-dlp --dump-json with a specific cookie method
-async fn ytdlp_thumbnail_with(app: &AppHandle, url: &str, cookies_browser: &Option<String>, cookies_file: &Option<String>) -> Result<Option<String>, String> {
+async fn ytdlp_thumbnail_with(
+    app: &AppHandle,
+    url: &str,
+    cookies_browser: &Option<String>,
+    cookies_file: &Option<String>,
+) -> Result<Option<String>, String> {
     let mut args: Vec<String> = vec![
         "--dump-json".into(),
         "--skip-download".into(),
@@ -1795,7 +2002,10 @@ async fn ytdlp_thumbnail_with(app: &AppHandle, url: &str, cookies_browser: &Opti
             || stderr_lower.contains("failed to decrypt")
             || stderr_lower.contains("could not copy")
         {
-            let browser_name = cookies_browser.as_ref().map(|b| b.as_str()).unwrap_or("your browser");
+            let browser_name = cookies_browser
+                .as_ref()
+                .map(|b| b.as_str())
+                .unwrap_or("your browser");
             return Err(format!(
                 "Could not read cookies from {}. Make sure {} is installed and try closing it before searching.",
                 browser_name, browser_name
@@ -1807,7 +2017,8 @@ async fn ytdlp_thumbnail_with(app: &AppHandle, url: &str, cookies_browser: &Opti
 
     let json: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|_| "Failed to parse yt-dlp output".to_string())?;
-    Ok(json.get("thumbnail")
+    Ok(json
+        .get("thumbnail")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string()))
 }
@@ -1826,10 +2037,15 @@ async fn upload_thumb_bytes_to_hubspot(
         return Err("Image data is empty".into());
     }
 
-    let ext = if content_type.contains("png") { "png" }
-        else if content_type.contains("webp") { "webp" }
-        else if content_type.contains("gif") { "gif" }
-        else { "jpg" };
+    let ext = if content_type.contains("png") {
+        "png"
+    } else if content_type.contains("webp") {
+        "webp"
+    } else if content_type.contains("gif") {
+        "gif"
+    } else {
+        "jpg"
+    };
 
     let filename = format!("thumb_{}.{}", clip_id, ext);
     let file_part = reqwest::multipart::Part::bytes(img_bytes)
@@ -1902,7 +2118,11 @@ async fn upload_thumb_bytes_to_hubspot(
 }
 
 #[tauri::command]
-async fn upload_clip_thumbnail(token: String, clip_id: String, thumbnail_url: String) -> Result<String, String> {
+async fn upload_clip_thumbnail(
+    token: String,
+    clip_id: String,
+    thumbnail_url: String,
+) -> Result<String, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -1910,7 +2130,10 @@ async fn upload_clip_thumbnail(token: String, clip_id: String, thumbnail_url: St
 
     let img_response = client
         .get(&thumbnail_url)
-        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        )
         .send()
         .await
         .map_err(|e| format!("Failed to download thumbnail: {}", e))?;
@@ -1927,7 +2150,8 @@ async fn upload_clip_thumbnail(token: String, clip_id: String, thumbnail_url: St
         .await
         .map_err(|e| format!("Failed to read thumbnail bytes: {}", e))?;
 
-    upload_thumb_bytes_to_hubspot(&client, &token, &clip_id, img_bytes.to_vec(), &content_type).await
+    upload_thumb_bytes_to_hubspot(&client, &token, &clip_id, img_bytes.to_vec(), &content_type)
+        .await
 }
 
 #[tauri::command]
@@ -2010,7 +2234,6 @@ async fn update_clip_property(
     Ok(())
 }
 
-
 /// Update a single property on a Video Project in HubSpot
 #[tauri::command]
 async fn update_video_project_property(
@@ -2062,8 +2285,7 @@ async fn upload_clip_video(
         return Err(format!("File not found: {}", file_path));
     }
 
-    let file_bytes = std::fs::read(&path)
-        .map_err(|e| format!("Failed to read file: {}", e))?;
+    let file_bytes = std::fs::read(&path).map_err(|e| format!("Failed to read file: {}", e))?;
 
     let filename = format!("clip_{}.mp4", clip_id);
 
@@ -2104,10 +2326,13 @@ async fn upload_clip_video(
         return Err(format!("HubSpot file upload failed ({}): {}", status, text));
     }
 
-    let upload_json: serde_json::Value = upload_res.json().await
+    let upload_json: serde_json::Value = upload_res
+        .json()
+        .await
         .map_err(|e| format!("Failed to parse upload response: {}", e))?;
 
-    let file_url = upload_json.get("url")
+    let file_url = upload_json
+        .get("url")
         .and_then(|v| v.as_str())
         .ok_or("No URL in upload response")?
         .to_string();
@@ -2153,8 +2378,7 @@ fn create_project(root_folder: String, name: String) -> Result<Project, String> 
 #[tauri::command]
 fn load_project(root_folder: String, name: String) -> Result<Project, String> {
     let path = PathBuf::from(&root_folder).join(&name).join("project.json");
-    let data = fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read project: {e}"))?;
+    let data = fs::read_to_string(&path).map_err(|e| format!("Failed to read project: {e}"))?;
     serde_json::from_str(&data).map_err(|e| format!("Invalid project file: {e}"))
 }
 
@@ -2192,8 +2416,7 @@ async fn download_clip(
     url: String,
     cookies_browser: Option<String>,
     cookies_file: Option<String>,
-    #[allow(unused_variables)]
-    force: Option<bool>,
+    #[allow(unused_variables)] force: Option<bool>,
     hubspot_url: Option<String>,
     evil0ctal_api_url: Option<String>,
     download_providers: Option<String>,
@@ -2205,18 +2428,24 @@ async fn download_clip(
     if force.unwrap_or(false) {
         let removed = remove_existing_clip_files(&clips_dir, &clip_id);
         if !removed.is_empty() {
-            eprintln!("[download_clip] force: removed old files for {}: {:?}", clip_id, removed);
+            eprintln!(
+                "[download_clip] force: removed old files for {}: {:?}",
+                clip_id, removed
+            );
         }
     }
 
-    let _ = app.emit("download-progress", DownloadProgress {
-        clip_id: clip_id.clone(),
-        status: "downloading".into(),
-        progress: Some(0.0),
-        local_file: None,
-        local_duration: None,
-        error: None,
-    });
+    let _ = app.emit(
+        "download-progress",
+        DownloadProgress {
+            clip_id: clip_id.clone(),
+            status: "downloading".into(),
+            progress: Some(0.0),
+            local_file: None,
+            local_duration: None,
+            error: None,
+        },
+    );
 
     // Fast path: download from HubSpot CDN if available (already uploaded by another user)
     if let Some(ref hs_url) = hubspot_url {
@@ -2234,15 +2463,19 @@ async fn download_clip(
                     if let Ok(()) = fs::write(&dest, &bytes) {
                         let rel_path = format!("clips/{}_hubspot.mp4", &clip_id);
                         let project_dir = PathBuf::from(&root_folder).join(&project_name);
-                        let local_duration = probe_duration(&project_dir.join(&rel_path).to_string_lossy());
-                        let _ = app.emit("download-progress", DownloadProgress {
-                            clip_id,
-                            status: "complete".into(),
-                            progress: Some(100.0),
-                            local_file: Some(rel_path),
-                            local_duration,
-                            error: None,
-                        });
+                        let local_duration =
+                            probe_duration(&project_dir.join(&rel_path).to_string_lossy());
+                        let _ = app.emit(
+                            "download-progress",
+                            DownloadProgress {
+                                clip_id,
+                                status: "complete".into(),
+                                progress: Some(100.0),
+                                local_file: Some(rel_path),
+                                local_duration,
+                                error: None,
+                            },
+                        );
                         return Ok(());
                     }
                 }
@@ -2263,16 +2496,24 @@ async fn download_clip(
                 let base_url = evil0ctal_api_url.as_deref().unwrap_or("");
                 if base_url.is_empty() {
                     eprintln!("[download_clip] evil0ctal provider skipped: no API URL configured");
-                    errors.push(format!("{}: not configured (set API URL in Settings)", provider));
+                    errors.push(format!(
+                        "{}: not configured (set API URL in Settings)",
+                        provider
+                    ));
                     continue;
                 }
                 run_evil0ctal_download(base_url, &url, &clips_dir, &clip_id).await
             }
             _ => {
                 run_ytdlp_with_cookie_cascade(
-                    &app, &url, &clips_dir, &clip_id,
-                    &cookies_browser, &cookies_file,
-                ).await
+                    &app,
+                    &url,
+                    &clips_dir,
+                    &clip_id,
+                    &cookies_browser,
+                    &cookies_file,
+                )
+                .await
             }
         };
 
@@ -2284,18 +2525,24 @@ async fn download_clip(
                     let abs = project_dir.join(rel);
                     probe_duration(&abs.to_string_lossy())
                 });
-                let _ = app.emit("download-progress", DownloadProgress {
-                    clip_id,
-                    status: "complete".into(),
-                    progress: Some(100.0),
-                    local_file,
-                    local_duration,
-                    error: None,
-                });
+                let _ = app.emit(
+                    "download-progress",
+                    DownloadProgress {
+                        clip_id,
+                        status: "complete".into(),
+                        progress: Some(100.0),
+                        local_file,
+                        local_duration,
+                        error: None,
+                    },
+                );
                 return Ok(());
             }
             Err(e) => {
-                eprintln!("[download_clip] provider '{}' failed for {}: {}", provider, clip_id, e);
+                eprintln!(
+                    "[download_clip] provider '{}' failed for {}: {}",
+                    provider, clip_id, e
+                );
                 errors.push(format!("{}: {}", provider, e));
             }
         }
@@ -2306,14 +2553,17 @@ async fn download_clip(
     } else {
         errors.join(" | ")
     };
-    let _ = app.emit("download-progress", DownloadProgress {
-        clip_id,
-        status: "failed".into(),
-        progress: None,
-        local_file: None,
-        local_duration: None,
-        error: Some(friendly.clone()),
-    });
+    let _ = app.emit(
+        "download-progress",
+        DownloadProgress {
+            clip_id,
+            status: "failed".into(),
+            progress: None,
+            local_file: None,
+            local_duration: None,
+            error: Some(friendly.clone()),
+        },
+    );
     Err(friendly)
 }
 
@@ -2332,13 +2582,18 @@ async fn run_ytdlp_with_cookie_cascade(
         .to_string();
 
     let has_browser = cookies_browser.as_ref().map_or(false, |b| !b.is_empty());
-    let has_file = cookies_file.as_ref().map_or(false, |f| !f.is_empty() && PathBuf::from(f).exists());
+    let has_file = cookies_file
+        .as_ref()
+        .map_or(false, |f| !f.is_empty() && PathBuf::from(f).exists());
 
     let result = run_ytdlp_download(
-        app, url, &output_template,
+        app,
+        url,
+        &output_template,
         if has_browser { cookies_browser } else { &None },
         if has_browser { &None } else { cookies_file },
-    ).await;
+    )
+    .await;
 
     let result = match &result {
         Ok((success, _)) if !success && has_browser && has_file => {
@@ -2390,25 +2645,42 @@ async fn run_evil0ctal_download(
         || url_lower.contains("/hashtag/")
         || url_lower.contains("/search");
     if is_likely_non_video {
-        return Err(format!("{} URL is a profile/page, not a video link", platform));
+        return Err(format!(
+            "{} URL is a profile/page, not a video link",
+            platform
+        ));
     }
 
-    let download_url = format!("{}/api/download?url={}&prefix=false&with_watermark=false",
-        base, urlencoding::encode(video_url));
+    let download_url = format!(
+        "{}/api/download?url={}&prefix=false&with_watermark=false",
+        base,
+        urlencoding::encode(video_url)
+    );
 
     eprintln!("[evil0ctal] downloading {} via {}", clip_id, download_url);
 
-    let resp = client.get(&download_url).send().await
+    let resp = client
+        .get(&download_url)
+        .send()
+        .await
         .map_err(|e| format!("{} API unreachable: {e}", platform))?;
 
     let status = resp.status();
     if !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
-        let detail = if body.len() > 200 { &body[..200] } else { &body };
-        return Err(format!("{} API returned HTTP {} — {}", platform, status, detail));
+        let detail = if body.len() > 200 {
+            &body[..200]
+        } else {
+            &body
+        };
+        return Err(format!(
+            "{} API returned HTTP {} — {}",
+            platform, status, detail
+        ));
     }
 
-    let content_type = resp.headers()
+    let content_type = resp
+        .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
@@ -2418,24 +2690,36 @@ async fn run_evil0ctal_download(
     // If it returns JSON instead, the request likely failed with an error payload.
     if content_type.contains("application/json") {
         let body = resp.text().await.unwrap_or_default();
-        return Err(format!("{} API error: {}", platform,
-            body.chars().take(200).collect::<String>()));
+        return Err(format!(
+            "{} API error: {}",
+            platform,
+            body.chars().take(200).collect::<String>()
+        ));
     }
 
-    let bytes = resp.bytes().await
+    let bytes = resp
+        .bytes()
+        .await
         .map_err(|e| format!("{} video download incomplete: {e}", platform))?;
 
     if bytes.len() < 1024 {
-        return Err(format!("{} API returned a suspiciously small file ({} bytes)", platform, bytes.len()));
+        return Err(format!(
+            "{} API returned a suspiciously small file ({} bytes)",
+            platform,
+            bytes.len()
+        ));
     }
 
     let _ = fs::create_dir_all(clips_dir);
     let dest = clips_dir.join(format!("{}_evil0ctal.mp4", clip_id));
 
-    fs::write(&dest, &bytes)
-        .map_err(|e| format!("Failed to save video: {e}"))?;
+    fs::write(&dest, &bytes).map_err(|e| format!("Failed to save video: {e}"))?;
 
-    eprintln!("[evil0ctal] saved {} ({} bytes)", dest.display(), bytes.len());
+    eprintln!(
+        "[evil0ctal] saved {} ({} bytes)",
+        dest.display(),
+        bytes.len()
+    );
     Ok(())
 }
 
@@ -2450,11 +2734,15 @@ async fn run_ytdlp_download(
     let fmt = format_selection_for_url(url);
     let mut args = vec![
         "--no-warnings".to_string(),
-        "-f".to_string(), fmt.to_string(),
-        "--merge-output-format".to_string(), "mp4".to_string(),
-        "-o".to_string(), output_template.to_string(),
+        "-f".to_string(),
+        fmt.to_string(),
+        "--merge-output-format".to_string(),
+        "mp4".to_string(),
+        "-o".to_string(),
+        output_template.to_string(),
         "--newline".to_string(),
-        "--progress-template".to_string(), "%(progress._percent_str)s".to_string(),
+        "--progress-template".to_string(),
+        "%(progress._percent_str)s".to_string(),
     ];
 
     if let Some(ref browser) = cookies_browser {
@@ -2479,15 +2767,12 @@ async fn run_ytdlp_download(
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
-
 fn save_project(folder: &PathBuf, project: &Project) -> Result<(), String> {
-    let json = serde_json::to_string_pretty(project)
-        .map_err(|e| format!("Failed to serialize: {e}"))?;
+    let json =
+        serde_json::to_string_pretty(project).map_err(|e| format!("Failed to serialize: {e}"))?;
     fs::write(folder.join("project.json"), json)
         .map_err(|e| format!("Failed to write project: {e}"))
 }
-
-
 
 fn chrono_now() -> String {
     // Simple ISO timestamp without chrono dependency
@@ -2541,18 +2826,26 @@ async fn resolve_instagram_info(
     );
     if let Ok(res) = client
         .get(&oembed_url)
-        .header("User-Agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36")
+        .header(
+            "User-Agent",
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+        )
         .send()
         .await
     {
         if res.status().is_success() {
             if let Ok(json) = res.json::<serde_json::Value>().await {
-                let author_name = json.get("author_name").and_then(|v| v.as_str()).map(String::from);
-                let thumbnail = json.get("thumbnail_url").and_then(|v| v.as_str()).map(String::from);
+                let author_name = json
+                    .get("author_name")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                let thumbnail = json
+                    .get("thumbnail_url")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
                 // Extract username from the HTML embed field if author_name is gone
                 let html = json.get("html").and_then(|v| v.as_str()).unwrap_or("");
-                let handle = author_name
-                    .or_else(|| extract_instagram_username_from_html(html));
+                let handle = author_name.or_else(|| extract_instagram_username_from_html(html));
                 // Caption may be in the title field
                 let caption = json.get("title").and_then(|v| v.as_str()).map(String::from);
 
@@ -2602,19 +2895,32 @@ async fn resolve_instagram_info(
     }
 
     // Strategy 3: yt-dlp --dump-json (most reliable, slowest)
-    let _permit = INSTAGRAM_SEMAPHORE.acquire().await.map_err(|e| e.to_string())?;
+    let _permit = INSTAGRAM_SEMAPHORE
+        .acquire()
+        .await
+        .map_err(|e| e.to_string())?;
     let result = ytdlp_dump_json(&app, &url, &cookies_browser, &cookies_file).await;
     instagram_delay().await;
 
     if let Ok(json) = result {
-        let handle = json.get("uploader_id").and_then(|v| v.as_str())
+        let handle = json
+            .get("uploader_id")
+            .and_then(|v| v.as_str())
             .or_else(|| json.get("uploader").and_then(|v| v.as_str()))
             .map(String::from);
-        let display_name = json.get("channel").and_then(|v| v.as_str())
+        let display_name = json
+            .get("channel")
+            .and_then(|v| v.as_str())
             .or_else(|| json.get("uploader").and_then(|v| v.as_str()))
             .map(String::from);
-        let caption = json.get("description").and_then(|v| v.as_str()).map(String::from);
-        let thumbnail = json.get("thumbnail").and_then(|v| v.as_str()).map(String::from);
+        let caption = json
+            .get("description")
+            .and_then(|v| v.as_str())
+            .map(String::from);
+        let thumbnail = json
+            .get("thumbnail")
+            .and_then(|v| v.as_str())
+            .map(String::from);
         let likes = json.get("like_count").and_then(|v| v.as_i64());
         let comments = json.get("comment_count").and_then(|v| v.as_i64());
         let views = json.get("view_count").and_then(|v| v.as_i64());
@@ -2647,22 +2953,30 @@ async fn ytdlp_dump_json(
     cookies_file: &Option<String>,
 ) -> Result<serde_json::Value, String> {
     let has_browser = cookies_browser.as_ref().map_or(false, |b| !b.is_empty());
-    let has_file = cookies_file.as_ref().map_or(false, |f| !f.is_empty() && PathBuf::from(f).exists());
+    let has_file = cookies_file
+        .as_ref()
+        .map_or(false, |f| !f.is_empty() && PathBuf::from(f).exists());
 
     let result = ytdlp_dump_json_attempt(
-        app, url,
+        app,
+        url,
         if has_browser { cookies_browser } else { &None },
         if has_browser { &None } else { cookies_file },
-    ).await;
+    )
+    .await;
 
     // On cookie-related failures, retry without cookies
     if let Err(ref e) = result {
         let lower = e.to_lowercase();
-        if (has_browser || has_file) && (lower.contains("could not copy") || lower.contains("cookie")) {
+        if (has_browser || has_file)
+            && (lower.contains("could not copy") || lower.contains("cookie"))
+        {
             // Try with file-only if we used browser and have a file fallback
             if has_browser && has_file {
                 let file_result = ytdlp_dump_json_attempt(app, url, &None, cookies_file).await;
-                if file_result.is_ok() { return file_result; }
+                if file_result.is_ok() {
+                    return file_result;
+                }
             }
             // Last resort: no cookies at all
             return ytdlp_dump_json_attempt(app, url, &None, &None).await;
@@ -2679,16 +2993,6 @@ async fn ytdlp_dump_json_attempt(
     cookies_browser: &Option<String>,
     cookies_file: &Option<String>,
 ) -> Result<serde_json::Value, String> {
-    let shell = app.shell();
-
-    let ytdlp_cmd = if let Ok(cmd) = shell.sidecar("yt-dlp") {
-        cmd
-    } else if let Some(sys) = helpers::find_system_ytdlp() {
-        shell.command(sys.to_string_lossy().to_string())
-    } else {
-        return Err("yt-dlp not found".into());
-    };
-
     let mut args = vec!["--dump-json".to_string(), "--no-download".to_string()];
 
     if let Some(ref browser) = cookies_browser {
@@ -2705,23 +3009,15 @@ async fn ytdlp_dump_json_attempt(
 
     args.push(url.to_string());
 
-    #[cfg(target_os = "windows")]
-    apply_windows_cookie_workaround(&mut args);
+    let output = run_ytdlp(app, &args).await?;
 
-    let output = ytdlp_cmd
-        .args(args)
-        .output()
-        .await
-        .map_err(|e| format!("yt-dlp spawn error: {e}"))?;
-
-    if !output.status.success() {
+    if !output.success {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("yt-dlp failed: {}", stderr.trim()));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    serde_json::from_str(&stdout)
-        .map_err(|e| format!("Failed to parse yt-dlp JSON: {e}"))
+    serde_json::from_str(&stdout).map_err(|e| format!("Failed to parse yt-dlp JSON: {e}"))
 }
 
 /// Fetch metrics for a clip via yt-dlp --dump-json (used for TikTok and IG when metrics weren't obtained during handle resolution)
@@ -2735,12 +3031,17 @@ async fn fetch_clip_metrics(
     let is_instagram = url.contains("instagram.com");
 
     if is_instagram {
-        let _permit = INSTAGRAM_SEMAPHORE.acquire().await.map_err(|e| e.to_string())?;
+        let _permit = INSTAGRAM_SEMAPHORE
+            .acquire()
+            .await
+            .map_err(|e| e.to_string())?;
         let result = ytdlp_dump_json(&app, &url, &cookies_browser, &cookies_file).await;
         instagram_delay().await;
         let json = result?;
 
-        let display_name = json.get("channel").and_then(|v| v.as_str())
+        let display_name = json
+            .get("channel")
+            .and_then(|v| v.as_str())
             .or_else(|| json.get("uploader").and_then(|v| v.as_str()));
 
         return Ok(serde_json::json!({
@@ -2758,7 +3059,9 @@ async fn fetch_clip_metrics(
     // TikTok or other
     let json = ytdlp_dump_json(&app, &url, &cookies_browser, &cookies_file).await?;
 
-    let display_name = json.get("creator").and_then(|v| v.as_str())
+    let display_name = json
+        .get("creator")
+        .and_then(|v| v.as_str())
         .or_else(|| json.get("uploader").and_then(|v| v.as_str()));
 
     Ok(serde_json::json!({
@@ -2817,10 +3120,13 @@ async fn lookup_creators_by_social(
             .map_err(|e| format!("Creator lookup failed: {e}"))?;
 
         if res.status().is_success() {
-            let data: serde_json::Value = res.json().await
+            let data: serde_json::Value = res
+                .json()
+                .await
                 .map_err(|e| format!("Failed to parse creator search: {e}"))?;
 
-            if let Some(first) = data.get("results")
+            if let Some(first) = data
+                .get("results")
                 .and_then(|r| r.as_array())
                 .and_then(|arr| arr.first())
             {
@@ -2900,10 +3206,15 @@ async fn create_creator(
     if !res.status().is_success() {
         let status = res.status();
         let text = res.text().await.unwrap_or_default();
-        return Err(format!("HubSpot create creator error ({}): {}", status, text));
+        return Err(format!(
+            "HubSpot create creator error ({}): {}",
+            status, text
+        ));
     }
 
-    let created: serde_json::Value = res.json().await
+    let created: serde_json::Value = res
+        .json()
+        .await
         .map_err(|e| format!("Failed to parse create response: {e}"))?;
 
     Ok(serde_json::json!({
@@ -2914,10 +3225,7 @@ async fn create_creator(
 
 /// Resolve a HubSpot user email to a numeric owner ID
 #[tauri::command]
-async fn resolve_owner_id(
-    token: String,
-    email: String,
-) -> Result<String, String> {
+async fn resolve_owner_id(token: String, email: String) -> Result<String, String> {
     let client = reqwest::Client::new();
     let res = client
         .get("https://api.hubapi.com/crm/v3/owners")
@@ -2933,7 +3241,9 @@ async fn resolve_owner_id(
         return Err(format!("Owner lookup error ({}): {}", status, text));
     }
 
-    let data: serde_json::Value = res.json().await
+    let data: serde_json::Value = res
+        .json()
+        .await
         .map_err(|e| format!("Failed to parse owner response: {e}"))?;
 
     data.get("results")
@@ -2963,17 +3273,26 @@ async fn list_owners(token: String) -> Result<serde_json::Value, String> {
         return Err(format!("Owners list error ({}): {}", status, text));
     }
 
-    let data: serde_json::Value = res.json().await
+    let data: serde_json::Value = res
+        .json()
+        .await
         .map_err(|e| format!("Failed to parse owners: {e}"))?;
 
-    let owners = data.get("results")
+    let owners = data
+        .get("results")
         .and_then(|r| r.as_array())
-        .map(|arr| arr.iter().map(|o| serde_json::json!({
-            "id": o.get("id").and_then(|v| v.as_str()).unwrap_or(""),
-            "email": o.get("email").and_then(|v| v.as_str()).unwrap_or(""),
-            "firstName": o.get("firstName").and_then(|v| v.as_str()).unwrap_or(""),
-            "lastName": o.get("lastName").and_then(|v| v.as_str()).unwrap_or(""),
-        })).collect::<Vec<_>>())
+        .map(|arr| {
+            arr.iter()
+                .map(|o| {
+                    serde_json::json!({
+                        "id": o.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                        "email": o.get("email").and_then(|v| v.as_str()).unwrap_or(""),
+                        "firstName": o.get("firstName").and_then(|v| v.as_str()).unwrap_or(""),
+                        "lastName": o.get("lastName").and_then(|v| v.as_str()).unwrap_or(""),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
         .unwrap_or_default();
 
     Ok(serde_json::json!(owners))
@@ -2981,17 +3300,17 @@ async fn list_owners(token: String) -> Result<serde_json::Value, String> {
 
 /// Search for an existing External Clip by its link URL. Returns the clip ID if found.
 #[tauri::command]
-async fn find_clip_by_link(
-    token: String,
-    link: String,
-) -> Result<serde_json::Value, String> {
+async fn find_clip_by_link(token: String, link: String) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
     let search_url = format!(
         "https://api.hubapi.com/crm/v3/objects/{}/search",
         EXTERNAL_CLIPS_OBJECT_ID
     );
 
-    let props: Vec<serde_json::Value> = CLIP_PROPERTIES.iter().map(|p| serde_json::json!(p)).collect();
+    let props: Vec<serde_json::Value> = CLIP_PROPERTIES
+        .iter()
+        .map(|p| serde_json::json!(p))
+        .collect();
 
     let body = serde_json::json!({
         "filterGroups": [{
@@ -3019,7 +3338,9 @@ async fn find_clip_by_link(
         return Err(format!("HubSpot search error ({}): {}", status, text));
     }
 
-    let data: serde_json::Value = res.json().await
+    let data: serde_json::Value = res
+        .json()
+        .await
         .map_err(|e| format!("Failed to parse search response: {e}"))?;
 
     let result = data
@@ -3076,7 +3397,9 @@ async fn create_external_clip(
         return Err(format!("HubSpot create clip error ({}): {}", status, text));
     }
 
-    let created: serde_json::Value = res.json().await
+    let created: serde_json::Value = res
+        .json()
+        .await
         .map_err(|e| format!("Failed to parse create response: {e}"))?;
 
     Ok(serde_json::json!({
@@ -3193,7 +3516,8 @@ async fn search_untagged_clips(
         return Err(format!("HubSpot search error ({}): {}", status, text));
     }
 
-    res.json().await
+    res.json()
+        .await
         .map_err(|e| format!("Failed to parse search response: {e}"))
 }
 
@@ -3256,7 +3580,8 @@ async fn search_clips_missing_metrics(
         return Err(format!("HubSpot search error ({}): {}", status, text));
     }
 
-    res.json().await
+    res.json()
+        .await
         .map_err(|e| format!("Failed to parse search response: {e}"))
 }
 
@@ -3322,7 +3647,10 @@ async fn update_creator_properties(
     if !res.status().is_success() {
         let status = res.status();
         let text = res.text().await.unwrap_or_default();
-        return Err(format!("HubSpot update creator error ({}): {}", status, text));
+        return Err(format!(
+            "HubSpot update creator error ({}): {}",
+            status, text
+        ));
     }
 
     Ok(())
@@ -3371,7 +3699,8 @@ async fn search_latest_clips_by_platform(
         return Err(format!("HubSpot search error ({}): {}", status, text));
     }
 
-    res.json().await
+    res.json()
+        .await
         .map_err(|e| format!("Failed to parse search response: {e}"))
 }
 
@@ -3426,7 +3755,10 @@ pub fn run() {
             let decoded_ref = decoded.as_ref();
 
             // On Windows, URL path may have a leading slash before the drive letter
-            let clean = if decoded_ref.starts_with('/') && decoded_ref.len() > 2 && decoded_ref.as_bytes()[2] == b':' {
+            let clean = if decoded_ref.starts_with('/')
+                && decoded_ref.len() > 2
+                && decoded_ref.as_bytes()[2] == b':'
+            {
                 &decoded_ref[1..]
             } else {
                 decoded_ref
@@ -3442,7 +3774,7 @@ pub fn run() {
                         .status(404)
                         .header("Access-Control-Allow-Origin", "*")
                         .body(msg.into_bytes())
-                        .unwrap()
+                        .unwrap();
                 }
             };
 
@@ -3474,7 +3806,10 @@ pub fn run() {
                 let parts: Vec<&str> = spec.splitn(2, '-').collect();
                 let s = parts[0].parse::<u64>().unwrap_or(0).min(file_size - 1);
                 let e = if parts.len() > 1 && !parts[1].is_empty() {
-                    parts[1].parse::<u64>().unwrap_or(file_size - 1).min(file_size - 1)
+                    parts[1]
+                        .parse::<u64>()
+                        .unwrap_or(file_size - 1)
+                        .min(file_size - 1)
                 } else {
                     file_size - 1
                 };
@@ -3494,15 +3829,16 @@ pub fn run() {
                 .header("Accept-Ranges", "bytes")
                 .header("Content-Length", n.to_string())
                 .header("Access-Control-Allow-Origin", "*")
-                .header("Access-Control-Expose-Headers", "Content-Range, Content-Length, Accept-Ranges");
+                .header(
+                    "Access-Control-Expose-Headers",
+                    "Content-Range, Content-Length, Accept-Ranges",
+                );
 
             if is_range {
-                response = response
-                    .status(206)
-                    .header(
-                        "Content-Range",
-                        format!("bytes {}-{}/{}", start, start + n as u64 - 1, file_size),
-                    );
+                response = response.status(206).header(
+                    "Content-Range",
+                    format!("bytes {}-{}/{}", start, start + n as u64 - 1, file_size),
+                );
             } else {
                 response = response.status(200);
             }
@@ -3577,7 +3913,10 @@ mod tests {
             }
         };
         let get = |clip: &serde_json::Value, key: &str| -> String {
-            clip.get(key).and_then(|v| v.as_str()).unwrap_or("").to_string()
+            clip.get(key)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string()
         };
 
         let mut out = String::from(
@@ -3585,38 +3924,75 @@ mod tests {
         );
 
         for (i, clip) in clips.iter().enumerate() {
-            let order = clip.get("order").and_then(|v| v.as_u64()).unwrap_or((i + 1) as u64);
-            let is_missing = clip.get("missing").and_then(|v| v.as_bool()).unwrap_or(false);
+            let order = clip
+                .get("order")
+                .and_then(|v| v.as_u64())
+                .unwrap_or((i + 1) as u64);
+            let is_missing = clip
+                .get("missing")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
             let download_status = get(clip, "downloadStatus");
 
             if is_missing {
-                let warning = format!("\u{26A0} MISSING \u{2014} {}",
-                    if download_status.is_empty() { "not downloaded".to_string() } else { download_status }
+                let warning = format!(
+                    "\u{26A0} MISSING \u{2014} {}",
+                    if download_status.is_empty() {
+                        "not downloaded".to_string()
+                    } else {
+                        download_status
+                    }
                 );
                 let row = [
-                    format!("{}", order), String::new(), escape(&warning),
+                    format!("{}", order),
+                    String::new(),
+                    escape(&warning),
                     escape(&get(clip, "link")),
-                    String::new(), String::new(), String::new(), String::new(),
-                    String::new(), String::new(), String::new(), String::new(),
-                    String::new(), String::new(), String::new(), String::new(),
-                    String::new(), escape(&get(clip, "externalClipId")),
-                    escape(&get(clip, "creatorId")), escape(&get(clip, "videoProjectId")),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    escape(&get(clip, "externalClipId")),
+                    escape(&get(clip, "creatorId")),
+                    escape(&get(clip, "videoProjectId")),
                 ];
                 out.push_str(&row.join(","));
             } else {
-                let duration = clip.get("duration").and_then(|v| v.as_f64())
-                    .map(|d| format!("{:.0}", d)).unwrap_or_default();
+                let duration = clip
+                    .get("duration")
+                    .and_then(|v| v.as_f64())
+                    .map(|d| format!("{:.0}", d))
+                    .unwrap_or_default();
                 let row = [
-                    format!("{}", order), escape(&duration),
-                    escape(&get(clip, "editingNotes")), escape(&get(clip, "link")),
-                    escape(&get(clip, "mainLink")), escape(&get(clip, "mainAccount")),
-                    escape(&get(clip, "name")), escape(&get(clip, "douyinId")),
-                    escape(&get(clip, "kuaishouId")), escape(&get(clip, "xiaohongshuId")),
-                    escape(&get(clip, "clipMixLinks")), escape(&get(clip, "specialRequests")),
-                    escape(&get(clip, "notes")), escape(&get(clip, "licenseChecked")),
-                    escape(&get(clip, "licenseType")), escape(&get(clip, "availableAskFirst")),
-                    escape(&get(clip, "score")), escape(&get(clip, "externalClipId")),
-                    escape(&get(clip, "creatorId")), escape(&get(clip, "videoProjectId")),
+                    format!("{}", order),
+                    escape(&duration),
+                    escape(&get(clip, "editingNotes")),
+                    escape(&get(clip, "link")),
+                    escape(&get(clip, "mainLink")),
+                    escape(&get(clip, "mainAccount")),
+                    escape(&get(clip, "name")),
+                    escape(&get(clip, "douyinId")),
+                    escape(&get(clip, "kuaishouId")),
+                    escape(&get(clip, "xiaohongshuId")),
+                    escape(&get(clip, "clipMixLinks")),
+                    escape(&get(clip, "specialRequests")),
+                    escape(&get(clip, "notes")),
+                    escape(&get(clip, "licenseChecked")),
+                    escape(&get(clip, "licenseType")),
+                    escape(&get(clip, "availableAskFirst")),
+                    escape(&get(clip, "score")),
+                    escape(&get(clip, "externalClipId")),
+                    escape(&get(clip, "creatorId")),
+                    escape(&get(clip, "videoProjectId")),
                 ];
                 out.push_str(&row.join(","));
             }
@@ -3665,31 +4041,43 @@ mod tests {
 
     #[test]
     fn csv_missing_clip_preserves_link_for_identification() {
-        let clips = vec![
-            serde_json::json!({
-                "order": 1,
-                "link": "https://instagram.com/p/ABC/",
-                "missing": true,
-                "downloadStatus": "pending",
-                "externalClipId": "clip_42"
-            }),
-        ];
+        let clips = vec![serde_json::json!({
+            "order": 1,
+            "link": "https://instagram.com/p/ABC/",
+            "missing": true,
+            "downloadStatus": "pending",
+            "externalClipId": "clip_42"
+        })];
         let csv = build_csv(&clips);
         let row = csv.lines().nth(1).unwrap();
-        assert!(row.contains("https://instagram.com/p/ABC/"), "link must be present for missing clips");
-        assert!(row.contains("clip_42"), "clip ID must be present for missing clips");
+        assert!(
+            row.contains("https://instagram.com/p/ABC/"),
+            "link must be present for missing clips"
+        );
+        assert!(
+            row.contains("clip_42"),
+            "clip ID must be present for missing clips"
+        );
     }
 
     #[test]
     fn csv_all_missing_row_count_matches_total() {
-        let clips = (1..=5).map(|i| serde_json::json!({
-            "order": i,
-            "link": format!("https://tiktok.com/{}", i),
-            "missing": true,
-            "downloadStatus": "failed"
-        })).collect::<Vec<_>>();
+        let clips = (1..=5)
+            .map(|i| {
+                serde_json::json!({
+                    "order": i,
+                    "link": format!("https://tiktok.com/{}", i),
+                    "missing": true,
+                    "downloadStatus": "failed"
+                })
+            })
+            .collect::<Vec<_>>();
         let csv = build_csv(&clips);
         let data_rows: Vec<_> = csv.lines().skip(1).collect();
-        assert_eq!(data_rows.len(), 5, "must have one row per clip even if all are missing");
+        assert_eq!(
+            data_rows.len(),
+            5,
+            "must have one row per clip even if all are missing"
+        );
     }
 }

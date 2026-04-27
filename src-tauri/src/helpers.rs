@@ -14,8 +14,7 @@ fn is_plausible_iso_date(s: &str) -> bool {
     if b[4] != b'-' || b[7] != b'-' {
         return false;
     }
-    s.chars()
-        .all(|c| c.is_ascii_digit() || c == '-')
+    s.chars().all(|c| c.is_ascii_digit() || c == '-')
 }
 
 /// Build HubSpot filterGroups for External Clips search.
@@ -137,7 +136,9 @@ pub(crate) fn strip_prefix(name: &str) -> String {
 /// Find a file in a directory whose name contains the given ID prefix
 /// (after stripping order/unused prefixes).
 pub(crate) fn find_file_by_id(dir: &PathBuf, id_prefix: &str) -> Option<PathBuf> {
-    if id_prefix.is_empty() { return None; }
+    if id_prefix.is_empty() {
+        return None;
+    }
     let entries = fs::read_dir(dir).ok()?;
     for entry in entries.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
@@ -161,7 +162,9 @@ pub(crate) fn find_downloaded_file(clips_dir: &PathBuf, clip_id: &str) -> Option
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             if name.starts_with(&prefix) {
-                let mtime = entry.metadata().ok()
+                let mtime = entry
+                    .metadata()
+                    .ok()
                     .and_then(|m| m.modified().ok())
                     .unwrap_or(std::time::UNIX_EPOCH);
                 matches.push((name, mtime));
@@ -169,7 +172,9 @@ pub(crate) fn find_downloaded_file(clips_dir: &PathBuf, clip_id: &str) -> Option
         }
     }
 
-    if matches.is_empty() { return None; }
+    if matches.is_empty() {
+        return None;
+    }
 
     // Prefer .mp4 files (the intended output format)
     if let Some(mp4) = matches.iter().find(|(n, _)| n.ends_with(".mp4")) {
@@ -225,14 +230,23 @@ pub(crate) fn probe_duration(path: &str) -> Option<f64> {
 
 /// Lowercase platform key used for provider cascade lookups.
 pub(crate) fn platform_key(url: &str) -> &str {
-    if url.contains("instagram.com") { "instagram" }
-    else if url.contains("tiktok.com") { "tiktok" }
-    else if url.contains("douyin.com") { "douyin" }
-    else if url.contains("youtube.com") || url.contains("youtu.be") { "youtube" }
-    else if url.contains("bilibili.com") { "bilibili" }
-    else if url.contains("xiaohongshu.com") { "xiaohongshu" }
-    else if url.contains("kuaishou.com") { "kuaishou" }
-    else { "default" }
+    if url.contains("instagram.com") {
+        "instagram"
+    } else if url.contains("tiktok.com") {
+        "tiktok"
+    } else if url.contains("douyin.com") {
+        "douyin"
+    } else if url.contains("youtube.com") || url.contains("youtu.be") {
+        "youtube"
+    } else if url.contains("bilibili.com") {
+        "bilibili"
+    } else if url.contains("xiaohongshu.com") {
+        "xiaohongshu"
+    } else if url.contains("kuaishou.com") {
+        "kuaishou"
+    } else {
+        "default"
+    }
 }
 
 /// Display-friendly platform name from URL, derived from `platform_key`.
@@ -255,7 +269,9 @@ pub(crate) fn detect_platform(url: &str) -> &str {
 pub(crate) fn providers_for_url(url: &str, providers_json: &Option<String>) -> Vec<String> {
     let key = platform_key(url);
     if let Some(json) = providers_json {
-        if let Ok(map) = serde_json::from_str::<std::collections::HashMap<String, Vec<String>>>(json) {
+        if let Ok(map) =
+            serde_json::from_str::<std::collections::HashMap<String, Vec<String>>>(json)
+        {
             if let Some(list) = map.get(key) {
                 if !list.is_empty() {
                     return list.clone();
@@ -272,7 +288,11 @@ pub(crate) fn providers_for_url(url: &str, providers_json: &Option<String>) -> V
 }
 
 /// Translate raw yt-dlp stderr into user-friendly error messages.
-pub(crate) fn friendly_download_error(stderr: &str, url: &str, cookies_browser: &Option<String>) -> String {
+pub(crate) fn friendly_download_error(
+    stderr: &str,
+    url: &str,
+    cookies_browser: &Option<String>,
+) -> String {
     let lower = stderr.to_lowercase();
     let platform = detect_platform(url);
     let browser = cookies_browser.as_deref().unwrap_or("your browser");
@@ -302,6 +322,17 @@ pub(crate) fn friendly_download_error(stderr: &str, url: &str, cookies_browser: 
         return concat!(
             "CompiFlow could not run the bundled yt-dlp downloader. ",
             "Install yt-dlp on your system and ensure it is on PATH, then retry."
+        )
+        .into();
+    }
+
+    if lower.contains("no module named expat") || lower.contains("[pyi-") || lower.contains("_mei")
+    {
+        return concat!(
+            "CompiFlow's bundled video downloader failed to start. ",
+            "Quit CompiFlow, restart your Mac to clear stale temporary files, ",
+            "then reopen CompiFlow and retry. If it still fails, reinstall CompiFlow ",
+            "from the latest DMG."
         )
         .into();
     }
@@ -338,7 +369,10 @@ pub(crate) fn friendly_download_error(stderr: &str, url: &str, cookies_browser: 
         return format!("This {} video is no longer available.", platform);
     }
     if lower.contains("private video") {
-        return format!("This {} video is private. Log into {} first.", platform, browser);
+        return format!(
+            "This {} video is private. Log into {} first.",
+            platform, browser
+        );
     }
     if lower.contains("urlopen error") || lower.contains("connection") {
         return "Network error. Check your internet connection.".into();
@@ -389,13 +423,11 @@ pub(crate) fn augmented_path() -> String {
 
 /// Resolve the system-installed yt-dlp path, checking common locations that may
 /// not be in PATH when launched as a macOS .app bundle.
+#[cfg(debug_assertions)]
 pub(crate) fn find_system_ytdlp() -> Option<std::path::PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        let extra_paths = [
-            "/opt/homebrew/bin/yt-dlp",
-            "/usr/local/bin/yt-dlp",
-        ];
+        let extra_paths = ["/opt/homebrew/bin/yt-dlp", "/usr/local/bin/yt-dlp"];
         for p in &extra_paths {
             let path = std::path::PathBuf::from(p);
             if path.exists() {
@@ -417,18 +449,38 @@ pub(crate) fn ytdlp_sidecar_filename() -> &'static str {
     }
 }
 
-/// Remove macOS download quarantine from a file so Gatekeeper allows execution.
+/// Relative path to the pre-extracted macOS yt-dlp executable bundled as a resource.
+#[cfg(target_os = "macos")]
+pub(crate) fn ytdlp_macos_resource_executable() -> &'static str {
+    "binaries/yt-dlp_macos/yt-dlp_macos"
+}
+
+/// Remove macOS download quarantine from a file or directory so Gatekeeper allows execution.
 /// Best-effort: no-op if `xattr` is missing or the attribute is not set.
 #[cfg(target_os = "macos")]
 pub(crate) fn unquarantine_path(path: &std::path::Path) {
     use std::process::Command;
+
     if !path.exists() {
         return;
     }
-    let _ = Command::new("xattr")
-        .args(["-d", "com.apple.quarantine"])
-        .arg(path)
-        .output();
+
+    fn strip(path: &std::path::Path) {
+        let _ = Command::new("xattr")
+            .args(["-d", "com.apple.quarantine"])
+            .arg(path)
+            .output();
+    }
+
+    strip(path);
+    if path.is_dir() {
+        let Ok(entries) = fs::read_dir(path) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            unquarantine_path(&entry.path());
+        }
+    }
 }
 
 // ── General Search Helpers ───────────────────────────────────────────────────
@@ -466,7 +518,9 @@ pub(crate) fn parse_social_urls(raw: &str) -> Vec<ParsedSocialUrl> {
 
             if url.contains("tiktok.com") {
                 let handle = extract_tiktok_handle(&url);
-                let profile_url = handle.as_ref().map(|h| format!("https://www.tiktok.com/@{}", h));
+                let profile_url = handle
+                    .as_ref()
+                    .map(|h| format!("https://www.tiktok.com/@{}", h));
                 Some(ParsedSocialUrl {
                     url,
                     platform: SocialPlatform::TikTok,
@@ -508,8 +562,21 @@ pub(crate) fn extract_instagram_username_from_html(html: &str) -> Option<String>
     let re1 = regex::Regex::new(r#"instagram\.com/([a-zA-Z0-9._]+)/?"#).ok()?;
     for caps in re1.captures_iter(html) {
         let candidate = caps.get(1)?.as_str();
-        let skip = ["reel", "reels", "p", "explore", "accounts", "api",
-                     "embed", "developer", "about", "legal", "tags", "tv", "stories"];
+        let skip = [
+            "reel",
+            "reels",
+            "p",
+            "explore",
+            "accounts",
+            "api",
+            "embed",
+            "developer",
+            "about",
+            "legal",
+            "tags",
+            "tv",
+            "stories",
+        ];
         if !skip.contains(&candidate) && !candidate.starts_with("reel") {
             return Some(candidate.to_string());
         }
@@ -529,7 +596,8 @@ pub(crate) fn extract_instagram_caption_from_html(html: &str) -> Option<String> 
     let re = regex::Regex::new(r#"class="Caption"[^>]*>(.*?)</div>"#).ok()?;
     let caps = re.captures(html)?;
     let raw = caps.get(1)?.as_str();
-    let text = raw.replace("<br>", "\n")
+    let text = raw
+        .replace("<br>", "\n")
         .replace("<br/>", "\n")
         .replace("&amp;", "&")
         .replace("&lt;", "<")
@@ -537,7 +605,11 @@ pub(crate) fn extract_instagram_caption_from_html(html: &str) -> Option<String> 
     // Strip remaining HTML tags
     let stripped = regex::Regex::new(r"<[^>]+>").ok()?.replace_all(&text, "");
     let result = stripped.trim().to_string();
-    if result.is_empty() { None } else { Some(result) }
+    if result.is_empty() {
+        None
+    } else {
+        Some(result)
+    }
 }
 
 /// Extract text content from a meta property tag (not just URLs)
@@ -567,10 +639,15 @@ pub(crate) fn extract_meta_content_text(html: &str, property: &str) -> Option<St
 #[allow(dead_code)]
 pub(crate) fn extract_hashtags(caption: &str) -> Option<String> {
     let re = regex::Regex::new(r"#([A-Za-z0-9_]+)").ok()?;
-    let tags: Vec<String> = re.captures_iter(caption)
+    let tags: Vec<String> = re
+        .captures_iter(caption)
         .map(|c| c.get(1).unwrap().as_str().to_string())
         .collect();
-    if tags.is_empty() { None } else { Some(tags.join(";")) }
+    if tags.is_empty() {
+        None
+    } else {
+        Some(tags.join(";"))
+    }
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -616,14 +693,32 @@ mod tests {
 
     #[test]
     fn platform_key_returns_lowercase_keys() {
-        assert_eq!(platform_key("https://www.instagram.com/reel/ABC/"), "instagram");
-        assert_eq!(platform_key("https://www.tiktok.com/@user/video/123"), "tiktok");
+        assert_eq!(
+            platform_key("https://www.instagram.com/reel/ABC/"),
+            "instagram"
+        );
+        assert_eq!(
+            platform_key("https://www.tiktok.com/@user/video/123"),
+            "tiktok"
+        );
         assert_eq!(platform_key("https://www.douyin.com/video/123"), "douyin");
-        assert_eq!(platform_key("https://www.youtube.com/watch?v=abc"), "youtube");
+        assert_eq!(
+            platform_key("https://www.youtube.com/watch?v=abc"),
+            "youtube"
+        );
         assert_eq!(platform_key("https://youtu.be/abc"), "youtube");
-        assert_eq!(platform_key("https://www.bilibili.com/video/BV123"), "bilibili");
-        assert_eq!(platform_key("https://www.xiaohongshu.com/explore/abc"), "xiaohongshu");
-        assert_eq!(platform_key("https://www.kuaishou.com/short-video/abc"), "kuaishou");
+        assert_eq!(
+            platform_key("https://www.bilibili.com/video/BV123"),
+            "bilibili"
+        );
+        assert_eq!(
+            platform_key("https://www.xiaohongshu.com/explore/abc"),
+            "xiaohongshu"
+        );
+        assert_eq!(
+            platform_key("https://www.kuaishou.com/short-video/abc"),
+            "kuaishou"
+        );
         assert_eq!(platform_key("https://example.com/video"), "default");
     }
 
@@ -631,39 +726,60 @@ mod tests {
 
     #[test]
     fn detect_platform_instagram() {
-        assert_eq!(detect_platform("https://www.instagram.com/reel/ABC/"), "Instagram");
+        assert_eq!(
+            detect_platform("https://www.instagram.com/reel/ABC/"),
+            "Instagram"
+        );
         assert_eq!(detect_platform("https://instagram.com/p/XYZ/"), "Instagram");
     }
 
     #[test]
     fn detect_platform_youtube() {
-        assert_eq!(detect_platform("https://www.youtube.com/watch?v=abc"), "YouTube");
+        assert_eq!(
+            detect_platform("https://www.youtube.com/watch?v=abc"),
+            "YouTube"
+        );
         assert_eq!(detect_platform("https://youtu.be/abc"), "YouTube");
     }
 
     #[test]
     fn detect_platform_tiktok() {
-        assert_eq!(detect_platform("https://www.tiktok.com/@user/video/123"), "TikTok");
+        assert_eq!(
+            detect_platform("https://www.tiktok.com/@user/video/123"),
+            "TikTok"
+        );
     }
 
     #[test]
     fn detect_platform_douyin() {
-        assert_eq!(detect_platform("https://www.douyin.com/video/123"), "Douyin");
+        assert_eq!(
+            detect_platform("https://www.douyin.com/video/123"),
+            "Douyin"
+        );
     }
 
     #[test]
     fn detect_platform_bilibili() {
-        assert_eq!(detect_platform("https://www.bilibili.com/video/BV123"), "Bilibili");
+        assert_eq!(
+            detect_platform("https://www.bilibili.com/video/BV123"),
+            "Bilibili"
+        );
     }
 
     #[test]
     fn detect_platform_xiaohongshu() {
-        assert_eq!(detect_platform("https://www.xiaohongshu.com/explore/abc"), "Xiaohongshu");
+        assert_eq!(
+            detect_platform("https://www.xiaohongshu.com/explore/abc"),
+            "Xiaohongshu"
+        );
     }
 
     #[test]
     fn detect_platform_unknown() {
-        assert_eq!(detect_platform("https://example.com/video"), "this platform");
+        assert_eq!(
+            detect_platform("https://example.com/video"),
+            "this platform"
+        );
     }
 
     // ── providers_for_url ───────────────────────────────────────────────
@@ -690,7 +806,8 @@ mod tests {
 
     #[test]
     fn providers_for_url_invalid_json_returns_ytdlp() {
-        let result = providers_for_url("https://www.douyin.com/video/123", &Some("not json".into()));
+        let result =
+            providers_for_url("https://www.douyin.com/video/123", &Some("not json".into()));
         assert_eq!(result, vec!["ytdlp"]);
     }
 
@@ -809,6 +926,17 @@ mod tests {
     }
 
     #[test]
+    fn friendly_error_ytdlp_runtime_failure_is_actionable() {
+        let msg = friendly_download_error(
+            "yt-dlp: ERROR: No module named expat; use SimpleXMLTreeBuilder instead",
+            "https://instagram.com/reel/abc/",
+            &None,
+        );
+        assert!(msg.contains("bundled video downloader"), "got: {msg}");
+        assert!(msg.contains("reinstall CompiFlow"), "got: {msg}");
+    }
+
+    #[test]
     fn friendly_error_fallback_shows_last_line() {
         let msg = friendly_download_error(
             "line 1\nline 2\nSome unknown error happened",
@@ -822,19 +950,32 @@ mod tests {
     fn friendly_error_ytdlp_not_installed_is_actionable() {
         let raw = "yt-dlp is not installed. Install it with: brew install yt-dlp";
         let msg = friendly_download_error(raw, "https://youtube.com/watch?v=x", &None);
-        assert_ne!(msg, raw.trim(), "expected friendlier message than raw stderr");
+        assert_ne!(
+            msg,
+            raw.trim(),
+            "expected friendlier message than raw stderr"
+        );
         #[cfg(target_os = "macos")]
         {
             assert!(msg.contains("CompiFlow"), "got: {msg}");
-            assert!(msg.contains("Finder") || msg.contains("macOS"), "got: {msg}");
+            assert!(
+                msg.contains("Finder") || msg.contains("macOS"),
+                "got: {msg}"
+            );
         }
         #[cfg(target_os = "windows")]
         {
-            assert!(msg.contains("Reinstall") || msg.contains("github.com"), "got: {msg}");
+            assert!(
+                msg.contains("Reinstall") || msg.contains("github.com"),
+                "got: {msg}"
+            );
         }
         #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
-            assert!(msg.contains("CompiFlow") || msg.contains("yt-dlp"), "got: {msg}");
+            assert!(
+                msg.contains("CompiFlow") || msg.contains("yt-dlp"),
+                "got: {msg}"
+            );
         }
     }
 
@@ -848,12 +989,30 @@ mod tests {
         assert!(p.exists());
     }
 
+    #[cfg(all(test, target_os = "macos"))]
+    #[test]
+    fn unquarantine_path_recurses_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let nested = dir.path().join("yt-dlp_macos").join("_internal");
+        fs::create_dir_all(&nested).unwrap();
+        let p = nested.join("libpython.dylib");
+        fs::write(&p, b"x").unwrap();
+        unquarantine_path(dir.path());
+        assert!(p.exists());
+    }
+
     // ── format_selection_for_url ─────────────────────────────────────────
 
     #[test]
     fn format_selection_instagram_uses_best() {
-        assert_eq!(format_selection_for_url("https://www.instagram.com/p/ABC/"), "best");
-        assert_eq!(format_selection_for_url("https://instagram.com/reel/XYZ/"), "best");
+        assert_eq!(
+            format_selection_for_url("https://www.instagram.com/p/ABC/"),
+            "best"
+        );
+        assert_eq!(
+            format_selection_for_url("https://instagram.com/reel/XYZ/"),
+            "best"
+        );
     }
 
     #[test]
@@ -875,8 +1034,12 @@ mod tests {
         let groups = build_filter_groups(&[], &[], false, "AND", None, None, None);
         assert_eq!(groups.len(), 1);
         let filters = groups[0]["filters"].as_array().unwrap();
-        assert!(filters.iter().any(|f| f["propertyName"] == "creator_status"));
-        assert!(filters.iter().any(|f| f["propertyName"] == "link_not_working_anymore"));
+        assert!(filters
+            .iter()
+            .any(|f| f["propertyName"] == "creator_status"));
+        assert!(filters
+            .iter()
+            .any(|f| f["propertyName"] == "link_not_working_anymore"));
     }
 
     #[test]
@@ -886,7 +1049,10 @@ mod tests {
         assert_eq!(groups.len(), 2);
         for (i, group) in groups.iter().enumerate() {
             let filters = group["filters"].as_array().unwrap();
-            let tag_filter = filters.iter().find(|f| f["propertyName"] == "tags").unwrap();
+            let tag_filter = filters
+                .iter()
+                .find(|f| f["propertyName"] == "tags")
+                .unwrap();
             assert_eq!(tag_filter["value"], tags[i]);
         }
     }
@@ -897,7 +1063,10 @@ mod tests {
         let groups = build_filter_groups(&tags, &[], false, "AND", None, None, None);
         assert_eq!(groups.len(), 1);
         let filters = groups[0]["filters"].as_array().unwrap();
-        let tag_filters: Vec<_> = filters.iter().filter(|f| f["propertyName"] == "tags").collect();
+        let tag_filters: Vec<_> = filters
+            .iter()
+            .filter(|f| f["propertyName"] == "tags")
+            .collect();
         assert_eq!(tag_filters.len(), 3);
     }
 
@@ -906,7 +1075,10 @@ mod tests {
         let scores = vec!["A".into(), "B".into()];
         let groups = build_filter_groups(&[], &scores, false, "AND", None, None, None);
         let filters = groups[0]["filters"].as_array().unwrap();
-        let score_filter = filters.iter().find(|f| f["propertyName"] == "score").unwrap();
+        let score_filter = filters
+            .iter()
+            .find(|f| f["propertyName"] == "score")
+            .unwrap();
         assert_eq!(score_filter["operator"], "IN");
         assert_eq!(score_filter["values"], serde_json::json!(["A", "B"]));
     }
@@ -915,21 +1087,30 @@ mod tests {
     fn filter_groups_never_used() {
         let groups = build_filter_groups(&[], &[], true, "AND", None, None, None);
         let filters = groups[0]["filters"].as_array().unwrap();
-        assert!(filters.iter().any(|f|
-            f["propertyName"] == "num_of_published_video_project" && f["value"] == "0"
-        ));
+        assert!(filters
+            .iter()
+            .any(|f| f["propertyName"] == "num_of_published_video_project" && f["value"] == "0"));
     }
 
     #[test]
     fn filter_groups_creator_link_added_to_all_groups() {
         let tags = vec!["x".into(), "y".into()];
-        let groups = build_filter_groups(&tags, &[], false, "OR", Some("https://example.com"), None, None);
+        let groups = build_filter_groups(
+            &tags,
+            &[],
+            false,
+            "OR",
+            Some("https://example.com"),
+            None,
+            None,
+        );
         assert_eq!(groups.len(), 2);
         for group in &groups {
             let filters = group["filters"].as_array().unwrap();
-            assert!(filters.iter().any(|f|
-                f["propertyName"] == "creator_main_link" && f["value"] == "https://example.com"
-            ));
+            assert!(filters
+                .iter()
+                .any(|f| f["propertyName"] == "creator_main_link"
+                    && f["value"] == "https://example.com"));
         }
     }
 
@@ -959,7 +1140,8 @@ mod tests {
 
     #[test]
     fn filter_groups_ignores_bad_date_strings() {
-        let groups = build_filter_groups(&[], &[], false, "AND", None, Some("not-a-date"), Some(""));
+        let groups =
+            build_filter_groups(&[], &[], false, "AND", None, Some("not-a-date"), Some(""));
         let filters = groups[0]["filters"].as_array().unwrap();
         assert!(!filters.iter().any(|f| f["propertyName"] == "date_found"));
     }
@@ -1055,7 +1237,10 @@ mod tests {
 
         let result = find_file_by_id(&dir.path().to_path_buf(), "12345");
         assert!(result.is_some());
-        assert!(result.unwrap().to_string_lossy().contains("12345_title.mp4"));
+        assert!(result
+            .unwrap()
+            .to_string_lossy()
+            .contains("12345_title.mp4"));
     }
 
     #[test]
@@ -1106,8 +1291,14 @@ mod tests {
     #[test]
     fn augmented_path_includes_homebrew_dirs() {
         let path = augmented_path();
-        assert!(path.contains("/opt/homebrew/bin"), "missing /opt/homebrew/bin in: {path}");
-        assert!(path.contains("/usr/local/bin"), "missing /usr/local/bin in: {path}");
+        assert!(
+            path.contains("/opt/homebrew/bin"),
+            "missing /opt/homebrew/bin in: {path}"
+        );
+        assert!(
+            path.contains("/usr/local/bin"),
+            "missing /usr/local/bin in: {path}"
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -1129,7 +1320,10 @@ mod tests {
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].platform, SocialPlatform::TikTok);
         assert_eq!(results[0].handle.as_deref(), Some("dancepro"));
-        assert_eq!(results[0].profile_url.as_deref(), Some("https://www.tiktok.com/@dancepro"));
+        assert_eq!(
+            results[0].profile_url.as_deref(),
+            Some("https://www.tiktok.com/@dancepro")
+        );
         assert_eq!(results[1].platform, SocialPlatform::Instagram);
         assert!(results[1].handle.is_none());
     }
@@ -1167,10 +1361,7 @@ mod tests {
 
     #[test]
     fn tiktok_handle_no_at_sign() {
-        assert_eq!(
-            extract_tiktok_handle("https://tiktok.com/t/ZTR123/"),
-            None
-        );
+        assert_eq!(extract_tiktok_handle("https://tiktok.com/t/ZTR123/"), None);
     }
 
     // ── extract_instagram_shortcode ──────────────────────────────────────
@@ -1211,7 +1402,8 @@ mod tests {
 
     #[test]
     fn ig_username_from_embed_html() {
-        let html = r#"<a href="https://www.instagram.com/theartist/" target="_blank">@theartist</a>"#;
+        let html =
+            r#"<a href="https://www.instagram.com/theartist/" target="_blank">@theartist</a>"#;
         assert_eq!(
             extract_instagram_username_from_html(html),
             Some("theartist".into())
@@ -1249,15 +1441,15 @@ mod tests {
     #[test]
     fn hashtags_from_caption_spaced() {
         let caption = "Check this out! #dance #music #viral";
-        assert_eq!(
-            extract_hashtags(caption),
-            Some("dance;music;viral".into())
-        );
+        assert_eq!(extract_hashtags(caption), Some("dance;music;viral".into()));
     }
 
     #[test]
     fn hashtags_none_when_no_hashtags() {
-        assert_eq!(extract_hashtags("Just a regular caption with no tags"), None);
+        assert_eq!(
+            extract_hashtags("Just a regular caption with no tags"),
+            None
+        );
     }
 
     #[test]

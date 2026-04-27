@@ -1,0 +1,8 @@
+{
+  "bundle": {
+    "externalBin": null,
+    "resources": {
+      "binaries/yt-dlp_macos/": "binaries/yt-dlp_macos/"
+    }
+  }
+}
