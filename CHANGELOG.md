@@ -5,6 +5,12 @@ The latest release is at the top.
 
 <!-- changelog-entries -->
 
+## v1.0.3 - 2026-04-27
+
+### What got better
+
+- Tag Clips now separates comma-based social hashtags correctly, so clips with many Instagram hashtags no longer appear as one oversized tag.
+
 ## v1.0.2 - 2026-04-27
 
 ### What's new
