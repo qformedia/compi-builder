@@ -23,6 +23,7 @@ import { FeedbackDialog } from "@/components/FeedbackDialog";
 import { SearchTab } from "@/components/SearchTab";
 import { ArrangeTab, decodeEditingNotes } from "@/components/ArrangeTab";
 import { GeneralSearchTab } from "@/components/GeneralSearchTab";
+import { DataIntegrityPage } from "@/components/DataIntegrityPage";
 import { TagClipsTab } from "@/components/TagClipsTab";
 import { fetchTagOptions, invalidateTagCache } from "@/lib/tags";
 import type { TagOption } from "@/lib/tags";
@@ -938,6 +939,28 @@ function App() {
                   </TabErrorBoundary>
                 </div>
               </Tabs>
+            )}
+          </div>
+
+          {/* ── Data integrity page ── */}
+          <div className={`flex flex-1 flex-col overflow-hidden ${activePage === "data-integrity" ? "" : "hidden"}`}>
+            {!isConfigured ? (
+              <div className="flex flex-1 items-center justify-center">
+                <div className="text-center">
+                  <p className="mb-4 text-muted-foreground">
+                    Configure your HubSpot token and project folder to get started.
+                  </p>
+                  <Button onClick={() => setActivePage("settings")}>
+                    Open Settings
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <div className="flex-1 overflow-hidden">
+                <TabErrorBoundary name="Data integrity">
+                  <DataIntegrityPage settings={settings} />
+                </TabErrorBoundary>
+              </div>
             )}
           </div>
 

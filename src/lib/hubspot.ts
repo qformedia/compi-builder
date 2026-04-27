@@ -164,6 +164,12 @@ export async function fetchVideoProjectClips(
   return data.results.map(parseClip);
 }
 
+/** All External Clips with no creator linked (Data Integrity; backend auto-paginates). */
+export async function fetchClipsMissingCreator(token: string): Promise<Clip[]> {
+  const data = await invoke<HubSpotSearchResponse>("search_clips_missing_creator", { token });
+  return data.results.map(parseClip);
+}
+
 function parseClip(record: {
   id: string;
   properties: Record<string, string | null>;

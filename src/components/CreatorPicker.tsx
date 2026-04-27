@@ -21,9 +21,11 @@ interface Props {
   token: string;
   value: CreatorOption | null;
   onChange: (creator: CreatorOption | null) => void;
+  /** Shown on the button when no creator is selected. */
+  emptyButtonLabel?: string;
 }
 
-export function CreatorPicker({ token, value, onChange }: Props) {
+export function CreatorPicker({ token, value, onChange, emptyButtonLabel = "Creator" }: Props) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [results, setResults] = useState<CreatorOption[]>([]);
@@ -95,7 +97,7 @@ export function CreatorPicker({ token, value, onChange }: Props) {
             </>
           ) : (
             <>
-              <span>Creator</span>
+              <span>{emptyButtonLabel}</span>
               <ChevronsUpDown className="h-3 w-3 opacity-50" />
             </>
           )}

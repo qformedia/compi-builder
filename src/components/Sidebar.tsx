@@ -1,7 +1,7 @@
-import { Film, Briefcase, Settings, PanelLeftClose, PanelLeft } from "lucide-react";
+import { Film, Briefcase, Settings, PanelLeftClose, PanelLeft, ShieldAlert } from "lucide-react";
 import { cn } from "@/lib/utils";
 
-export type Page = "videos" | "clips" | "settings";
+export type Page = "videos" | "clips" | "data-integrity" | "settings";
 
 interface NavItem {
   id: Page;
@@ -12,6 +12,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { id: "videos", label: "Videos", icon: Briefcase },
   { id: "clips", label: "Clips", icon: Film },
+  { id: "data-integrity", label: "Integrity", icon: ShieldAlert },
 ];
 
 interface Props {

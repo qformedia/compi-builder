@@ -3521,6 +3521,103 @@ async fn search_untagged_clips(
         .map_err(|e| format!("Failed to parse search response: {e}"))
 }
 
+/// Search External Clips with no creator linked (auto-paginate up to 10_000, HubSpot Search cap).
+/// Used by Data Integrity: frontend splits "in published" vs "other" by `num_of_published_video_project`.
+#[tauri::command]
+async fn search_clips_missing_creator(token: String) -> Result<serde_json::Value, String> {
+    const MAX_RESULTS: usize = 10_000;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(120))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let search_url = format!(
+        "https://api.hubapi.com/crm/v3/objects/{}/search",
+        EXTERNAL_CLIPS_OBJECT_ID
+    );
+
+    let filter_groups = serde_json::json!([{
+        "filters": [
+            { "propertyName": "creator_id", "operator": "NOT_HAS_PROPERTY" },
+            { "propertyName": "link_not_working_anymore", "operator": "NEQ", "value": "true" },
+        ]
+    }]);
+
+    let mut props: Vec<serde_json::Value> = CLIP_PROPERTIES
+        .iter()
+        .map(|p| serde_json::json!(p))
+        .collect();
+    props.push(serde_json::json!("hs_lastmodifieddate"));
+
+    let mut all_results: Vec<serde_json::Value> = Vec::new();
+    let mut after: Option<String> = None;
+
+    loop {
+        if all_results.len() >= MAX_RESULTS {
+            break;
+        }
+
+        let mut body = serde_json::json!({
+            "filterGroups": filter_groups,
+            "properties": props,
+            "sorts": [{ "propertyName": "num_of_published_video_project", "direction": "DESCENDING" }],
+            "limit": 100
+        });
+        if let Some(ref a) = after {
+            body
+                .as_object_mut()
+                .unwrap()
+                .insert("after".into(), serde_json::json!(a));
+        }
+
+        let res = client
+            .post(&search_url)
+            .bearer_auth(&token)
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| format!("Clips-missing-creator search failed: {e}"))?;
+
+        if !res.status().is_success() {
+            let status = res.status();
+            let text = res.text().await.unwrap_or_default();
+            return Err(format!("HubSpot search error ({}): {}", status, text));
+        }
+
+        let page: serde_json::Value = res
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse search response: {e}"))?;
+
+        if let Some(results) = page.get("results").and_then(|r| r.as_array()) {
+            for item in results {
+                if all_results.len() >= MAX_RESULTS {
+                    break;
+                }
+                all_results.push(item.clone());
+            }
+        }
+
+        after = page
+            .get("paging")
+            .and_then(|p| p.get("next"))
+            .and_then(|n| n.get("after"))
+            .and_then(|a| a.as_str())
+            .map(String::from);
+
+        if after.is_none() {
+            break;
+        }
+    }
+
+    let total = all_results.len();
+    Ok(serde_json::json!({
+        "total": total,
+        "results": all_results
+    }))
+}
+
 /// Search for External Clips that have a link but are missing social media metrics
 #[tauri::command]
 async fn search_clips_missing_metrics(
@@ -3887,6 +3984,7 @@ pub fn run() {
             create_external_clip,
             associate_clip_to_creator,
             search_untagged_clips,
+            search_clips_missing_creator,
             search_clips_missing_metrics,
             update_clip_properties,
             update_creator_properties,
