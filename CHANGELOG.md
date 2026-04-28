@@ -5,6 +5,15 @@ The latest release is at the top.
 
 <!-- changelog-entries -->
 
+## v1.0.4 - 2026-04-28
+
+### What got better
+
+- Data Integrity now rejects broken Instagram system links as creator matches, so deleted or unavailable reels no longer suggest fake creators.
+- Creator suggestions now include a direct HubSpot button, making it easier to review the suggested creator before applying it.
+- Clip HubSpot links sit next to the clip URL, keeping clip actions separate from creator-fix actions.
+- Long Data Integrity lists scroll normally again, including the "Not yet published" section.
+
 ## v1.0.3 - 2026-04-27
 
 ### What got better
