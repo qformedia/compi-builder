@@ -557,31 +557,78 @@ pub(crate) fn extract_instagram_shortcode(url: &str) -> Option<String> {
 
 /// Extract a username from Instagram embed/oEmbed HTML.
 /// Looks for profile links like `href="/username/"` or `instagram.com/username/`
+///
+/// Filters out Instagram-reserved path tokens (system pages, CDN asset paths
+/// like `rsrc.php`, etc.) so we never claim those as a creator handle.
 pub(crate) fn extract_instagram_username_from_html(html: &str) -> Option<String> {
-    // Pattern 1: href="https://www.instagram.com/username/" in embed HTML
-    let re1 = regex::Regex::new(r#"instagram\.com/([a-zA-Z0-9._]+)/?"#).ok()?;
-    for caps in re1.captures_iter(html) {
+    let re = regex::Regex::new(r#"instagram\.com/([a-zA-Z0-9._]+)/?"#).ok()?;
+    for caps in re.captures_iter(html) {
         let candidate = caps.get(1)?.as_str();
-        let skip = [
-            "reel",
-            "reels",
-            "p",
-            "explore",
-            "accounts",
-            "api",
-            "embed",
-            "developer",
-            "about",
-            "legal",
-            "tags",
-            "tv",
-            "stories",
-        ];
-        if !skip.contains(&candidate) && !candidate.starts_with("reel") {
+        if is_valid_instagram_handle_candidate(candidate) {
             return Some(candidate.to_string());
         }
     }
     None
+}
+
+/// Reject Instagram path tokens that can never be valid usernames.
+///
+/// IG handles are `[A-Za-z0-9._]{1,30}` but cannot contain `..`, end with `.`,
+/// or look like CDN asset filenames (e.g. `rsrc.php`). Reserved system path
+/// segments (`reel`, `accounts`, `explore`, …) are also excluded.
+fn is_valid_instagram_handle_candidate(candidate: &str) -> bool {
+    /// Instagram-reserved path segments that route to system pages or CDN assets,
+    /// not to user profiles. Anything matched here means the scrape latched onto
+    /// the wrong link in the embed HTML.
+    const RESERVED_PATHS: &[&str] = &[
+        "about",
+        "accounts",
+        "api",
+        "challenge",
+        "developer",
+        "direct",
+        "embed",
+        "emails",
+        "explore",
+        "hashtag",
+        "igtv",
+        "legal",
+        "oauth",
+        "p",
+        "press",
+        "privacy",
+        "reel",
+        "reels",
+        "rsrc.php",
+        "settings",
+        "static",
+        "stories",
+        "tags",
+        "terms",
+        "tv",
+        "verification",
+        "web",
+    ];
+
+    if candidate.is_empty() || candidate.len() > 30 {
+        return false;
+    }
+    if candidate.starts_with('.') || candidate.ends_with('.') || candidate.contains("..") {
+        return false;
+    }
+    // CDN/asset paths surface as "name.ext" — never a real handle.
+    if let Some(ext) = candidate.rsplit('.').next() {
+        if matches!(ext, "php" | "html" | "htm" | "js" | "css" | "json" | "png" | "jpg" | "jpeg" | "gif" | "svg" | "webp") {
+            return false;
+        }
+    }
+    if RESERVED_PATHS.contains(&candidate) {
+        return false;
+    }
+    if candidate.starts_with("reel") {
+        return false;
+    }
+    true
 }
 
 /// Extract caption text from Instagram embed HTML
@@ -1425,6 +1472,48 @@ mod tests {
         let html = r#"<a href="https://www.instagram.com/reel/ABC/">X</a>
                        <a href="https://www.instagram.com/explore/">E</a>"#;
         assert_eq!(extract_instagram_username_from_html(html), None);
+    }
+
+    #[test]
+    fn ig_username_skips_rsrc_php_cdn_path() {
+        // Broken/deleted reels embed pages leak Facebook CDN paths like
+        // `instagram.com/rsrc.php/v3/...` — never a real handle.
+        let html = r#"<link href="https://www.instagram.com/rsrc.php/v4/yV/r/abc.js">
+                      <a href="https://www.instagram.com/realartist/">Profile</a>"#;
+        assert_eq!(
+            extract_instagram_username_from_html(html),
+            Some("realartist".into())
+        );
+    }
+
+    #[test]
+    fn ig_username_none_when_only_cdn_assets() {
+        let html = r#"<link href="https://www.instagram.com/rsrc.php/v4/yV/r/abc.js">
+                      <link href="https://www.instagram.com/static/bundles/main.css">"#;
+        assert_eq!(extract_instagram_username_from_html(html), None);
+    }
+
+    #[test]
+    fn ig_username_skips_extensionish_handles() {
+        let html = r#"<a href="https://www.instagram.com/foo.html/">X</a>
+                      <a href="https://www.instagram.com/bar.png/">Y</a>"#;
+        assert_eq!(extract_instagram_username_from_html(html), None);
+    }
+
+    #[test]
+    fn ig_username_skips_dotted_edges_and_double_dots() {
+        let html = r#"<a href="https://www.instagram.com/.hidden/">X</a>
+                      <a href="https://www.instagram.com/two..dots/">Y</a>"#;
+        assert_eq!(extract_instagram_username_from_html(html), None);
+    }
+
+    #[test]
+    fn ig_username_allows_dotted_handle() {
+        let html = r#"<a href="https://www.instagram.com/julie.strings/">J</a>"#;
+        assert_eq!(
+            extract_instagram_username_from_html(html),
+            Some("julie.strings".into())
+        );
     }
 
     // ── extract_hashtags ─────────────────────────────────────────────────

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useState, type UIEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ChevronDown, CheckCircle2, AlertTriangle, RefreshCw, ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -139,7 +139,7 @@ export function DataIntegrityPage({ isActive, settings }: Props) {
   }, [checkData]);
 
   return (
-    <div className="flex flex-1 flex-col overflow-auto">
+    <div className="h-full overflow-auto">
       <div className="w-full space-y-4 px-4 py-4">
         {/* Header */}
         <div className="flex items-start justify-between gap-3">
@@ -280,15 +280,24 @@ function CheckCard<T extends { id: string }>({
   );
   const canLoadMore = Boolean(data?.nextAfter);
   const Row = check.Row;
+  const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
 
-  const handleScroll = (event: UIEvent<HTMLDivElement>) => {
+  // Auto-load the next page as the load-more footer scrolls into view.
+  // The page itself owns scrolling now (no nested 60vh container), so we
+  // observe the sentinel against the viewport.
+  useEffect(() => {
     if (!canLoadMore || loadingMore) return;
-    const el = event.currentTarget;
-    const distanceFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
-    if (distanceFromBottom < 240) {
-      onLoadMore();
-    }
-  };
+    const node = loadMoreSentinelRef.current;
+    if (!node) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((e) => e.isIntersecting)) onLoadMore();
+      },
+      { rootMargin: "240px" },
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [canLoadMore, loadingMore, onLoadMore]);
 
   return (
     <Card className="gap-0 overflow-hidden py-0">
@@ -384,7 +393,7 @@ function CheckCard<T extends { id: string }>({
           )}
 
           {!loading && !hasErr && countTotal > 0 && sections.length > 0 && (
-            <div className="max-h-[60vh] overflow-y-auto" onScroll={handleScroll}>
+            <div>
               {sections
                 .slice()
                 .sort((a, b) => SEV_RANK[b.severity] - SEV_RANK[a.severity])
@@ -455,7 +464,10 @@ function CheckCard<T extends { id: string }>({
                     </section>
                   );
                 })}
-              <div className="flex items-center justify-center gap-2 border-t px-4 py-3 text-xs text-muted-foreground">
+              <div
+                ref={loadMoreSentinelRef}
+                className="flex items-center justify-center gap-2 border-t px-4 py-3 text-xs text-muted-foreground"
+              >
                 {loadingMore ? (
                   <>
                     <RefreshCw className="h-3.5 w-3.5 animate-spin" />

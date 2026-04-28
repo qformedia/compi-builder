@@ -5,9 +5,10 @@ import { CheckCircle2, ExternalLink, Loader2, RefreshCw, Sparkles } from "lucide
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { CreatorPicker } from "@/components/CreatorPicker";
-import { PlatformIcon, getPlatform } from "@/components/ClipCard";
+import { HubSpotIcon, PlatformIcon, getPlatform } from "@/components/ClipCard";
 import type { Clip, AppSettings } from "@/types";
 import type { CreatorOption } from "@/lib/hubspot";
+import { hubspotCreatorUrl } from "@/lib/hubspot-urls";
 import {
   resolveCreatorFromClipUrl,
   matchCreatorsForHandle,
@@ -505,17 +506,31 @@ function MatchRow({ match: m, disabled, onApply }: MatchRowProps) {
           {(CONF_LABEL[m.confidence] ?? m.confidence)}: {m.reason}
         </Badge>
       </div>
-      <Button
-        type="button"
-        size="sm"
-        className="h-7 w-full shrink-0 text-[10px] sm:ml-2 sm:w-[72px]"
-        disabled={disabled}
-        onClick={() => {
-          void onApply();
-        }}
-      >
-        Apply
-      </Button>
+      <div className="flex w-full shrink-0 items-stretch gap-1 sm:ml-2 sm:w-auto">
+        <Button
+          type="button"
+          size="sm"
+          className="h-7 flex-1 text-[10px] sm:w-[72px] sm:flex-none"
+          disabled={disabled}
+          onClick={() => {
+            void onApply();
+          }}
+        >
+          Apply
+        </Button>
+        <Button
+          type="button"
+          size="icon"
+          variant="ghost"
+          className="h-7 w-7 shrink-0 cursor-pointer"
+          title="Open creator in HubSpot"
+          onClick={() => {
+            void openUrl(hubspotCreatorUrl(m.creatorId));
+          }}
+        >
+          <HubSpotIcon className="h-3.5 w-3.5" />
+        </Button>
+      </div>
     </li>
   );
 }

@@ -2,7 +2,6 @@ import { useCallback, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { X } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { ClipPreview } from "@/components/ClipPreview";
 import { CreatorSuggestionPanel } from "@/components/CreatorSuggestionPanel";
 import { SCORE_COLORS, HubSpotIcon, getPlatform, PlatformIcon } from "@/components/ClipCard";
@@ -11,11 +10,11 @@ import {
   useActivePreview,
 } from "@/lib/data-integrity/clip-preview-store";
 import { countClipsMissingCreator, fetchClipsMissingCreator } from "@/lib/hubspot";
+import { hubspotClipUrl } from "@/lib/hubspot-urls";
 import type { AppSettings, Clip } from "@/types";
 import { cn } from "@/lib/utils";
 import type { IntegrityCheck, IntegritySectionCount, IntegritySectionPage, Severity } from "../types";
 
-const HUBSPOT_CLIP_RECORD = "https://app-eu1.hubspot.com/contacts/146859718/record/2-192287471";
 const PREVIEW_WIDTH_PX = 280;
 
 function clipUrlParts(link: string): { host: string; shortPath: string } {
@@ -40,6 +39,19 @@ function ClipUrlButton({ link, host, shortPath, className }: { link: string; hos
     >
       <span className="font-medium text-foreground">{host}</span>
       <span className="text-muted-foreground">{shortPath}</span>
+    </button>
+  );
+}
+
+function OpenClipInHubSpotButton({ clipId }: { clipId: string }) {
+  return (
+    <button
+      type="button"
+      className="flex h-5 w-5 flex-shrink-0 cursor-pointer items-center justify-center rounded text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+      title="Open clip in HubSpot"
+      onClick={() => openUrl(hubspotClipUrl(clipId))}
+    >
+      <HubSpotIcon className="h-3 w-3" />
     </button>
   );
 }
@@ -98,6 +110,7 @@ function ClipsMissingCreatorRow({
               shortPath={shortPath}
               className="flex-1"
             />
+            <OpenClipInHubSpotButton clipId={clip.id} />
             <button
               type="button"
               className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
@@ -138,7 +151,15 @@ function ClipsMissingCreatorRow({
 
       <div className="min-w-0 flex-1">
         {!isPreviewing && (
-          <ClipUrlButton link={clip.link} host={host} shortPath={shortPath} />
+          <div className="flex min-w-0 items-center gap-1.5">
+            <ClipUrlButton
+              link={clip.link}
+              host={host}
+              shortPath={shortPath}
+              className="min-w-0"
+            />
+            <OpenClipInHubSpotButton clipId={clip.id} />
+          </div>
         )}
         <div
           className={cn(
@@ -183,16 +204,6 @@ function ClipsMissingCreatorRow({
             onLinked={onLinked}
             onSuggestStart={() => setActivePreview(clip)}
           />
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon"
-            className="h-7 w-7 flex-shrink-0 cursor-pointer"
-            title="Open in HubSpot"
-            onClick={() => openUrl(`${HUBSPOT_CLIP_RECORD}/${clip.id}`)}
-          >
-            <HubSpotIcon className="h-3.5 w-3.5" />
-          </Button>
         </div>
       </div>
     </li>
