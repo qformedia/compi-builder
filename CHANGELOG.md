@@ -5,6 +5,12 @@ The latest release is at the top.
 
 <!-- changelog-entries -->
 
+## v1.0.5 - 2026-04-29
+
+### What got better
+
+- The Finish Video dialog now opens much wider and scrolls when the clip warning list is long, so the Confirm button stays reachable instead of getting cut off.
+
 ## v1.0.4 - 2026-04-28
 
 ### What got better
