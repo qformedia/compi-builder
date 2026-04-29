@@ -1177,7 +1177,7 @@ function App() {
 
       {/* Finish Video Dialog */}
       <Dialog open={finishDialogOpen} onOpenChange={setFinishDialogOpen}>
-        <DialogContent className="sm:max-w-md">
+        <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-[80vw]">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               Finish Video
