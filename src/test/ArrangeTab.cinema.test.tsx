@@ -95,6 +95,7 @@ vi.mock("@/lib/supabase", () => ({
 // ---------------------------------------------------------------------------
 
 import { ArrangeTab } from "@/components/ArrangeTab";
+import { invoke } from "@tauri-apps/api/core";
 import { DEFAULT_DOWNLOAD_PROVIDERS } from "@/types";
 import type { AppSettings, Project } from "@/types";
 
@@ -366,6 +367,62 @@ describe("ArrangeTab — clip action bar", () => {
 
     expect(screen.getByTitle("Retry download")).toBeTruthy();
     expect(screen.getByTitle("Replace video with local file")).toBeTruthy();
+  });
+
+  it("hides retry and shows manual-only hint for failed Douyin clips", () => {
+    const failedDouyinProject: Project = {
+      ...projectWithDownloadedClip,
+      clips: [{
+        ...projectWithDownloadedClip.clips[0],
+        link: "https://www.douyin.com/video/123",
+        downloadStatus: "failed",
+        downloadError: "Douyin clips must be downloaded manually. Import the file using the button below.",
+        localFile: undefined,
+      }],
+    };
+
+    render(
+      <ArrangeTab
+        settings={settings}
+        project={failedDouyinProject}
+        setProject={noop}
+        isActive={true}
+        removeClip={noop}
+      />,
+    );
+
+    expect(screen.queryByTitle("Retry download")).toBeNull();
+    expect(screen.getByText("Manual download")).toBeTruthy();
+    expect(screen.getByTitle("Replace video with local file")).toBeTruthy();
+  });
+
+  it("does not expose auto-download action for pending Douyin clips", () => {
+    const pendingDouyinProject: Project = {
+      ...projectWithDownloadedClip,
+      clips: [{
+        ...projectWithDownloadedClip.clips[0],
+        link: "https://www.douyin.com/video/123",
+        downloadStatus: "pending",
+        localFile: undefined,
+      }],
+    };
+    const setProject = vi.fn();
+    const invokeMock = vi.mocked(invoke);
+
+    render(
+      <ArrangeTab
+        settings={settings}
+        project={pendingDouyinProject}
+        setProject={setProject}
+        isActive={true}
+        removeClip={noop}
+      />,
+    );
+
+    expect(screen.queryByTitle("Download")).toBeNull();
+    expect(screen.getByText("Manual download")).toBeTruthy();
+    expect(invokeMock).not.toHaveBeenCalledWith("download_clip", expect.anything());
+    expect(setProject).not.toHaveBeenCalled();
   });
 
   it("shows Report button for a failed clip after retry", () => {

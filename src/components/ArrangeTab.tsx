@@ -117,9 +117,15 @@ function toCardData(
 }
 
 const THUMB_DEFAULT = 110;
+const DOUYIN_MANUAL_DOWNLOAD_ERROR =
+  "Douyin clips must be downloaded manually. Import the file using the button below.";
 
 function getClipDuration(clip: ProjectClip): number {
   return clip.editedDuration ?? clip.localDuration ?? 0;
+}
+
+function isDouyinClip(clip: Pick<ProjectClip, "link">): boolean {
+  return getPlatform(clip.link) === "Douyin";
 }
 
 const LEFT_MIN = 180;
@@ -351,6 +357,17 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
 
   const downloadClip = useCallback(async (clip: ProjectClip, force = false) => {
     if (!project) return;
+    if (isDouyinClip(clip)) {
+      // Douyin is manual-only: avoid backend retries and show deterministic guidance.
+      if (clip.downloadStatus === "complete" && clip.localFile) return;
+      const isRetry = force || clip.downloadStatus === "failed";
+      updateClipField(clip.hubspotId, {
+        downloadStatus: "failed",
+        downloadError: DOUYIN_MANUAL_DOWNLOAD_ERROR,
+        retryCount: (clip.retryCount ?? 0) + (isRetry ? 1 : 0),
+      });
+      return;
+    }
     const isRetry = force || clip.downloadStatus === "failed";
     const updates: Partial<ProjectClip> = {
       retryCount: (clip.retryCount ?? 0) + (isRetry ? 1 : 0),
@@ -588,7 +605,11 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
           </p>
         </>
       ) : selectedClip.downloadStatus === "failed" ? (
-        <p className="text-sm text-white/40">Download failed — use the buttons below to retry</p>
+        <p className="text-sm text-white/40">
+          {isDouyinClip(selectedClip)
+            ? "Douyin clips must be imported manually"
+            : "Download failed — use the buttons below to retry"}
+        </p>
       ) : (
         <p className="text-sm text-white/40">Clip not downloaded yet</p>
       )}
@@ -625,6 +646,7 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
         {selectedClip && (() => {
           const ds = selectedClip.downloadStatus;
           const platform = getPlatform(selectedClip.link);
+          const isDouyin = platform === "Douyin";
           const isChinese = ["Douyin", "Bilibili", "Xiaohongshu", "Kuaishou"].includes(platform);
           const retried = (selectedClip.retryCount ?? 0) >= 1;
           const urlWarning = getNonVideoUrlWarning(selectedClip.link);
@@ -643,7 +665,7 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
                   )}
                   {ds === "failed" && (
                     <p className="text-[10px] text-destructive leading-snug">
-                      {selectedClip.downloadError ?? "Download failed"}
+                      {selectedClip.downloadError ?? (isDouyin ? DOUYIN_MANUAL_DOWNLOAD_ERROR : "Download failed")}
                     </p>
                   )}
                 </div>
@@ -655,18 +677,22 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
                   <span className="flex items-center gap-1 px-1.5 py-0.5 text-[11px] text-muted-foreground">
                     <Loader2 className="h-3.5 w-3.5 animate-spin" /> Downloading...
                   </span>
-                ) : ds === "failed" ? (
+                ) : ds === "failed" && !isDouyin ? (
                   <Tip label="Retry download"><button onClick={() => downloadClip(selectedClip)} className={iconBtn} title="Retry download">
                     <RefreshCw className="h-3.5 w-3.5" />
                   </button></Tip>
-                ) : isPlayable(selectedClip) ? (
+                ) : isPlayable(selectedClip) && !isDouyin ? (
                   <Tip label="Re-download"><button onClick={() => downloadClip(selectedClip, true)} className={iconBtn} title="Re-download">
                     <RefreshCw className="h-3.5 w-3.5" />
                   </button></Tip>
-                ) : (
+                ) : !isDouyin ? (
                   <Tip label="Download"><button onClick={() => downloadClip(selectedClip)} className={iconBtn} title="Download">
                     <Download className="h-3.5 w-3.5" />
                   </button></Tip>
+                ) : (
+                  <span className="px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                    Manual download
+                  </span>
                 )}
 
                 <Tip label="Replace video with local file"><button onClick={() => importClipFile(selectedClip)} className={iconBtn} title="Replace video with local file">

@@ -313,6 +313,7 @@ export function ClipCard({
   const useHubSpotVideo = isActive && preferHubSpotPreview && !!clip.originalClip;
   const embedUrl = isActive && !useHubSpotVideo ? getEmbedUrl(clip.link) : null;
   const platform = getPlatform(clip.link);
+  const isDouyin = platform === "Douyin";
   const ds = clip.downloadStatus;
   const showLicenseType =
     clip.licenseType && clip.licenseType.toLowerCase() !== "recurrent";
@@ -665,7 +666,7 @@ export function ClipCard({
         )}
 
         {/* Download status + Retry + Browse for non-complete clips */}
-        {(ds === "failed" || ds === "downloading") && onRetryDownload && (
+        {((ds === "downloading") || (ds === "failed" && !isDouyin)) && onRetryDownload && (
           <button
             onClick={onRetryDownload}
             className="flex items-center justify-center gap-1 px-2 py-1.5 text-xs font-medium text-orange-600 transition-colors hover:bg-muted cursor-pointer"
