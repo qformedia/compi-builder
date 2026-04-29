@@ -53,6 +53,9 @@ interface Props {
   /** Force-trigger a HubSpot upload for a clip (resets retry budget and
    *  routes through the central upload queue in App.tsx). */
   enqueueClipUpload?: (clipId: string) => void;
+  /** Live download progress per clip ID (0-100). Streamed from yt-dlp; not
+   *  persisted. Used for the spinner overlay percent display. */
+  downloadProgress?: Record<string, number>;
 }
 
 function Tip({ label, children }: { label: string; children: React.ReactNode }) {
@@ -90,7 +93,10 @@ export function decodeEditingNotes(raw: string): Record<string, string> {
   catch { return {}; }
 }
 
-function toCardData(clip: ProjectClip): ClipCardData {
+function toCardData(
+  clip: ProjectClip,
+  downloadProgress?: Record<string, number>,
+): ClipCardData {
   return {
     id: clip.hubspotId,
     link: clip.link,
@@ -106,6 +112,7 @@ function toCardData(clip: ProjectClip): ClipCardData {
     editingNotes: clip.editingNotes,
     localFile: clip.localFile,
     originalClip: clip.originalClip,
+    downloadProgress: downloadProgress?.[clip.hubspotId],
   };
 }
 
@@ -119,7 +126,7 @@ const LEFT_MIN = 180;
 const LEFT_MAX = 560;
 const LEFT_DEFAULT = 288;
 
-export function ArrangeTab({ settings, project, setProject, isActive, removeClip, thumbWidth = THUMB_DEFAULT, suppressAutoPlay = false, uploadingClipIds, enqueueClipUpload }: Props) {
+export function ArrangeTab({ settings, project, setProject, isActive, removeClip, thumbWidth = THUMB_DEFAULT, suppressAutoPlay = false, uploadingClipIds, enqueueClipUpload, downloadProgress }: Props) {
   const [selectedClipId, setSelectedClipId] = useState<string | null>(null);
   const [playerError, setPlayerError] = useState<string | null>(null);
   const playerRef = useRef<MediaPlayerInstance>(null);
@@ -573,7 +580,12 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
       {selectedClip.downloadStatus === "downloading" ? (
         <>
           <Loader2 className="h-6 w-6 animate-spin text-white/40" />
-          <p className="text-sm text-white/40">Downloading...</p>
+          <p className="text-sm text-white/40">
+            Downloading{(() => {
+              const pct = downloadProgress?.[selectedClip.hubspotId];
+              return typeof pct === "number" ? ` ${pct.toFixed(1)}%` : "...";
+            })()}
+          </p>
         </>
       ) : selectedClip.downloadStatus === "failed" ? (
         <p className="text-sm text-white/40">Download failed — use the buttons below to retry</p>
@@ -944,6 +956,7 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
                       thumbRetryKey={thumbRetryKey}
                       hubspotToken={settings.hubspotToken}
                       minuteMarker={minuteMarker}
+                      downloadProgress={downloadProgress}
                     />
                   );
                 })}
@@ -1062,6 +1075,7 @@ function SortableCard({
   thumbRetryKey,
   hubspotToken,
   minuteMarker,
+  downloadProgress,
 }: {
   clip: ProjectClip;
   index: number;
@@ -1076,6 +1090,7 @@ function SortableCard({
   thumbRetryKey?: number;
   hubspotToken?: string;
   minuteMarker?: number | null;
+  downloadProgress?: Record<string, number>;
 }) {
   const {
     attributes,
@@ -1118,7 +1133,7 @@ function SortableCard({
       </div>
 
       <ClipCard
-        clip={toCardData(clip)}
+        clip={toCardData(clip, downloadProgress)}
         thumbCache={thumbCache}
         cookiesBrowser={cookiesBrowser}
         cookiesFile={cookiesFile}

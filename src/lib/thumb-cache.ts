@@ -50,9 +50,57 @@ export function getPersistedThumb(clipUrl: string): string | null {
   }
 }
 
+const DURABLE_HOST_PATTERNS = [
+  /(?:^|\.)hubspotusercontent-eu1\.net$/i,
+  /(?:^|\.)hubspotusercontent\d*\.net$/i,
+  /(?:^|\.)hubspot\.com$/i,
+  /(?:^|\.)cdn\d*\.hubspot\.com$/i,
+];
+
+const EPHEMERAL_HOST_PATTERNS = [
+  /(?:^|\.)tiktokcdn(?:-us)?\.com$/i,
+  /(?:^|\.)byteimg\.com$/i,
+  /(?:^|\.)muscdn\.com$/i,
+  /(?:^|\.)cdninstagram\.com$/i,
+  /(?:^|\.)fbcdn\.net$/i,
+  /(?:^|\.)pinimg\.com$/i,
+];
+
+const EPHEMERAL_QUERY_KEYS = [
+  "signature",
+  "sig",
+  "expires",
+  "expiry",
+  "exp",
+  "policy",
+  "x-amz-signature",
+  "x-amz-security-token",
+  "x-amz-credential",
+  "x-goog-signature",
+  "x-goog-credential",
+  "token",
+  "auth",
+];
+
 /** Never persist base64 data URLs — they can be huge and blow localStorage / RAM. */
-function isPersistableThumbUrl(url: string): boolean {
-  return !url.startsWith("data:");
+export function isPersistableThumbUrl(url: string): boolean {
+  if (!url || url.startsWith("data:")) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+
+  const host = parsed.hostname.toLowerCase();
+  if (DURABLE_HOST_PATTERNS.some((rx) => rx.test(host))) return true;
+
+  const queryKeys = new Set(Array.from(parsed.searchParams.keys()).map((k) => k.toLowerCase()));
+  const hasEphemeralKey = EPHEMERAL_QUERY_KEYS.some((k) => queryKeys.has(k));
+  if (hasEphemeralKey) return false;
+  if (EPHEMERAL_HOST_PATTERNS.some((rx) => rx.test(host))) return false;
+
+  return true;
 }
 
 export function persistThumb(clipUrl: string, thumbUrl: string) {

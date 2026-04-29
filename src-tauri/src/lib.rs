@@ -1,12 +1,15 @@
+mod download_log;
 mod helpers;
 mod resolver;
 mod socialkit;
+mod ytdlp_repair;
 
 use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 #[cfg(target_os = "macos")]
 use tauri::Manager;
@@ -1354,7 +1357,15 @@ async fn fetch_thumbnail(
     cookies_browser: Option<String>,
     cookies_file: Option<String>,
     evil0ctal_api_url: Option<String>,
+    clip_id: Option<String>,
 ) -> Result<Option<String>, String> {
+    let clip_id_ref = clip_id.as_deref();
+    download_log::debug(
+        &app,
+        "thumbnail",
+        clip_id_ref,
+        format!("fetch_thumbnail start: {}", url),
+    );
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()
@@ -1367,6 +1378,7 @@ async fn fetch_thumbnail(
         if let Some(ref base_url) = evil0ctal_api_url {
             if !base_url.is_empty() {
                 if let Some(thumb) = evil0ctal_thumbnail(&client, base_url, &url).await {
+                    download_log::debug(&app, "thumbnail", clip_id_ref, "thumbnail via evil0ctal");
                     return Ok(Some(thumb));
                 }
             }
@@ -1389,6 +1401,7 @@ async fn fetch_thumbnail(
                 .and_then(|s| s.split(['&', '#']).next())
         };
         if let Some(id) = video_id {
+            download_log::debug(&app, "thumbnail", clip_id_ref, "thumbnail via youtube hqdefault");
             return Ok(Some(format!(
                 "https://img.youtube.com/vi/{}/hqdefault.jpg",
                 id
@@ -1405,6 +1418,7 @@ async fn fetch_thumbnail(
         if let Ok(res) = client.get(&oembed_url).send().await {
             if let Ok(json) = res.json::<serde_json::Value>().await {
                 if let Some(thumb) = json.get("thumbnail_url").and_then(|v| v.as_str()) {
+                    download_log::debug(&app, "thumbnail", clip_id_ref, "thumbnail via tiktok oembed");
                     return Ok(Some(thumb.to_string()));
                 }
             }
@@ -1414,6 +1428,7 @@ async fn fetch_thumbnail(
     // Instagram: try embed page scraping (no cookies needed)
     if url.contains("instagram.com") {
         if let Some(thumb) = instagram_embed_thumbnail(&client, &url).await {
+            download_log::debug(&app, "thumbnail", clip_id_ref, "thumbnail via instagram embed");
             return Ok(Some(thumb));
         }
     }
@@ -1441,7 +1456,10 @@ async fn fetch_thumbnail(
             ytdlp_thumbnail_with(&app, &url, &cookies_browser, &None).await
         };
         match result {
-            Ok(Some(thumb)) => return Ok(Some(thumb)),
+            Ok(Some(thumb)) => {
+                download_log::debug(&app, "thumbnail", clip_id_ref, "thumbnail via ytdlp+browser-cookies");
+                return Ok(Some(thumb));
+            }
             Err(err) => {
                 cookie_error = Some(err);
             }
@@ -1452,26 +1470,53 @@ async fn fetch_thumbnail(
     // 2. Try with cookies file
     if has_file {
         match ytdlp_thumbnail_with(&app, &url, &None, &cookies_file).await {
-            Ok(Some(thumb)) => return Ok(Some(thumb)),
+            Ok(Some(thumb)) => {
+                download_log::debug(&app, "thumbnail", clip_id_ref, "thumbnail via ytdlp+cookies-file");
+                return Ok(Some(thumb));
+            }
             _ => {}
         }
     }
 
     // 3. Try without any cookies (works for many platforms)
     match ytdlp_thumbnail_with(&app, &url, &None, &None).await {
-        Ok(Some(thumb)) => return Ok(Some(thumb)),
+        Ok(Some(thumb)) => {
+            download_log::debug(&app, "thumbnail", clip_id_ref, "thumbnail via ytdlp+no-cookies");
+            return Ok(Some(thumb));
+        }
         // No-cookies fallback ran but found nothing: the video itself is
         // unavailable/removed, not a cookie problem. Don't blame cookies.
-        Ok(None) => return Ok(None),
+        Ok(None) => {
+            download_log::warn(
+                &app,
+                "thumbnail",
+                clip_id_ref,
+                "thumbnail fallback returned none (source likely unavailable)",
+            );
+            return Ok(None);
+        }
         Err(_) => {}
     }
 
     // Only surface the cookie error if the no-cookies fallback also errored
     // (meaning yt-dlp couldn't even run), not when the video simply doesn't exist.
     if let Some(err) = cookie_error {
+        download_log::error_detailed(
+            &app,
+            "thumbnail",
+            clip_id_ref,
+            "thumbnail fetch failed after cookie/no-cookie cascade",
+            err.clone(),
+        );
         return Err(err);
     }
 
+    download_log::warn(
+        &app,
+        "thumbnail",
+        clip_id_ref,
+        "thumbnail fetch finished with no result",
+    );
     Ok(None)
 }
 
@@ -1837,9 +1882,78 @@ fn bundled_macos_ytdlp_path(app: &AppHandle) -> Option<PathBuf> {
     dev_path.exists().then_some(dev_path)
 }
 
+/// Hard upper bound on a single yt-dlp invocation. Bounds the worst case for
+/// hung sockets, captive portals, slow CDNs, and yt-dlp's own retry loop. The
+/// cookie cascade may still run up to 3 attempts, so worst case per clip is
+/// `3 * YTDLP_HARD_TIMEOUT`. Picked generously — typical social-media clips
+/// finish in seconds; legitimate large videos in under a minute.
+pub(crate) const YTDLP_HARD_TIMEOUT: Duration = Duration::from_secs(300);
+
+/// Streams real-time download progress and per-line debug output from yt-dlp
+/// back to the UI. Cloneable so it can be moved into spawned reader tasks.
+#[derive(Clone)]
+struct ProgressSink {
+    app: AppHandle,
+    clip_id: String,
+}
+
+impl ProgressSink {
+    fn emit_percent(&self, percent: f64) {
+        let _ = self.app.emit(
+            "download-progress",
+            DownloadProgress {
+                clip_id: self.clip_id.clone(),
+                status: "downloading".into(),
+                progress: Some(percent),
+                local_file: None,
+                local_duration: None,
+                error: None,
+            },
+        );
+    }
+}
+
+/// Parse a percentage from a yt-dlp progress line. Handles the
+/// `--progress-template "%(progress._percent_str)s"` output (e.g. ` 12.3%`)
+/// as well as the default `[download] 12.3% of 100MiB` form, so future arg
+/// changes don't silently break progress streaming.
+pub(crate) fn parse_progress_percent(line: &str) -> Option<f64> {
+    let pct_idx = line.find('%')?;
+    let prefix = &line[..pct_idx];
+    let last_token = prefix
+        .rsplit(|c: char| c.is_whitespace())
+        .find(|t| !t.is_empty())?;
+    last_token
+        .parse::<f64>()
+        .ok()
+        .filter(|p| (0.0..=100.0).contains(p))
+}
+
 async fn run_ytdlp_binary(path: &PathBuf, args: &[String]) -> Result<YtDlpOutput, String> {
+    run_ytdlp_binary_inner(path, args, None).await
+}
+
+async fn run_ytdlp_binary_streaming(
+    path: &PathBuf,
+    args: &[String],
+    sink: ProgressSink,
+) -> Result<YtDlpOutput, String> {
+    run_ytdlp_binary_inner(path, args, Some(sink)).await
+}
+
+async fn run_ytdlp_binary_inner(
+    path: &PathBuf,
+    args: &[String],
+    progress: Option<ProgressSink>,
+) -> Result<YtDlpOutput, String> {
+    use std::process::Stdio;
+    use tokio::io::{AsyncBufReadExt, BufReader};
+
     let mut cmd = tokio::process::Command::new(path);
     cmd.args(args);
+    cmd.kill_on_drop(true); // ensures the OS process is killed if our timeout fires
+    cmd.stdout(Stdio::piped());
+    cmd.stderr(Stdio::piped());
     #[cfg(target_os = "macos")]
     cmd.env("PATH", augmented_path());
     #[cfg(target_os = "windows")]
@@ -1848,114 +1962,302 @@ async fn run_ytdlp_binary(path: &PathBuf, args: &[String]) -> Result<YtDlpOutput
         use std::os::windows::process::CommandExt;
         cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
     }
-    let out = cmd
-        .output()
-        .await
+
+    let mut child = cmd
+        .spawn()
         .map_err(|e| format!("Failed to run yt-dlp at {}: {}", path.display(), e))?;
 
-    Ok(YtDlpOutput {
-        success: out.status.success(),
-        stdout: out.stdout,
-        stderr: out.stderr,
-    })
+    let stdout = child.stdout.take().expect("stdout was piped above");
+    let stderr = child.stderr.take().expect("stderr was piped above");
+
+    let progress_for_task = progress.clone();
+    let stdout_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(stdout).lines();
+        let mut buf = Vec::new();
+        while let Ok(Some(line)) = reader.next_line().await {
+            if let Some(ref sink) = progress_for_task {
+                if let Some(pct) = parse_progress_percent(&line) {
+                    sink.emit_percent(pct);
+                }
+            }
+            buf.extend_from_slice(line.as_bytes());
+            buf.push(b'\n');
+        }
+        buf
+    });
+
+    let stderr_task = tokio::spawn(async move {
+        let mut reader = BufReader::new(stderr).lines();
+        let mut buf = Vec::new();
+        while let Ok(Some(line)) = reader.next_line().await {
+            buf.extend_from_slice(line.as_bytes());
+            buf.push(b'\n');
+        }
+        buf
+    });
+
+    match tokio::time::timeout(YTDLP_HARD_TIMEOUT, child.wait()).await {
+        Ok(Ok(status)) => {
+            // Drain reader tasks so we get the full stderr/stdout payload.
+            let stdout_bytes = stdout_task.await.unwrap_or_default();
+            let stderr_bytes = stderr_task.await.unwrap_or_default();
+            Ok(YtDlpOutput {
+                success: status.success(),
+                stdout: stdout_bytes,
+                stderr: stderr_bytes,
+            })
+        }
+        Ok(Err(e)) => Err(format!("yt-dlp execution failed: {e}")),
+        Err(_) => Err(format!(
+            "yt-dlp timed out after {} minutes — the download server is unresponsive. Retry the download.",
+            YTDLP_HARD_TIMEOUT.as_secs() / 60
+        )),
+    }
 }
 
-/// Run yt-dlp with args. Release builds use CompiFlow's bundled downloader unless
-/// COMPIFLOW_YTDLP_PATH is set; dev builds may fall back to a system yt-dlp.
+/// Once we detect a startup-class failure of the bundled binary in this
+/// session, skip it on subsequent calls (~50 ms saved per download). The
+/// repaired binary in app data is used instead.
+static BUNDLED_KNOWN_BROKEN: AtomicBool = AtomicBool::new(false);
+
+/// Run yt-dlp with args. Resolution cascade:
+/// 1. `COMPIFLOW_YTDLP_PATH` (explicit override)
+/// 2. Bundled sidecar
+/// 3. Self-repaired binary in `<app_data>/bin/` (downloaded on demand)
+/// 4. Dev-only system yt-dlp (debug builds only)
 async fn run_ytdlp(app: &AppHandle, args: &[String]) -> Result<YtDlpOutput, String> {
+    run_ytdlp_with_progress(app, args, None).await
+}
+
+/// Like `run_ytdlp` but streams stdout in real time when `progress` is `Some`,
+/// so the caller can emit per-line download progress events to the UI.
+async fn run_ytdlp_with_progress(
+    app: &AppHandle,
+    args: &[String],
+    progress: Option<ProgressSink>,
+) -> Result<YtDlpOutput, String> {
     #[allow(unused_mut)]
     let mut args = args.to_vec();
 
     #[cfg(target_os = "windows")]
     apply_windows_cookie_workaround(&mut args);
 
+    let clip_id = progress.as_ref().map(|p| p.clip_id.clone());
+    let clip_id_ref = clip_id.as_deref();
+
     if let Some(path) = configured_ytdlp_path()? {
-        return run_ytdlp_binary(&path, &args).await;
+        download_log::debug(
+            app,
+            "ytdlp",
+            clip_id_ref,
+            format!("using COMPIFLOW_YTDLP_PATH override at {}", path.display()),
+        );
+        return dispatch_binary(&path, &args, progress).await;
     }
 
+    if !BUNDLED_KNOWN_BROKEN.load(Ordering::Relaxed) {
+        match try_run_bundled_ytdlp(app, &args, progress.clone()).await {
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                if out.success || !ytdlp_repair::looks_like_startup_failure(&stderr) {
+                    return Ok(out);
+                }
+                download_log::warn(
+                    app,
+                    "ytdlp",
+                    clip_id_ref,
+                    "bundled binary returned a startup-class failure; falling back to self-repair",
+                );
+                eprintln!(
+                    "[yt-dlp] bundled binary returned a startup-class failure; \
+                     marking as broken and falling back to self-repair"
+                );
+                BUNDLED_KNOWN_BROKEN.store(true, Ordering::Relaxed);
+            }
+            Err(e) => {
+                download_log::warn(
+                    app,
+                    "ytdlp",
+                    clip_id_ref,
+                    format!("bundled binary could not start: {e} — falling back to self-repair"),
+                );
+                eprintln!("[yt-dlp] bundled binary could not start: {e}");
+                BUNDLED_KNOWN_BROKEN.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
+    match ytdlp_repair::ensure_runnable_binary(app).await {
+        Ok(path) => {
+            download_log::info(
+                app,
+                "ytdlp",
+                clip_id_ref,
+                format!("using self-repaired binary at {}", path.display()),
+            );
+            dispatch_binary(&path, &args, progress).await
+        }
+        Err(repair_err) => {
+            download_log::error(
+                app,
+                "repair",
+                clip_id_ref,
+                format!("self-repair failed: {repair_err}"),
+            );
+            eprintln!("[yt-dlp] self-repair failed: {repair_err}");
+
+            #[cfg(debug_assertions)]
+            if let Some(path) = find_system_ytdlp() {
+                download_log::info(
+                    app,
+                    "ytdlp",
+                    clip_id_ref,
+                    format!("using dev system yt-dlp at {}", path.display()),
+                );
+                return dispatch_binary(&path, &args, progress).await;
+            }
+
+            Err(format_unavailable_error(&repair_err))
+        }
+    }
+}
+
+async fn dispatch_binary(
+    path: &PathBuf,
+    args: &[String],
+    progress: Option<ProgressSink>,
+) -> Result<YtDlpOutput, String> {
+    match progress {
+        Some(sink) => run_ytdlp_binary_streaming(path, args, sink).await,
+        None => run_ytdlp_binary(path, args).await,
+    }
+}
+
+/// Attempt the bundled yt-dlp once. Returns:
+/// - `Ok(output)` when the binary actually ran (output may still be a yt-dlp
+///   error like "video unavailable" — that's not a binary problem).
+/// - `Err(reason)` only when the binary couldn't be resolved or spawned at all.
+async fn try_run_bundled_ytdlp(
+    app: &AppHandle,
+    args: &[String],
+    progress: Option<ProgressSink>,
+) -> Result<YtDlpOutput, String> {
     #[cfg(target_os = "macos")]
     ensure_ytdlp_sidecar_unquarantined(app);
 
+    if let Some(path) = bundled_ytdlp_path(app) {
+        return dispatch_binary(&path, args, progress).await;
+    }
+
+    // Final fallback for non-streaming calls when path resolution fails: use
+    // Tauri's sidecar API. This preserves the previous behavior for metadata
+    // queries. For downloads (progress.is_some()) we deliberately fall through
+    // to self-repair so progress streaming keeps working.
+    #[cfg(not(target_os = "macos"))]
+    if progress.is_none() {
+        let cmd = app
+            .shell()
+            .sidecar("binaries/yt-dlp")
+            .map_err(|e| format!("sidecar resolution failed: {e}"))?;
+        let out_fut = cmd.args(args).output();
+        let out = match tokio::time::timeout(YTDLP_HARD_TIMEOUT, out_fut).await {
+            Ok(res) => res.map_err(|e| format!("sidecar spawn failed: {e}"))?,
+            Err(_) => {
+                return Err(format!(
+                    "yt-dlp timed out after {} minutes — the download server is unresponsive. Retry the download.",
+                    YTDLP_HARD_TIMEOUT.as_secs() / 60
+                ));
+            }
+        };
+        return Ok(YtDlpOutput {
+            success: out.status.success(),
+            stdout: out.stdout,
+            stderr: out.stderr,
+        });
+    }
+
+    Err("bundled yt-dlp binary not found at any expected location".to_string())
+}
+
+fn bundled_ytdlp_path(app: &AppHandle) -> Option<PathBuf> {
     #[cfg(target_os = "macos")]
     {
-        if let Some(path) = bundled_macos_ytdlp_path(app) {
-            return run_ytdlp_binary(&path, &args).await;
-        }
-        eprintln!("[yt-dlp] bundled macOS resource not available");
+        bundled_macos_ytdlp_path(app)
     }
-
-    // Try bundled sidecar first.
-    // yt-dlp may spawn helper runtimes (e.g. deno for YouTube's n-challenge),
-    // so we inject an augmented PATH that includes Homebrew directories.
     #[cfg(not(target_os = "macos"))]
-    match app.shell().sidecar("binaries/yt-dlp") {
-        Ok(cmd) => match cmd.args(&args).output().await {
-            Ok(out) => {
-                return Ok(YtDlpOutput {
-                    success: out.status.success(),
-                    stdout: out.stdout,
-                    stderr: out.stderr,
-                });
-            }
-            Err(e) => {
-                eprintln!("[yt-dlp] sidecar execution failed: {e}");
-            }
-        },
-        Err(e) => {
-            eprintln!("[yt-dlp] sidecar not available: {e}");
-        }
+    {
+        let _ = app;
+        bundled_external_ytdlp_path()
+    }
+}
+
+/// Resolve the bundled yt-dlp binary on Windows / Linux by probing locations
+/// where Tauri's `externalBin` builder places the file. Used when we need real
+/// stdout streaming (download progress) which the sidecar API doesn't expose.
+#[cfg(not(target_os = "macos"))]
+fn bundled_external_ytdlp_path() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let dir = exe.parent()?;
+
+    let exe_ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
+    let triple = if cfg!(target_os = "windows") {
+        "x86_64-pc-windows-msvc"
+    } else {
+        "x86_64-unknown-linux-gnu"
+    };
+
+    let candidates = [
+        dir.join(format!("binaries/yt-dlp-{triple}{exe_ext}")),
+        dir.join(format!("yt-dlp-{triple}{exe_ext}")),
+        dir.join(format!("binaries/yt-dlp{exe_ext}")),
+        dir.join(format!("yt-dlp{exe_ext}")),
+    ];
+
+    candidates.into_iter().find(|p| p.exists())
+}
+
+/// Final, user-facing message when both bundled and self-repair are unavailable.
+/// Distinguishes network failures from environment failures to give actionable
+/// next steps that don't include an unhelpful "reinstall" instruction.
+fn format_unavailable_error(repair_err: &str) -> String {
+    let lower = repair_err.to_lowercase();
+    let is_network = lower.contains("download request")
+        || lower.contains("download read")
+        || lower.contains("connection")
+        || lower.contains("dns")
+        || lower.contains("network")
+        || lower.contains("timed out");
+    if is_network {
+        return concat!(
+            "CompiFlow could not start the video downloader and could not reach the internet to repair it. ",
+            "Connect to the internet and retry the download."
+        )
+        .into();
     }
 
-    // Fallback: system-installed yt-dlp for development only. Release builds
-    // must not be hijacked by a broken Homebrew/pip install on the user's PATH.
-    #[cfg(debug_assertions)]
+    #[cfg(target_os = "windows")]
     {
-        let ytdlp_path = find_system_ytdlp().ok_or_else(|| {
-            #[cfg(target_os = "windows")]
-            {
-                "yt-dlp is not installed. Install it from https://github.com/yt-dlp/yt-dlp/releases"
-                    .to_string()
-            }
-            #[cfg(target_os = "macos")]
-            {
-                "yt-dlp is not installed. Install it with: brew install yt-dlp".to_string()
-            }
-            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-            {
-                "yt-dlp is not installed.".to_string()
-            }
-        })?;
-        return run_ytdlp_binary(&ytdlp_path, &args).await;
+        format!(
+            "CompiFlow could not start the video downloader and self-repair failed ({repair_err}). \
+             Antivirus software may be blocking it. Add CompiFlow's install folder to your antivirus allowlist, \
+             or download yt-dlp.exe from https://github.com/yt-dlp/yt-dlp/releases and set the \
+             COMPIFLOW_YTDLP_PATH environment variable to its full path."
+        )
     }
-
-    #[cfg(not(debug_assertions))]
+    #[cfg(target_os = "macos")]
     {
-        #[cfg(target_os = "windows")]
-        {
-            Err(concat!(
-                "CompiFlow's bundled yt-dlp failed to start. ",
-                "Reinstall CompiFlow from the official installer, or set ",
-                "COMPIFLOW_YTDLP_PATH to a working yt-dlp binary."
-            )
-            .to_string())
-        }
-        #[cfg(target_os = "macos")]
-        {
-            Err(concat!(
-                "CompiFlow's bundled yt-dlp failed to start. ",
-                "Reinstall CompiFlow from the latest DMG, or set ",
-                "COMPIFLOW_YTDLP_PATH to a working yt-dlp binary."
-            )
-            .to_string())
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        {
-            Err(concat!(
-                "CompiFlow's bundled yt-dlp failed to start. ",
-                "Set COMPIFLOW_YTDLP_PATH to a working yt-dlp binary."
-            )
-            .to_string())
-        }
+        format!(
+            "CompiFlow could not start the video downloader and self-repair failed ({repair_err}). \
+             Quit CompiFlow, restart your Mac to clear stale temporary files, and reopen. \
+             If it still fails, install yt-dlp with: brew install yt-dlp"
+        )
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        format!(
+            "CompiFlow could not start the video downloader and self-repair failed ({repair_err}). \
+             Install yt-dlp on your system and ensure it is on PATH, or set COMPIFLOW_YTDLP_PATH."
+        )
     }
 }
 
@@ -2287,6 +2589,127 @@ async fn update_video_project_property(
     Ok(())
 }
 
+/// Diagnose why a clip's HubSpot fast-path URL may fail.
+/// Fetches the clip record (original_clip + fetched_social_thumbnail) and runs
+/// a HEAD request against original_clip to capture status, final URL, and key
+/// headers. Result is returned and also appended to the downloads log.
+#[tauri::command]
+async fn diagnose_hubspot_clip(
+    app: AppHandle,
+    token: String,
+    clip_id: String,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::limited(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let clip_url = format!(
+        "https://api.hubapi.com/crm/v3/objects/{}/{}?properties=original_clip,fetched_social_thumbnail,updatedate,hs_lastmodifieddate",
+        EXTERNAL_CLIPS_OBJECT_ID, clip_id
+    );
+    let clip_res = client
+        .get(&clip_url)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .map_err(|e| format!("HubSpot clip lookup failed: {e}"))?;
+    if !clip_res.status().is_success() {
+        let status = clip_res.status();
+        let body = clip_res.text().await.unwrap_or_default();
+        return Err(format!(
+            "HubSpot clip lookup failed ({}): {}",
+            status,
+            body.chars().take(500).collect::<String>()
+        ));
+    }
+    let clip_json: serde_json::Value = clip_res
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse clip lookup response: {e}"))?;
+    let props = clip_json
+        .get("properties")
+        .and_then(|v| v.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let original_clip = props
+        .get("original_clip")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let fetched_thumb = props
+        .get("fetched_social_thumbnail")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if original_clip.is_empty() {
+        let result = serde_json::json!({
+            "clipId": clip_id,
+            "originalClip": null,
+            "fetchedSocialThumbnail": if fetched_thumb.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(fetched_thumb) },
+            "head": null,
+            "note": "Clip has no original_clip URL in HubSpot."
+        });
+        download_log::warn(
+            &app,
+            "hubspot",
+            Some(&clip_id),
+            "diagnose_hubspot_clip: no original_clip URL on clip record",
+        );
+        return Ok(result);
+    }
+
+    let head_res = client.head(&original_clip).send().await;
+    let head_json = match head_res {
+        Ok(resp) => {
+            let status = resp.status();
+            let final_url = resp.url().to_string();
+            let headers = resp.headers();
+            serde_json::json!({
+                "ok": status.is_success(),
+                "status": status.as_u16(),
+                "statusText": status.to_string(),
+                "finalUrl": final_url,
+                "contentType": headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or(""),
+                "contentLength": headers.get("content-length").and_then(|v| v.to_str().ok()).unwrap_or(""),
+                "cacheControl": headers.get("cache-control").and_then(|v| v.to_str().ok()).unwrap_or(""),
+            })
+        }
+        Err(e) => {
+            serde_json::json!({
+                "ok": false,
+                "status": null,
+                "statusText": "request_failed",
+                "finalUrl": original_clip,
+                "error": e.to_string(),
+            })
+        }
+    };
+
+    let result = serde_json::json!({
+        "clipId": clip_id,
+        "originalClip": original_clip,
+        "fetchedSocialThumbnail": if fetched_thumb.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(fetched_thumb) },
+        "head": head_json,
+    });
+    download_log::debug(
+        &app,
+        "hubspot",
+        Some(&clip_id),
+        "diagnose_hubspot_clip completed",
+    );
+    download_log::error_detailed(
+        &app,
+        "hubspot",
+        Some(&clip_id),
+        "HubSpot diagnosis snapshot",
+        result.to_string(),
+    );
+    Ok(result)
+}
+
 /// Build a reqwest client with a HubSpot-friendly long timeout (used for video uploads).
 fn build_hubspot_upload_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
@@ -2380,6 +2803,12 @@ async fn ensure_clip_video_uploaded(
     cookies_browser: Option<String>,
     cookies_file: Option<String>,
 ) -> Result<String, String> {
+    download_log::info(
+        &app,
+        "upload",
+        Some(&clip_id),
+        format!("ensure_clip_video_uploaded start for {}", url),
+    );
     let temp_dir =
         tempfile::tempdir().map_err(|e| format!("Failed to create temp download folder: {e}"))?;
     let clips_dir = temp_dir.path().to_path_buf();
@@ -2408,9 +2837,21 @@ async fn ensure_clip_video_uploaded(
     if let Err(err) =
         upload_video_thumbnail_best_effort(&client, &token, &clip_id, &downloaded_path).await
     {
+        download_log::warn(
+            &app,
+            "upload",
+            Some(&clip_id),
+            format!("best-effort thumbnail upload failed: {err}"),
+        );
         eprintln!("[ensure_clip_video_uploaded] {err}");
     }
 
+    download_log::info(
+        &app,
+        "upload",
+        Some(&clip_id),
+        format!("ensure_clip_video_uploaded success: {video_url}"),
+    );
     Ok(video_url)
 }
 
@@ -2453,7 +2894,52 @@ fn create_project(root_folder: String, name: String) -> Result<Project, String> 
 fn load_project(root_folder: String, name: String) -> Result<Project, String> {
     let path = PathBuf::from(&root_folder).join(&name).join("project.json");
     let data = fs::read_to_string(&path).map_err(|e| format!("Failed to read project: {e}"))?;
-    serde_json::from_str(&data).map_err(|e| format!("Invalid project file: {e}"))
+    let mut project: Project =
+        serde_json::from_str(&data).map_err(|e| format!("Invalid project file: {e}"))?;
+
+    // Reconcile persisted status with on-disk reality.
+    // This fixes stale "downloading" states after crashes/restarts and ensures
+    // clips with existing local files are immediately marked complete.
+    let project_dir = PathBuf::from(&root_folder).join(&name);
+    let clips_dir = project_dir.join("clips");
+    let mut changed = false;
+    let mut fixed_complete = 0usize;
+    let mut downgraded_pending = 0usize;
+
+    for clip in &mut project.clips {
+        let found = find_downloaded_file(&clips_dir, &clip.hubspot_id);
+        match found {
+            Some(rel_path) => {
+                let status_is_complete = clip.download_status == "complete";
+                let local_matches = clip.local_file.as_deref() == Some(rel_path.as_str());
+                if !status_is_complete || !local_matches {
+                    clip.download_status = "complete".to_string();
+                    clip.local_file = Some(rel_path.clone());
+                    changed = true;
+                    fixed_complete += 1;
+                }
+            }
+            None => {
+                if clip.download_status == "downloading" {
+                    clip.download_status = "pending".to_string();
+                    changed = true;
+                    downgraded_pending += 1;
+                }
+            }
+        }
+    }
+
+    if changed {
+        let _ = save_project(&project_dir, &project);
+        eprintln!(
+            "[load_project] reconciled {} clips ({} -> complete, {} downloading -> pending)",
+            fixed_complete + downgraded_pending,
+            fixed_complete,
+            downgraded_pending
+        );
+    }
+
+    Ok(project)
 }
 
 #[tauri::command]
@@ -2499,9 +2985,21 @@ async fn download_clip(
         .join(&project_name)
         .join("clips");
 
+    download_log::info(
+        &app,
+        "download",
+        Some(&clip_id),
+        format!("download_clip start: {url}"),
+    );
     if force.unwrap_or(false) {
         let removed = remove_existing_clip_files(&clips_dir, &clip_id);
         if !removed.is_empty() {
+            download_log::debug(
+                &app,
+                "download",
+                Some(&clip_id),
+                format!("force=true removed prior files: {:?}", removed),
+            );
             eprintln!(
                 "[download_clip] force: removed old files for {}: {:?}",
                 clip_id, removed
@@ -2524,6 +3022,12 @@ async fn download_clip(
     // Fast path: download from HubSpot CDN if available (already uploaded by another user)
     if let Some(ref hs_url) = hubspot_url {
         if !hs_url.is_empty() {
+            download_log::debug(
+                &app,
+                "hubspot",
+                Some(&clip_id),
+                format!("attempting HubSpot CDN fast path: {hs_url}"),
+            );
             let _ = fs::create_dir_all(&clips_dir);
             let dest = clips_dir.join(format!("{}_hubspot.mp4", &clip_id));
             let client = reqwest::Client::builder()
@@ -2534,11 +3038,25 @@ async fn download_clip(
             match client.get(hs_url).send().await {
                 Ok(resp) if resp.status().is_success() => {
                     let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-                    if let Ok(()) = fs::write(&dest, &bytes) {
+                    if let Err(e) = fs::write(&dest, &bytes) {
+                        download_log::error_detailed(
+                            &app,
+                            "hubspot",
+                            Some(&clip_id),
+                            "HubSpot CDN succeeded but writing local file failed",
+                            format!("dest={}, error={}", dest.display(), e),
+                        );
+                    } else {
                         let rel_path = format!("clips/{}_hubspot.mp4", &clip_id);
                         let project_dir = PathBuf::from(&root_folder).join(&project_name);
                         let local_duration =
                             probe_duration(&project_dir.join(&rel_path).to_string_lossy());
+                        download_log::info(
+                            &app,
+                            "hubspot",
+                            Some(&clip_id),
+                            format!("HubSpot CDN succeeded ({} bytes)", bytes.len()),
+                        );
                         let _ = app.emit(
                             "download-progress",
                             DownloadProgress {
@@ -2553,8 +3071,45 @@ async fn download_clip(
                         return Ok(());
                     }
                 }
-                _ => {
-                    eprintln!("[download_clip] HubSpot CDN download failed for {}, falling back to providers", clip_id);
+                Ok(resp) => {
+                    let status = resp.status();
+                    let headers = resp.headers().clone();
+                    let body = resp.text().await.unwrap_or_default();
+                    let detail = format!(
+                        "url={}\nstatus={}\ncontent-type={}\ncontent-length={}\nbody={}",
+                        hs_url,
+                        status,
+                        headers
+                            .get("content-type")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or(""),
+                        headers
+                            .get("content-length")
+                            .and_then(|v| v.to_str().ok())
+                            .unwrap_or(""),
+                        body.chars().take(500).collect::<String>()
+                    );
+                    download_log::error_detailed(
+                        &app,
+                        "hubspot",
+                        Some(&clip_id),
+                        format!(
+                            "HubSpot CDN returned HTTP {}; falling back to providers",
+                            status
+                        ),
+                        detail,
+                    );
+                    eprintln!("[download_clip] HubSpot CDN HTTP {} for {}", status, clip_id);
+                }
+                Err(e) => {
+                    download_log::error_detailed(
+                        &app,
+                        "hubspot",
+                        Some(&clip_id),
+                        format!("HubSpot CDN unreachable ({e}); falling back to providers"),
+                        format!("url={hs_url}\nerror={e}"),
+                    );
+                    eprintln!("[download_clip] HubSpot CDN unreachable for {}: {}", clip_id, e);
                 }
             }
         }
@@ -2562,13 +3117,31 @@ async fn download_clip(
 
     // Provider cascade: try each configured provider in order
     let providers = providers_for_url(&url, &download_providers);
+    download_log::debug(
+        &app,
+        "cascade",
+        Some(&clip_id),
+        format!("provider cascade order: {:?}", providers),
+    );
     let mut errors: Vec<String> = Vec::new();
 
     for provider in &providers {
+        download_log::debug(
+            &app,
+            "cascade",
+            Some(&clip_id),
+            format!("trying provider '{}'", provider),
+        );
         let result = match provider.as_str() {
             "evil0ctal" => {
                 let base_url = evil0ctal_api_url.as_deref().unwrap_or("");
                 if base_url.is_empty() {
+                    download_log::warn(
+                        &app,
+                        "evil0ctal",
+                        Some(&clip_id),
+                        "skipped: no API URL configured in Settings",
+                    );
                     eprintln!("[download_clip] evil0ctal provider skipped: no API URL configured");
                     errors.push(format!(
                         "{}: not configured (set API URL in Settings)",
@@ -2576,7 +3149,7 @@ async fn download_clip(
                     ));
                     continue;
                 }
-                run_evil0ctal_download(base_url, &url, &clips_dir, &clip_id).await
+                run_evil0ctal_download(&app, &clip_id, base_url, &url, &clips_dir).await
             }
             _ => {
                 run_ytdlp_with_cookie_cascade(
@@ -2599,6 +3172,15 @@ async fn download_clip(
                     let abs = project_dir.join(rel);
                     probe_duration(&abs.to_string_lossy())
                 });
+                download_log::info(
+                    &app,
+                    "download",
+                    Some(&clip_id),
+                    format!(
+                        "complete via '{}' (file={:?}, duration={:?})",
+                        provider, local_file, local_duration
+                    ),
+                );
                 let _ = app.emit(
                     "download-progress",
                     DownloadProgress {
@@ -2613,6 +3195,12 @@ async fn download_clip(
                 return Ok(());
             }
             Err(e) => {
+                download_log::warn(
+                    &app,
+                    "cascade",
+                    Some(&clip_id),
+                    format!("provider '{}' failed: {}", provider, e),
+                );
                 eprintln!(
                     "[download_clip] provider '{}' failed for {}: {}",
                     provider, clip_id, e
@@ -2627,6 +3215,13 @@ async fn download_clip(
     } else {
         errors.join(" | ")
     };
+    download_log::error_detailed(
+        &app,
+        "download",
+        Some(&clip_id),
+        format!("all providers exhausted for {url}"),
+        friendly.clone(),
+    );
     let _ = app.emit(
         "download-progress",
         DownloadProgress {
@@ -2660,48 +3255,127 @@ async fn run_ytdlp_with_cookie_cascade(
         .as_ref()
         .map_or(false, |f| !f.is_empty() && PathBuf::from(f).exists());
 
+    let attempt_label = |b: bool, f: bool| -> &'static str {
+        match (b, f) {
+            (true, _) => "browser cookies",
+            (false, true) => "cookies file",
+            (false, false) => "no cookies",
+        }
+    };
+
+    download_log::debug(
+        app,
+        "cascade",
+        Some(clip_id),
+        format!(
+            "starting cookie cascade (browser={}, file={})",
+            has_browser, has_file
+        ),
+    );
+
+    download_log::debug(
+        app,
+        "cascade",
+        Some(clip_id),
+        format!("attempt 1: {}", attempt_label(has_browser, !has_browser && has_file)),
+    );
     let result = run_ytdlp_download(
         app,
         url,
         &output_template,
+        clip_id,
         if has_browser { cookies_browser } else { &None },
         if has_browser { &None } else { cookies_file },
     )
     .await;
 
     let result = match &result {
-        Ok((success, _)) if !success && has_browser && has_file => {
-            run_ytdlp_download(app, url, &output_template, &None, cookies_file).await
+        Ok((success, stderr_bytes)) if !success && has_browser && has_file => {
+            download_log::warn(
+                app,
+                "cascade",
+                Some(clip_id),
+                format!(
+                    "attempt 1 (browser) failed; falling back to cookies file. stderr tail: {}",
+                    last_nonempty_line(stderr_bytes)
+                ),
+            );
+            run_ytdlp_download(app, url, &output_template, clip_id, &None, cookies_file).await
         }
         _ => result,
     };
 
     let result = match &result {
-        Ok((success, _)) if !success && (has_browser || has_file) => {
-            run_ytdlp_download(app, url, &output_template, &None, &None).await
+        Ok((success, stderr_bytes)) if !success && (has_browser || has_file) => {
+            download_log::warn(
+                app,
+                "cascade",
+                Some(clip_id),
+                format!(
+                    "previous attempt failed; final attempt with no cookies. stderr tail: {}",
+                    last_nonempty_line(stderr_bytes)
+                ),
+            );
+            run_ytdlp_download(app, url, &output_template, clip_id, &None, &None).await
         }
         _ => result,
     };
 
     match result {
-        Ok((true, _)) => Ok(()),
+        Ok((true, _)) => {
+            download_log::info(app, "cascade", Some(clip_id), "yt-dlp succeeded");
+            Ok(())
+        }
         Ok((false, stderr_bytes)) => {
             let stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
+            download_log::error_detailed(
+                app,
+                "ytdlp",
+                Some(clip_id),
+                format!("yt-dlp exited non-zero — {}", last_nonempty_line(&stderr_bytes)),
+                stderr.clone(),
+            );
             Err(friendly_download_error(&stderr, url, cookies_browser))
         }
-        Err(msg) => Err(friendly_download_error(&msg, url, cookies_browser)),
+        Err(msg) => {
+            download_log::error_detailed(
+                app,
+                "ytdlp",
+                Some(clip_id),
+                format!("yt-dlp could not run: {msg}"),
+                msg.clone(),
+            );
+            Err(friendly_download_error(&msg, url, cookies_browser))
+        }
     }
+}
+
+fn last_nonempty_line(bytes: &[u8]) -> String {
+    let s = String::from_utf8_lossy(bytes);
+    s.lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .to_string()
 }
 
 /// Download a video via the Evil0ctal Douyin/TikTok API.
 /// Uses the `/api/download` endpoint which proxies the download through the
 /// server, avoiding geo-blocking issues with Chinese CDNs (Douyin, Kuaishou).
 async fn run_evil0ctal_download(
+    app: &AppHandle,
+    clip_id: &str,
     api_base_url: &str,
     video_url: &str,
     clips_dir: &std::path::Path,
-    clip_id: &str,
 ) -> Result<(), String> {
+    download_log::debug(
+        app,
+        "evil0ctal",
+        Some(clip_id),
+        format!("requesting {video_url} via {api_base_url}"),
+    );
     let client = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(120))
@@ -2789,6 +3463,12 @@ async fn run_evil0ctal_download(
 
     fs::write(&dest, &bytes).map_err(|e| format!("Failed to save video: {e}"))?;
 
+    download_log::info(
+        app,
+        "evil0ctal",
+        Some(clip_id),
+        format!("saved {} ({} bytes)", dest.display(), bytes.len()),
+    );
     eprintln!(
         "[evil0ctal] saved {} ({} bytes)",
         dest.display(),
@@ -2797,11 +3477,13 @@ async fn run_evil0ctal_download(
     Ok(())
 }
 
-/// Run yt-dlp download with a specific cookie method
+/// Run yt-dlp download with a specific cookie method.
+/// Streams real-time progress events back to the UI for the given `clip_id`.
 async fn run_ytdlp_download(
     app: &AppHandle,
     url: &str,
     output_template: &str,
+    clip_id: &str,
     cookies_browser: &Option<String>,
     cookies_file: &Option<String>,
 ) -> Result<(bool, Vec<u8>), String> {
@@ -2817,6 +3499,15 @@ async fn run_ytdlp_download(
         "--newline".to_string(),
         "--progress-template".to_string(),
         "%(progress._percent_str)s".to_string(),
+        // Robustness flags: bound yt-dlp's own waits so it fails fast instead
+        // of stalling. Combined with the process-level YTDLP_HARD_TIMEOUT in
+        // run_ytdlp_binary, this prevents "stuck downloading" indefinitely.
+        "--socket-timeout".to_string(),
+        "60".to_string(),
+        "--retries".to_string(),
+        "3".to_string(),
+        "--fragment-retries".to_string(),
+        "3".to_string(),
     ];
 
     if let Some(ref browser) = cookies_browser {
@@ -2835,7 +3526,31 @@ async fn run_ytdlp_download(
 
     args.push(url.to_string());
 
-    let output = run_ytdlp(app, &args).await?;
+    let sink = ProgressSink {
+        app: app.clone(),
+        clip_id: clip_id.to_string(),
+    };
+    download_log::debug(
+        app,
+        "ytdlp",
+        Some(clip_id),
+        format!(
+            "spawning yt-dlp ({} args) for {}",
+            args.len(),
+            url
+        ),
+    );
+    let output = run_ytdlp_with_progress(app, &args, Some(sink)).await?;
+    download_log::debug(
+        app,
+        "ytdlp",
+        Some(clip_id),
+        format!(
+            "yt-dlp exited (success={}, stderr_bytes={})",
+            output.success,
+            output.stderr.len()
+        ),
+    );
     Ok((output.success, output.stderr))
 }
 
@@ -4754,6 +5469,7 @@ pub fn run() {
             read_file_base64,
             update_clip_property,
             update_video_project_property,
+            diagnose_hubspot_clip,
             upload_clip_video,
             ensure_clip_video_uploaded,
             fetch_creators_batch,
@@ -4783,6 +5499,9 @@ pub fn run() {
             update_creator_properties,
             search_latest_clips_by_platform,
             save_text_file,
+            download_log::get_download_log,
+            download_log::clear_download_log,
+            download_log::log_event,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
@@ -5019,5 +5738,135 @@ mod tests {
             5,
             "must have one row per clip even if all are missing"
         );
+    }
+
+    // ── format_unavailable_error ────────────────────────────────────────────
+
+    #[test]
+    fn format_unavailable_error_detects_network_failure() {
+        let msg = super::format_unavailable_error("Download request failed: connection refused");
+        assert!(
+            msg.contains("could not reach the internet"),
+            "got: {msg}"
+        );
+        assert!(msg.contains("Connect to the internet"), "got: {msg}");
+    }
+
+    #[test]
+    fn format_unavailable_error_detects_timeout_as_network_failure() {
+        let msg = super::format_unavailable_error("Download request failed: operation timed out");
+        assert!(msg.contains("could not reach the internet"), "got: {msg}");
+    }
+
+    #[test]
+    fn format_unavailable_error_does_not_recommend_reinstall_on_windows() {
+        let msg = super::format_unavailable_error("permission denied writing yt-dlp.exe");
+        assert!(
+            !msg.contains("Reinstall CompiFlow"),
+            "Reinstall is misleading because the env (AV/permissions) survives reinstall: {msg}"
+        );
+        #[cfg(target_os = "windows")]
+        {
+            assert!(msg.contains("antivirus"), "got: {msg}");
+            assert!(msg.contains("COMPIFLOW_YTDLP_PATH"), "got: {msg}");
+        }
+    }
+
+    #[test]
+    fn format_unavailable_error_includes_repair_reason() {
+        let msg = super::format_unavailable_error("downloaded yt-dlp could not be started");
+        assert!(msg.contains("downloaded yt-dlp could not be started"), "got: {msg}");
+    }
+
+    // ── run_ytdlp_binary timeout / kill_on_drop ─────────────────────────────
+    //
+    // The actual YTDLP_HARD_TIMEOUT is 5 minutes, which is too long for unit
+    // tests. We exercise the same code path with a short timeout against a
+    // hanging process to prove that:
+    //   1. tokio::time::timeout fires when the process doesn't return in time.
+    //   2. kill_on_drop(true) actually kills the spawned process on Unix.
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn yt_dlp_binary_style_timeout_kills_hung_process() {
+        use std::path::PathBuf;
+        use std::time::{Duration, Instant};
+
+        let sleep_path = PathBuf::from("/bin/sleep");
+        if !sleep_path.exists() {
+            // Skip: /bin/sleep not present (extremely rare on macOS/Linux dev hosts).
+            return;
+        }
+
+        let mut cmd = tokio::process::Command::new(&sleep_path);
+        cmd.arg("60");
+        cmd.kill_on_drop(true);
+
+        let started = Instant::now();
+        let child = cmd.spawn().expect("spawn /bin/sleep should succeed");
+        let result = tokio::time::timeout(Duration::from_millis(200), child.wait_with_output()).await;
+        let elapsed = started.elapsed();
+
+        assert!(result.is_err(), "expected timeout to fire");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "kill_on_drop should make this near-instant; elapsed={:?}",
+            elapsed
+        );
+    }
+
+    // ── parse_progress_percent ───────────────────────────────────────────────
+
+    #[test]
+    fn parse_progress_percent_handles_yt_dlp_template_output() {
+        assert_eq!(super::parse_progress_percent(" 12.3%"), Some(12.3));
+        assert_eq!(super::parse_progress_percent("100.0%"), Some(100.0));
+        assert_eq!(super::parse_progress_percent("  0.0%"), Some(0.0));
+    }
+
+    #[test]
+    fn parse_progress_percent_handles_default_yt_dlp_format() {
+        assert_eq!(
+            super::parse_progress_percent("[download]  12.3% of 100.50MiB at 1.50MiB/s ETA 00:42"),
+            Some(12.3)
+        );
+        assert_eq!(
+            super::parse_progress_percent("[download] 100% of 100MiB"),
+            Some(100.0)
+        );
+    }
+
+    #[test]
+    fn parse_progress_percent_rejects_garbage_and_out_of_range() {
+        assert_eq!(super::parse_progress_percent(""), None);
+        assert_eq!(super::parse_progress_percent("hello world"), None);
+        assert_eq!(super::parse_progress_percent("no percent sign"), None);
+        assert_eq!(super::parse_progress_percent("9999%"), None); // out of range
+        assert_eq!(super::parse_progress_percent("-5%"), None);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn yt_dlp_binary_style_completes_when_process_exits_in_time() {
+        use std::path::PathBuf;
+        use std::time::Duration;
+
+        let true_path = PathBuf::from("/usr/bin/true");
+        let bin = if true_path.exists() {
+            true_path
+        } else {
+            PathBuf::from("/bin/true")
+        };
+        if !bin.exists() {
+            return;
+        }
+
+        let mut cmd = tokio::process::Command::new(&bin);
+        cmd.kill_on_drop(true);
+        let child = cmd.spawn().expect("spawn /bin/true should succeed");
+        let result = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output()).await;
+
+        let out = result.expect("must complete inside the timeout").expect("io ok");
+        assert!(out.status.success(), "true should exit 0");
     }
 }

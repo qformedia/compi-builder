@@ -75,3 +75,19 @@ Before finishing any change to download-related code, verify:
 - Add new patterns there when handling new failure modes
 - Keep messages actionable (tell the user what to do, not what went wrong internally)
 - Platform-aware: don't mention `brew` on Windows
+- **Never default to "Reinstall CompiFlow"**: the `run_ytdlp` cascade already
+  triggers `ytdlp_repair::ensure_runnable_binary` to silently download a fresh
+  yt-dlp into the user's app data folder. Reinstall does not fix the most
+  common cause (Windows Defender quarantining the bundled binary), so any new
+  error message must give actionable next steps (antivirus allowlist,
+  `COMPIFLOW_YTDLP_PATH` override, internet check) instead.
+
+## Self-Repair
+
+- `ytdlp_repair::ensure_runnable_binary(app)` is the source of truth for the
+  on-demand-downloaded binary at `<app_data>/bin/yt-dlp[.exe]`.
+- `BUNDLED_KNOWN_BROKEN: AtomicBool` in `lib.rs` short-circuits the bundled
+  attempt for the rest of the session once a startup-class failure is detected.
+- `ytdlp_repair::looks_like_startup_failure(stderr)` is the gate: only
+  PyInstaller / runtime extraction errors trigger self-repair. Normal yt-dlp
+  errors (login required, video unavailable, etc.) must NOT.

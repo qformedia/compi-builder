@@ -27,7 +27,7 @@ import { ClipPreview } from "@/components/ClipPreview";
 import { TagPicker } from "@/components/TagPicker";
 import { getEmbedUrl } from "@/components/ClipCard";
 import { parseHashtagList, resolveTagLabel } from "@/lib/tags";
-import { getPersistedThumb, persistThumb } from "@/lib/thumb-cache";
+import { getPersistedThumb, persistThumb, isPersistableThumbUrl, clearPersistedThumb } from "@/lib/thumb-cache";
 import {
   Loader2,
   ExternalLink,
@@ -470,6 +470,8 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
       const link = p.link ?? "";
       const hubspotThumb = p.fetched_social_thumbnail ?? null;
       const cachedThumb = !hubspotThumb && link ? getPersistedThumb(link) : null;
+      const durableCachedThumb =
+        cachedThumb && isPersistableThumbUrl(cachedThumb) ? cachedThumb : null;
       return {
         id: r.id,
         link,
@@ -479,7 +481,7 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
         dateFound: p.date_found ?? null,
         createdate: p.createdate ?? null,
         caption: p.social_media_caption ?? null,
-        thumbnail: hubspotThumb ?? cachedThumb,
+        thumbnail: hubspotThumb ?? durableCachedThumb,
         socialMediaTags: p.social_media_tags ?? null,
         score: p.score ?? null,
         tags: p.tags ? p.tags.split(";").map((t) => resolveTagLabel(t.trim())) : [],
@@ -560,9 +562,11 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
           if (!clipLink) return;
 
           const persisted = getPersistedThumb(clipLink);
-          if (persisted) {
+          if (persisted && isPersistableThumbUrl(persisted)) {
             setClips((prev) => prev.map((c) => (c.id === clipId ? { ...c, thumbnail: persisted, thumbLoading: false } : c)));
             return;
+          } else if (persisted) {
+            clearPersistedThumb(clipLink);
           }
 
           const thumbPromise = invoke<string | null>("fetch_thumbnail", {
@@ -570,6 +574,7 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
             cookiesBrowser: settings.cookiesBrowser || null,
             cookiesFile: settings.cookiesFile || null,
             evil0ctalApiUrl: settings.evil0ctalApiUrl || null,
+            clipId,
           });
           const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 20000));
           const thumbUrl = await Promise.race([thumbPromise, timeoutPromise]);

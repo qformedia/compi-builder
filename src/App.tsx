@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { Clock, Film, CheckCircle, Loader2, Sparkles, RefreshCw, X, RulerDimensionLine, AlertTriangle, Search, ListOrdered, MessageSquarePlus, Globe, Tags, ShieldAlert, ArrowRight } from "lucide-react";
+import { Clock, Film, CheckCircle, Loader2, Sparkles, RefreshCw, X, RulerDimensionLine, AlertTriangle, Search, ListOrdered, MessageSquarePlus, Globe, Tags, ShieldAlert, ArrowRight, ScrollText } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { HubSpotIcon } from "@/components/ClipCard";
 import { fetchVideoProjectClips } from "@/lib/hubspot";
@@ -21,6 +21,7 @@ import { SettingsPage } from "@/components/SettingsPage";
 import { Sidebar, type Page } from "@/components/Sidebar";
 import { ChangelogDialog } from "@/components/ChangelogDialog";
 import { FeedbackDialog } from "@/components/FeedbackDialog";
+import { DownloadsLogDialog } from "@/components/DownloadsLogDialog";
 import { SearchTab } from "@/components/SearchTab";
 import { ArrangeTab, decodeEditingNotes } from "@/components/ArrangeTab";
 import { GeneralSearchTab } from "@/components/GeneralSearchTab";
@@ -168,6 +169,7 @@ function App() {
   });
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [changelogOpen, setChangelogOpen] = useState(false);
+  const [downloadsLogOpen, setDownloadsLogOpen] = useState(false);
   const [project, setProject] = useState<Project | null>(null);
   const [activePage, setActivePage] = useState<Page>("videos");
   const [activeVideoTab, setActiveVideoTab] = useState("search");
@@ -176,6 +178,9 @@ function App() {
     return localStorage.getItem("sidebar-collapsed") === "true";
   });
   const [thumbWidth, setThumbWidth] = useState(110);
+  /** Live download progress per clip ID (0-100). Streamed from yt-dlp; not
+   *  persisted. Cleared when the clip finishes or fails. */
+  const [downloadProgress, setDownloadProgress] = useState<Record<string, number>>({});
 
   // Tag options for TagClipsTab (loaded from HubSpot, cached)
   const [appTagOptions, setAppTagOptions] = useState<TagOption[]>([]);
@@ -372,16 +377,32 @@ function App() {
   useEffect(() => {
     const unlisten = listen<DownloadProgress>("download-progress", (event) => {
       const dp = event.payload;
+
+      // Update live progress map regardless of project. Cleared on terminal states.
+      setDownloadProgress((prev) => {
+        if (dp.status === "downloading" && typeof dp.progress === "number") {
+          if (prev[dp.clipId] === dp.progress) return prev;
+          return { ...prev, [dp.clipId]: dp.progress };
+        }
+        if (dp.status === "complete" || dp.status === "failed") {
+          if (!(dp.clipId in prev)) return prev;
+          const next = { ...prev };
+          delete next[dp.clipId];
+          return next;
+        }
+        return prev;
+      });
+
       const prev = projectRef.current;
       if (!prev) return;
+
+      let statusTransition = false;
       const clips = prev.clips.map((c) => {
         if (c.hubspotId !== dp.clipId) return c;
-        // Ignore stale events from an in-flight download once the clip is
-        // already locally complete (e.g. user manually imported a file while
-        // an auto-download was still running in the background).
         const isComplete = c.downloadStatus === "complete" && !!c.localFile;
         const isDowngrade = dp.status === "downloading" || dp.status === "failed";
         if (isComplete && isDowngrade) return c;
+        if (c.downloadStatus !== dp.status) statusTransition = true;
         return {
           ...c,
           downloadStatus: dp.status as ProjectClip["downloadStatus"],
@@ -392,12 +413,22 @@ function App() {
       });
       const updated = { ...prev, clips };
       setProject(updated);
-      invoke("save_project_data", {
-        rootFolder: settings.rootFolder,
-        project: updated,
-      }).catch(() => {});
-      // Auto-upload to HubSpot is handled by the ensureUploadsQueued effect
-      // below, which reacts to the new project.clips reference produced here.
+
+      // Never persist transient "downloading" states. Persist only terminal
+      // states so crashes/restarts cannot leave project.json stuck forever.
+      const shouldPersistTerminal =
+        dp.status === "complete" || dp.status === "failed";
+      if (shouldPersistTerminal) {
+        invoke("save_project_data", {
+          rootFolder: settings.rootFolder,
+          project: updated,
+        }).catch(() => {});
+        return;
+      }
+
+      // Keep transition visibility in-memory (spinner/status text) but avoid
+      // disk writes for high-frequency progress updates.
+      if (!statusTransition) return;
     });
     return () => { unlisten.then((fn) => fn()); };
   }, [settings.rootFolder]);
@@ -409,9 +440,20 @@ function App() {
     if (!project) return;
     const pending = project.clips.filter(
       (c) =>
-        (c.downloadStatus === "pending" || c.downloadStatus === "failed") &&
+        (
+          c.downloadStatus === "pending" ||
+          c.downloadStatus === "failed" ||
+          c.downloadStatus === "downloading"
+        ) &&
         !c.localFile,
     );
+    const complete = project.clips.filter((c) => c.downloadStatus === "complete" && !!c.localFile).length;
+    invoke("log_event", {
+      level: "info",
+      source: "auto-download",
+      clipId: null,
+      message: `project-open scan: total=${project.clips.length}, queued=${pending.length}, complete=${complete}`,
+    }).catch(() => {});
     if (pending.length === 0) return;
 
     if (downloadQueueRef.current) clearTimeout(downloadQueueRef.current);
@@ -421,6 +463,12 @@ function App() {
       if (i >= pending.length) return;
       const clip = pending[i++];
       const hasHubSpotVideo = !!clip.originalClip;
+      invoke("log_event", {
+        level: "debug",
+        source: "auto-download",
+        clipId: clip.hubspotId,
+        message: `queue download (status=${clip.downloadStatus}, hasOriginalClip=${hasHubSpotVideo})`,
+      }).catch(() => {});
       invoke("download_clip", {
         rootFolder: settings.rootFolder,
         projectName: project.name,
@@ -431,7 +479,15 @@ function App() {
         hubspotUrl: clip.originalClip || null,
         evil0ctalApiUrl: settings.evil0ctalApiUrl || null,
         downloadProviders: JSON.stringify(settings.downloadProviders ?? DEFAULT_DOWNLOAD_PROVIDERS),
-      }).catch(() => {});
+      }).catch((err) => {
+        invoke("log_event", {
+          level: "error",
+          source: "auto-download",
+          clipId: clip.hubspotId,
+          message: "invoke(download_clip) failed",
+          detail: String(err),
+        }).catch(() => {});
+      });
       const delay = hasHubSpotVideo ? 500 : 2500;
       downloadQueueRef.current = setTimeout(downloadNext, delay);
     };
@@ -459,6 +515,75 @@ function App() {
     uploadAttemptsRef.current.clear();
     setUploadingClipIds(new Set());
   }, [project?.name]);
+
+  // Keep HubSpot-hosted media URLs fresh in local project state. This is a
+  // lightweight metadata refresh (only originalClip + fetchedThumbnail), not a
+  // full project sync/reorder. Without it, old project.json files can miss
+  // thumbnails that already exist in HubSpot, causing unnecessary Instagram
+  // fallback thumbnail fetches.
+  useEffect(() => {
+    if (!project?.hubspotVideoProjectId || !settings.hubspotToken || !settings.rootFolder) return;
+    let cancelled = false;
+
+    (async () => {
+      try {
+        const hsClips = await fetchVideoProjectClips(settings.hubspotToken, project.hubspotVideoProjectId!);
+        if (cancelled) return;
+        const mediaById = new Map(
+          hsClips.map((c) => [c.id, {
+            fetchedThumbnail: c.fetchedThumbnail,
+            originalClip: c.originalClip,
+          }]),
+        );
+
+        let changed = false;
+        const updatedClips = project.clips.map((clip) => {
+          const media = mediaById.get(clip.hubspotId);
+          if (!media) return clip;
+          const nextFetchedThumbnail = media.fetchedThumbnail ?? clip.fetchedThumbnail;
+          const nextOriginalClip = media.originalClip ?? clip.originalClip;
+          if (
+            nextFetchedThumbnail === clip.fetchedThumbnail &&
+            nextOriginalClip === clip.originalClip
+          ) {
+            return clip;
+          }
+          changed = true;
+          return {
+            ...clip,
+            fetchedThumbnail: nextFetchedThumbnail,
+            originalClip: nextOriginalClip,
+          };
+        });
+
+        if (!changed || cancelled) return;
+        const updated = { ...project, clips: updatedClips };
+        setProject(updated);
+        await invoke("save_project_data", {
+          rootFolder: settings.rootFolder,
+          project: updated,
+        });
+        invoke("log_event", {
+          level: "info",
+          source: "hubspot",
+          clipId: null,
+          message: "refreshed HubSpot media URLs for project clips",
+        }).catch(() => {});
+      } catch (err) {
+        invoke("log_event", {
+          level: "warn",
+          source: "hubspot",
+          clipId: null,
+          message: "failed to refresh HubSpot media URLs for project clips",
+          detail: String(err),
+        }).catch(() => {});
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [project?.hubspotVideoProjectId, project?.name, settings.hubspotToken, settings.rootFolder]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const saveSettings = (next: AppSettings) => {
     setSettings(next);
@@ -1024,6 +1149,15 @@ function App() {
                         </>
                       )}
                       <Button
+                        onClick={() => setDownloadsLogOpen(true)}
+                        size="sm"
+                        variant="outline"
+                        title="Downloads log (technical)"
+                        className="cursor-pointer h-8 w-8 p-0"
+                      >
+                        <ScrollText className="h-3.5 w-3.5" />
+                      </Button>
+                      <Button
                         size="sm"
                         onClick={() => {
                           if (finishPhase === "working" && !stepStatuses.every((s) => s === "pending")) {
@@ -1065,6 +1199,7 @@ function App() {
                       suppressAutoPlay={finishDialogOpen}
                       uploadingClipIds={uploadingClipIds}
                       enqueueClipUpload={enqueueClipUpload}
+                      downloadProgress={downloadProgress}
                     />
                   </TabErrorBoundary>
                 </div>
@@ -1173,6 +1308,12 @@ function App() {
       <ChangelogDialog
         open={changelogOpen}
         onOpenChange={setChangelogOpen}
+      />
+
+      <DownloadsLogDialog
+        open={downloadsLogOpen}
+        onOpenChange={setDownloadsLogOpen}
+        hubspotToken={settings.hubspotToken}
       />
 
       {/* Finish Video Dialog */}

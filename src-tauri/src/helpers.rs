@@ -297,42 +297,31 @@ pub(crate) fn friendly_download_error(
     let platform = detect_platform(url);
     let browser = cookies_browser.as_deref().unwrap_or("your browser");
 
-    // Bundled sidecar failed and no system yt-dlp — usually macOS quarantine / Gatekeeper.
-    #[cfg(target_os = "macos")]
-    if lower.contains("yt-dlp is not installed") {
-        return concat!(
-            "CompiFlow's bundled video downloader could not run. ",
-            "This is often caused by macOS security on first launch. ",
-            "Quit CompiFlow (Cmd+Q), then in Finder right-click the CompiFlow app → Open → confirm. ",
-            "Retry the download. If it still fails, install yt-dlp with Homebrew: brew install yt-dlp"
-        )
-        .into();
-    }
-    #[cfg(target_os = "windows")]
-    if lower.contains("yt-dlp is not installed") {
-        return concat!(
-            "CompiFlow could not run its bundled video downloader. ",
-            "Reinstall CompiFlow from the official installer, or install yt-dlp from ",
-            "https://github.com/yt-dlp/yt-dlp/releases and try again."
-        )
-        .into();
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-    if lower.contains("yt-dlp is not installed") {
-        return concat!(
-            "CompiFlow could not run the bundled yt-dlp downloader. ",
-            "Install yt-dlp on your system and ensure it is on PATH, then retry."
-        )
-        .into();
+    // Both the bundled binary AND the self-repair attempt failed. The cascade in
+    // `run_ytdlp` already produces actionable, OS-specific copy via
+    // `format_unavailable_error`, so just pass it through unchanged.
+    if lower.contains("could not start the video downloader") {
+        return stderr.trim().to_string();
     }
 
+    // Hard timeout fired in run_ytdlp_binary / sidecar wrapper. The underlying
+    // process was killed; tell the user the source server is unresponsive and
+    // a retry is the right next step.
+    if lower.contains("yt-dlp timed out") {
+        return format!(
+            "{} download timed out — the source server is unresponsive. Retry the download in a moment.",
+            platform
+        );
+    }
+
+    // Startup-class failure observed in the bundled binary's own stderr.
+    // The cascade will trigger self-repair on the next attempt, so tell the
+    // user that recovery is in progress instead of asking them to reinstall.
     if lower.contains("no module named expat") || lower.contains("[pyi-") || lower.contains("_mei")
     {
         return concat!(
-            "CompiFlow's bundled video downloader failed to start. ",
-            "Quit CompiFlow, restart your Mac to clear stale temporary files, ",
-            "then reopen CompiFlow and retry. If it still fails, reinstall CompiFlow ",
-            "from the latest DMG."
+            "CompiFlow's video downloader had a temporary startup problem. ",
+            "It is repairing itself automatically — please retry the download in a moment."
         )
         .into();
     }
@@ -973,14 +962,14 @@ mod tests {
     }
 
     #[test]
-    fn friendly_error_ytdlp_runtime_failure_is_actionable() {
+    fn friendly_error_pyinstaller_failure_announces_self_repair() {
         let msg = friendly_download_error(
             "yt-dlp: ERROR: No module named expat; use SimpleXMLTreeBuilder instead",
             "https://instagram.com/reel/abc/",
             &None,
         );
-        assert!(msg.contains("bundled video downloader"), "got: {msg}");
-        assert!(msg.contains("reinstall CompiFlow"), "got: {msg}");
+        assert!(msg.contains("repairing itself"), "got: {msg}");
+        assert!(msg.contains("retry"), "got: {msg}");
     }
 
     #[test]
@@ -994,36 +983,33 @@ mod tests {
     }
 
     #[test]
-    fn friendly_error_ytdlp_not_installed_is_actionable() {
-        let raw = "yt-dlp is not installed. Install it with: brew install yt-dlp";
+    fn friendly_error_timeout_is_actionable_with_platform_name() {
+        let raw = "yt-dlp timed out after 5 minutes — the download server is unresponsive. Retry the download.";
+        let msg = friendly_download_error(raw, "https://www.tiktok.com/@u/video/1", &None);
+        assert!(msg.contains("TikTok"), "got: {msg}");
+        assert!(msg.contains("timed out"), "got: {msg}");
+        assert!(msg.contains("Retry"), "got: {msg}");
+    }
+
+    #[test]
+    fn friendly_error_timeout_works_for_instagram() {
+        let raw = "yt-dlp timed out after 5 minutes";
+        let msg = friendly_download_error(raw, "https://instagram.com/reel/abc/", &None);
+        assert!(msg.contains("Instagram"), "got: {msg}");
+        assert!(msg.contains("timed out"), "got: {msg}");
+    }
+
+    #[test]
+    fn friendly_error_passes_through_unavailable_downloader_message() {
+        // When both the bundled binary and self-repair fail, `run_ytdlp` returns
+        // an already-actionable string via `format_unavailable_error`. The
+        // friendly mapper should pass it through unchanged instead of
+        // dropping it to the generic last-line fallback.
+        let raw = "CompiFlow could not start the video downloader and self-repair failed (network down). \
+                   Connect to the internet and retry.";
         let msg = friendly_download_error(raw, "https://youtube.com/watch?v=x", &None);
-        assert_ne!(
-            msg,
-            raw.trim(),
-            "expected friendlier message than raw stderr"
-        );
-        #[cfg(target_os = "macos")]
-        {
-            assert!(msg.contains("CompiFlow"), "got: {msg}");
-            assert!(
-                msg.contains("Finder") || msg.contains("macOS"),
-                "got: {msg}"
-            );
-        }
-        #[cfg(target_os = "windows")]
-        {
-            assert!(
-                msg.contains("Reinstall") || msg.contains("github.com"),
-                "got: {msg}"
-            );
-        }
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
-        {
-            assert!(
-                msg.contains("CompiFlow") || msg.contains("yt-dlp"),
-                "got: {msg}"
-            );
-        }
+        assert!(msg.contains("could not start the video downloader"), "got: {msg}");
+        assert!(msg.contains("self-repair"), "got: {msg}");
     }
 
     #[cfg(all(test, target_os = "macos"))]

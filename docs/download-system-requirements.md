@@ -62,6 +62,8 @@ Rust: download_clip()
 
 ## 4. yt-dlp Binary Resolution
 
+Resolution cascade in `run_ytdlp` (first runnable wins):
+
 1. **Explicit override** (`COMPIFLOW_YTDLP_PATH`): If set, CompiFlow runs this
    exact executable. This is the break-glass path for support or power users.
 2. **Bundled downloader**:
@@ -69,13 +71,37 @@ Rust: download_clip()
      onedir resource via `tauri.macos.conf.json`.
    - Windows: Tauri resolves the `binaries/yt-dlp` sidecar by target triple
      (e.g. `yt-dlp-x86_64-pc-windows-msvc.exe`).
-3. **System fallback**: Only in debug builds. `find_system_ytdlp()` checks
+3. **Self-repaired binary** (`<app_data>/bin/yt-dlp[.exe]`): If the bundled
+   binary cannot be started OR returns a startup-class failure
+   (`[PYI-...]`, `_MEI*`, `No module named expat`, `Failed to extract`),
+   `ytdlp_repair::ensure_runnable_binary()` downloads the latest official
+   yt-dlp release for the current OS into the user's app data directory,
+   verifies it via `--version`, and writes it atomically. Subsequent calls
+   in the same session skip the broken bundled binary entirely
+   (`BUNDLED_KNOWN_BROKEN` flag) so there is no per-call retry penalty.
+4. **System fallback**: Only in debug builds. `find_system_ytdlp()` checks
    `/opt/homebrew/bin/yt-dlp`, `/usr/local/bin/yt-dlp` (macOS), then
    `which::which("yt-dlp")`. Release builds do not silently fall back to a
    user's Homebrew/pip install because that can let a broken local yt-dlp
    hijack CompiFlow downloads.
-4. macOS paths inject an augmented `PATH` so yt-dlp can find helper runtimes
+5. macOS paths inject an augmented `PATH` so yt-dlp can find helper runtimes
    (e.g. deno for YouTube).
+
+### Self-repair behavior
+
+- Triggered automatically; no user action required.
+- Concurrency-safe: a process-global `Mutex` serializes installs so multiple
+  parallel downloads never duplicate work.
+- Sanity-checked: rejects suspiciously small payloads (< 100 KB) before
+  installing to defend against captive-portal HTML responses or partial reads.
+- Atomic install: download to `<filename>.partial`, probe via `--version`,
+  then `rename()` over the target.
+- Why this exists: the most common Windows failure mode is Windows Defender
+  silently quarantining the bundled `yt-dlp.exe` from `Program Files\` after
+  install. Asking users to "reinstall" does not fix that — the new install
+  gets quarantined too. The app data folder is a per-user location that is
+  much less aggressively scanned, and we can re-download on demand if AV
+  later removes the file.
 
 ## 5. yt-dlp Arguments (Critical)
 
@@ -162,7 +188,16 @@ This logic lives in `helpers::format_selection_for_url()` and is tested.
 | Fallback | Last non-empty stderr line |
 
 ### Platform-specific errors
-- When **both** the bundled sidecar and system fallback fail, `friendly_download_error()` maps the internal `"yt-dlp is not installed…"` string to an actionable message (macOS: Gatekeeper / first-open guidance + optional Homebrew fallback; Windows: reinstall or GitHub releases link).
+- When **both** the bundled binary and self-repair fail, `run_ytdlp` returns an
+  OS-specific message via `format_unavailable_error`. Network failures during
+  self-repair produce a "no internet" message; environment failures (AV,
+  permissions) produce guidance that points at the antivirus allowlist /
+  `COMPIFLOW_YTDLP_PATH` override instead of asking for a reinstall (which
+  rarely helps because the underlying environment problem persists).
+- When the bundled binary's own stderr matches a startup-class pattern
+  (`[PYI-`, `_MEI*`, `No module named expat`), `friendly_download_error`
+  tells the user the downloader is repairing itself and to retry shortly.
+  The next attempt will use the repaired binary directly.
 - macOS builds also strip `com.apple.quarantine` from the bundled sidecar once per process and adhoc-`codesign` the sidecar in CI to reduce Gatekeeper blocking.
 
 ## 10. Platform-Specific Considerations

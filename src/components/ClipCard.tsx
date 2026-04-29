@@ -22,7 +22,7 @@ import {
   Play,
 } from "lucide-react";
 
-import { getPersistedThumb, persistThumb, clearPersistedThumb } from "@/lib/thumb-cache";
+import { getPersistedThumb, persistThumb, clearPersistedThumb, isPersistableThumbUrl } from "@/lib/thumb-cache";
 import { setThumbCacheEntry } from "@/lib/thumb-cache-mem";
 
 // ── Score badge colors (mimicking HubSpot) ──────────────────────────────────
@@ -60,6 +60,9 @@ export interface ClipCardData {
   downloadStatus?: "pending" | "downloading" | "complete" | "failed";
   downloadError?: string;
   localFile?: string;
+  /** Live download progress percent (0-100). Streamed from yt-dlp stdout while
+   *  `downloadStatus === "downloading"`; not persisted to the project file. */
+  downloadProgress?: number;
 }
 
 export interface ClipCardProps {
@@ -135,6 +138,7 @@ export function ClipCard({
   const [thumbError, setThumbError] = useState(false);
   const [thumbErrorMsg, setThumbErrorMsg] = useState<string | null>(null);
   const thumbRetriedRef = useRef(false);
+  const failedPrimaryThumbRef = useRef<string | null>(null);
   const cardRef = useRef<HTMLDivElement>(null);
   const isActiveRef = useRef(isActive);
   isActiveRef.current = isActive;
@@ -169,8 +173,9 @@ export function ClipCard({
 
   // Lazy-load thumbnail: HubSpot → in-memory cache → localStorage → fetch → upload to HubSpot
   const loadThumb = useCallback(async (isRetry = false) => {
+    if (!isRetry) thumbRetriedRef.current = false;
     // 1. Check HubSpot-stored thumbnail (permanent, no fetch needed)
-    if (clip.fetchedThumbnail) {
+    if (clip.fetchedThumbnail && clip.fetchedThumbnail !== failedPrimaryThumbRef.current) {
       cacheThumb(clip.fetchedThumbnail);
       setThumb(clip.fetchedThumbnail);
       return;
@@ -188,10 +193,12 @@ export function ClipCard({
     // 3. Check persistent localStorage cache (skip on retry since cached URL may be stale)
     if (!isRetry) {
       const persisted = getPersistedThumb(clip.link);
-      if (persisted) {
+      if (persisted && isPersistableThumbUrl(persisted)) {
         cacheThumb(persisted);
         setThumb(persisted);
         return;
+      } else if (persisted) {
+        clearPersistedThumb(clip.link);
       }
     }
 
@@ -205,6 +212,7 @@ export function ClipCard({
         cookiesBrowser: cookiesBrowser || null,
         cookiesFile: cookiesFile || null,
         evil0ctalApiUrl: evil0ctalApiUrl || null,
+        clipId: clip.id,
       });
 
       if (url) {
@@ -268,6 +276,12 @@ export function ClipCard({
       setThumbLoading(false);
     }
   }, [clip.link, clip.localFile, clip.fetchedThumbnail, clip.id, cacheThumb, cookiesBrowser, cookiesFile, evil0ctalApiUrl, rootFolder, projectName, onCookieError, hubspotToken]);
+
+  // Reset one-shot retry guard when clip identity changes.
+  useEffect(() => {
+    thumbRetriedRef.current = false;
+    failedPrimaryThumbRef.current = null;
+  }, [clip.id, clip.link, clip.fetchedThumbnail]);
 
   // Load thumbnails when near viewport; drop decoded image when far away (cache keeps URL).
   useEffect(() => {
@@ -338,6 +352,9 @@ export function ClipCard({
             src={thumb}
             alt=""
             className="absolute inset-0 h-full w-full object-cover"
+            onLoad={() => {
+              thumbRetriedRef.current = false;
+            }}
             onError={() => {
               if (thumbRetriedRef.current) {
                 setThumb(null);
@@ -346,6 +363,9 @@ export function ClipCard({
                 return;
               }
               thumbRetriedRef.current = true;
+              if (thumb === clip.fetchedThumbnail) {
+                failedPrimaryThumbRef.current = thumb;
+              }
               thumbCache.current?.delete(clip.link);
               clearPersistedThumb(clip.link);
               setThumb(null);
@@ -397,10 +417,15 @@ export function ClipCard({
           </div>
         )}
 
-        {/* Download status overlay (only spinner while downloading) */}
+        {/* Download status overlay (spinner + live progress while downloading) */}
         {ds === "downloading" && (
-          <div className="absolute inset-0 flex items-center justify-center bg-black/40">
+          <div className="absolute inset-0 flex flex-col items-center justify-center gap-1 bg-black/40">
             <Loader2 className="h-6 w-6 animate-spin text-white" />
+            {typeof clip.downloadProgress === "number" && (
+              <span className="rounded bg-black/70 px-1.5 py-0.5 text-[11px] font-mono font-semibold text-white tabular-nums">
+                {clip.downloadProgress.toFixed(1)}%
+              </span>
+            )}
           </div>
         )}
 
