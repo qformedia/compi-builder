@@ -1077,7 +1077,8 @@ async fn order_clips(
 
 /// Generate a CSV file matching the HubSpot workspace report format.
 /// The frontend passes pre-merged clip+creator data as JSON objects.
-/// Clips with `"missing": true` get a warning row; all other fields are preserved.
+/// Clips with `"missing": true` get a warning row while preserving HubSpot metadata.
+/// Duration remains empty for missing clips because there is no local file duration.
 /// The Order column always uses the clip's position in the full project list.
 /// Returns the absolute path to the CSV file.
 #[tauri::command]
@@ -1123,8 +1124,8 @@ async fn generate_clips_csv(
         let download_status = get(clip, "downloadStatus");
 
         if is_missing {
-            // Warning row: preserve link + ids so the editor can identify the clip,
-            // leave all creator/duration fields empty.
+            // Warning row: keep missing-state in Editing Notes, preserve metadata fields,
+            // and leave duration empty because the local file is missing.
             let warning_note = format!(
                 "\u{26A0} MISSING \u{2014} {}",
                 if download_status.is_empty() {
@@ -1138,19 +1139,19 @@ async fn generate_clips_csv(
                 String::new(),         // Duration
                 escape(&warning_note), // Editing Notes (warning)
                 escape(&get(clip, "link")),
-                String::new(), // Main Link
-                String::new(), // Main Account
-                String::new(), // Name
-                String::new(), // Douyin ID
-                String::new(), // Kuaishou ID
-                String::new(), // Xiaohongshu ID
-                String::new(), // Clip Mix Links
-                String::new(), // Special Requests
-                String::new(), // Notes
-                String::new(), // License Checked
-                String::new(), // License Type
-                String::new(), // Available Ask First
-                String::new(), // Score
+                escape(&get(clip, "mainLink")),
+                escape(&get(clip, "mainAccount")),
+                escape(&get(clip, "name")),
+                escape(&get(clip, "douyinId")),
+                escape(&get(clip, "kuaishouId")),
+                escape(&get(clip, "xiaohongshuId")),
+                escape(&get(clip, "clipMixLinks")),
+                escape(&get(clip, "specialRequests")),
+                escape(&get(clip, "notes")),
+                escape(&get(clip, "licenseChecked")),
+                escape(&get(clip, "licenseType")),
+                escape(&get(clip, "availableAskFirst")),
+                escape(&get(clip, "score")),
                 escape(&get(clip, "externalClipId")),
                 escape(&get(clip, "creatorId")),
                 escape(&get(clip, "videoProjectId")),
@@ -4838,19 +4839,19 @@ mod tests {
                     String::new(),
                     escape(&warning),
                     escape(&get(clip, "link")),
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    String::new(),
+                    escape(&get(clip, "mainLink")),
+                    escape(&get(clip, "mainAccount")),
+                    escape(&get(clip, "name")),
+                    escape(&get(clip, "douyinId")),
+                    escape(&get(clip, "kuaishouId")),
+                    escape(&get(clip, "xiaohongshuId")),
+                    escape(&get(clip, "clipMixLinks")),
+                    escape(&get(clip, "specialRequests")),
+                    escape(&get(clip, "notes")),
+                    escape(&get(clip, "licenseChecked")),
+                    escape(&get(clip, "licenseType")),
+                    escape(&get(clip, "availableAskFirst")),
+                    escape(&get(clip, "score")),
                     escape(&get(clip, "externalClipId")),
                     escape(&get(clip, "creatorId")),
                     escape(&get(clip, "videoProjectId")),
@@ -4948,6 +4949,55 @@ mod tests {
             row.contains("clip_42"),
             "clip ID must be present for missing clips"
         );
+    }
+
+    #[test]
+    fn csv_missing_clip_preserves_hubspot_metadata_columns() {
+        let clips = vec![serde_json::json!({
+            "order": 1,
+            "missing": true,
+            "downloadStatus": "failed",
+            "link": "https://instagram.com/reel/ABC/",
+            "mainLink": "https://www.instagram.com/creator",
+            "mainAccount": "creator_account",
+            "name": "Creator Name",
+            "douyinId": "douyin_1",
+            "kuaishouId": "kuaishou_1",
+            "xiaohongshuId": "xhs_1",
+            "clipMixLinks": "https://mix.example/1",
+            "specialRequests": "queda como rec",
+            "notes": "priority",
+            "licenseChecked": "TRUE",
+            "licenseType": "Recurrent",
+            "availableAskFirst": "Yes",
+            "score": "98",
+            "externalClipId": "clip_42",
+            "creatorId": "creator_12",
+            "videoProjectId": "vp_7"
+        })];
+
+        let csv = build_csv(&clips);
+        let row = csv.lines().nth(1).unwrap();
+
+        assert!(row.starts_with("1,,"));
+        assert!(row.contains("MISSING"));
+        assert!(row.contains("failed"));
+        assert!(row.contains("https://www.instagram.com/creator"));
+        assert!(row.contains("creator_account"));
+        assert!(row.contains("Creator Name"));
+        assert!(row.contains("douyin_1"));
+        assert!(row.contains("kuaishou_1"));
+        assert!(row.contains("xhs_1"));
+        assert!(row.contains("https://mix.example/1"));
+        assert!(row.contains("queda como rec"));
+        assert!(row.contains("priority"));
+        assert!(row.contains("TRUE"));
+        assert!(row.contains("Recurrent"));
+        assert!(row.contains("Yes"));
+        assert!(row.contains("98"));
+        assert!(row.contains("clip_42"));
+        assert!(row.contains("creator_12"));
+        assert!(row.contains("vp_7"));
     }
 
     #[test]
