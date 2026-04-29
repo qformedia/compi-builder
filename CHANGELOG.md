@@ -7,9 +7,19 @@ The latest release is at the top.
 
 ## v1.0.6 - 2026-04-29
 
+### What’s new
+
+- New download log dialog shows a live feed of all download activity with search, level filtering, and a one-click HubSpot diagnose action for stuck clips.
+- yt-dlp now repairs itself automatically when the bundled binary fails to start, so most “downloads not working” situations resolve without reinstalling the app.
+- Download progress now streams live to Arrange as a real percentage, so you can see exactly how far along each clip is.
+
 ### What got better
 
-- On Arrange, Douyin clips no longer run automatic download or show a blind “retry” loop. The app tells you to import the file manually and keeps the import action front and center.
+- Douyin clips on Arrange no longer run automatic download or show a misleading retry loop — the app immediately tells you to import the file manually and keeps the import button front and centre.
+- Finish Video no longer strips HubSpot metadata (thumbnail, uploaded clip URL) for clips that were removed or couldn’t be found locally.
+- Thumbnail caching is more reliable: expired CDN thumbnails are refreshed automatically instead of getting stuck on a broken image.
+- Clips stuck in “Downloading…” from a previous session are cleaned up when you open a project, so nothing appears permanently stuck.
+- HubSpot media URLs (thumbnails and uploaded clips) are refreshed on project open, preventing stale fallback fetches.
 
 ## v1.0.5 - 2026-04-29
 
