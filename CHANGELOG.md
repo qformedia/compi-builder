@@ -5,6 +5,12 @@ The latest release is at the top.
 
 <!-- changelog-entries -->
 
+## v1.0.6 - 2026-04-29
+
+### What got better
+
+- On Arrange, Douyin clips no longer run automatic download or show a blind “retry” loop. The app tells you to import the file manually and keeps the import action front and center.
+
 ## v1.0.5 - 2026-04-29
 
 ### What got better
