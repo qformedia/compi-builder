@@ -5,6 +5,21 @@ The latest release is at the top.
 
 <!-- changelog-entries -->
 
+## v1.0.7 - 2026-05-04
+
+### What's new
+
+- Finish Video now opens a tag precheck when clips are missing tags, using a tagging layout similar to the main tagging page so fixes are faster and more familiar.
+- You can stage tag updates across clips first and commit them together with one Save action, giving you a clear review step before anything is written to HubSpot.
+
+### What got better
+
+- The precheck footer now includes a subtle Skip action plus clear Save/Cancel controls, so it is easier to continue without losing context.
+
+### Behind the scenes
+
+- New audit scripts help identify clips with missing "Used in Video Tag" values and clips where Tags are empty even though "Used in Video Tag" is known.
+
 ## v1.0.6 - 2026-04-29
 
 ### What’s new
