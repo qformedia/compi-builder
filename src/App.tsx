@@ -28,6 +28,8 @@ import { GeneralSearchTab } from "@/components/GeneralSearchTab";
 import { DataIntegrityPage } from "@/components/DataIntegrityPage";
 import { IntegrityProvider, useIntegrity } from "@/lib/data-integrity/use-data-integrity";
 import { TagClipsTab } from "@/components/TagClipsTab";
+import { TagPicker } from "@/components/TagPicker";
+import { ClipTagEditorRow } from "@/components/ClipTagEditorRow";
 import { fetchTagOptions, invalidateTagCache } from "@/lib/tags";
 import type { TagOption } from "@/lib/tags";
 import { DEFAULT_DOWNLOAD_PROVIDERS } from "@/types";
@@ -192,13 +194,20 @@ function App() {
 
   // Finish video flow
   type StepStatus = "pending" | "working" | "done" | "error";
+  type FinishPhase = "tagPrecheck" | "confirm" | "working";
   const [finishDialogOpen, setFinishDialogOpen] = useState(false);
-  const [finishPhase, setFinishPhase] = useState<"confirm" | "working">("confirm");
+  const [finishPhase, setFinishPhase] = useState<FinishPhase>("confirm");
   const [stepStatuses, setStepStatuses] = useState<[StepStatus, StepStatus, StepStatus]>(["pending", "pending", "pending"]);
   const [stepErrors, setStepErrors] = useState<[string?, string?, string?]>([]);
   const [hubspotProjectId, setHubspotProjectId] = useState<string>();
   const [csvPath, setCsvPath] = useState<string>();
   const [clipsDir, setClipsDir] = useState<string>();
+  const [finishTagDrafts, setFinishTagDrafts] = useState<Record<string, string[]>>({});
+  const [finishApplyAllTags, setFinishApplyAllTags] = useState<string[]>([]);
+  const [savingFinishTagClipIds, setSavingFinishTagClipIds] = useState<Set<string>>(() => new Set());
+  const [finishTagInfo, setFinishTagInfo] = useState<string | null>(null);
+  const [finishTagError, setFinishTagError] = useState<string | null>(null);
+  const [isBulkApplyingFinishTags, setIsBulkApplyingFinishTags] = useState(false);
 
   // Update state
   const [pendingUpdate, setPendingUpdate] = useState<Update | null>(null);
@@ -810,6 +819,173 @@ function App() {
     }
   };
 
+  const normalizeTagValues = useCallback((values: string[]) => {
+    const normalized = values.map((t) => t.trim()).filter(Boolean);
+    return [...new Set(normalized)];
+  }, []);
+
+  const toTagLabels = useCallback((values: string[]) => {
+    const labelByValue = new Map(appTagOptions.map((o) => [o.value, o.label]));
+    return values.map((value) => labelByValue.get(value) ?? value);
+  }, [appTagOptions]);
+
+  const listEmptyTagClips = useCallback((candidate: Project | null): ProjectClip[] => {
+    if (!candidate) return [];
+    return [...candidate.clips]
+      .filter((clip) => clip.tags.length === 0)
+      .sort((a, b) => a.order - b.order);
+  }, []);
+
+  const getInitialFinishPhase = useCallback((candidate: Project | null): FinishPhase => {
+    return listEmptyTagClips(candidate).length > 0 ? "tagPrecheck" : "confirm";
+  }, [listEmptyTagClips]);
+
+  const resetFinishTagEditor = useCallback(() => {
+    setFinishTagDrafts({});
+    setFinishApplyAllTags([]);
+    setSavingFinishTagClipIds(new Set());
+    setFinishTagInfo(null);
+    setFinishTagError(null);
+    setIsBulkApplyingFinishTags(false);
+  }, []);
+
+  const markFinishTagClipSaving = useCallback((clipId: string, saving: boolean) => {
+    setSavingFinishTagClipIds((prev) => {
+      const next = new Set(prev);
+      if (saving) next.add(clipId);
+      else next.delete(clipId);
+      return next;
+    });
+  }, []);
+
+  const setProjectClipTags = useCallback((clipId: string, tagValues: string[]) => {
+    const current = projectRef.current;
+    if (!current) return;
+    const labels = toTagLabels(tagValues);
+    const updated = {
+      ...current,
+      clips: current.clips.map((clip) =>
+        clip.hubspotId === clipId ? { ...clip, tags: labels } : clip
+      ),
+    };
+    setProject(updated);
+    invoke("save_project_data", {
+      rootFolder: settings.rootFolder,
+      project: updated,
+    }).catch(() => {});
+  }, [settings.rootFolder, toTagLabels]);
+
+  const saveExternalClipTags = useCallback(async (clipId: string, tagValues: string[]) => {
+    const normalized = normalizeTagValues(tagValues);
+    if (normalized.length === 0) {
+      throw new Error("Select at least one tag.");
+    }
+    await invoke("update_clip_properties", {
+      token: settings.hubspotToken,
+      clipId,
+      properties: { tags: normalized.join(";") },
+    });
+    setProjectClipTags(clipId, normalized);
+  }, [normalizeTagValues, setProjectClipTags, settings.hubspotToken]);
+
+  const emptyTagClips = useMemo(() => listEmptyTagClips(project), [listEmptyTagClips, project]);
+
+  const openFinishDialog = useCallback(() => {
+    if (finishPhase === "working" && !stepStatuses.every((s) => s === "pending")) {
+      setFinishDialogOpen(true);
+      return;
+    }
+    resetFinishTagEditor();
+    setFinishPhase(getInitialFinishPhase(projectRef.current));
+    setFinishDialogOpen(true);
+  }, [finishPhase, getInitialFinishPhase, resetFinishTagEditor, stepStatuses]);
+
+  /**
+   * Stage the "apply to all" selection into local drafts only. No HubSpot
+   * write happens here — the user reviews drafts and commits them all at once
+   * via the footer Save button (`commitDraftedTags`).
+   */
+  const stageTagsForAllEmptyClips = useCallback(() => {
+    const selectedTags = normalizeTagValues(finishApplyAllTags);
+    if (selectedTags.length === 0) {
+      setFinishTagError("Select tags first to apply to all empty clips.");
+      return;
+    }
+
+    const targets = listEmptyTagClips(projectRef.current);
+    if (targets.length === 0) {
+      setFinishTagInfo("No clips with empty tags remaining.");
+      return;
+    }
+
+    setFinishTagError(null);
+    setFinishTagInfo(null);
+    setFinishTagDrafts((prev) => {
+      const next = { ...prev };
+      for (const clip of targets) {
+        next[clip.hubspotId] = selectedTags;
+      }
+      return next;
+    });
+  }, [finishApplyAllTags, listEmptyTagClips, normalizeTagValues]);
+
+  /** Drafts ready to be committed (non-empty after normalization). */
+  const draftedTagEntries = useMemo(
+    () =>
+      Object.entries(finishTagDrafts)
+        .map(([clipId, tags]) => [clipId, normalizeTagValues(tags)] as const)
+        .filter(([, tags]) => tags.length > 0),
+    [finishTagDrafts, normalizeTagValues],
+  );
+
+  const hasUncommittedDrafts = draftedTagEntries.length > 0;
+
+  /**
+   * Commit every staged draft to HubSpot in sequence. Runs from the footer
+   * Save button — partial failures are reported but do not abort the loop so
+   * the user gets the maximum number of saves through.
+   */
+  const commitDraftedTags = useCallback(async () => {
+    if (draftedTagEntries.length === 0) {
+      setFinishTagError("Nothing to save yet.");
+      return;
+    }
+
+    setFinishTagError(null);
+    setFinishTagInfo(null);
+    setIsBulkApplyingFinishTags(true);
+    let successCount = 0;
+    let failureCount = 0;
+
+    for (const [clipId, tags] of draftedTagEntries) {
+      markFinishTagClipSaving(clipId, true);
+      try {
+        await saveExternalClipTags(clipId, tags);
+        setFinishTagDrafts((prev) => {
+          const next = { ...prev };
+          delete next[clipId];
+          return next;
+        });
+        successCount += 1;
+      } catch {
+        failureCount += 1;
+      } finally {
+        markFinishTagClipSaving(clipId, false);
+      }
+    }
+
+    if (failureCount > 0) {
+      setFinishTagError(`Saved ${successCount} clip${successCount === 1 ? "" : "s"}, ${failureCount} failed.`);
+    } else {
+      setFinishTagInfo(`Saved ${successCount} clip${successCount === 1 ? "" : "s"}.`);
+    }
+    setIsBulkApplyingFinishTags(false);
+  }, [
+    draftedTagEntries,
+    markFinishTagClipSaving,
+    saveExternalClipTags,
+  ]);
+
   /** Finish Video: run all 3 steps in parallel */
   const handleFinishVideo = async () => {
     if (!project || !arrangeStats) return;
@@ -1159,14 +1335,7 @@ function App() {
                       </Button>
                       <Button
                         size="sm"
-                        onClick={() => {
-                          if (finishPhase === "working" && !stepStatuses.every((s) => s === "pending")) {
-                            setFinishDialogOpen(true);
-                            return;
-                          }
-                          setFinishPhase("confirm");
-                          setFinishDialogOpen(true);
-                        }}
+                        onClick={openFinishDialog}
                         className="gap-1.5 cursor-pointer"
                       >
                         <Sparkles className="h-3.5 w-3.5" />
@@ -1317,14 +1486,28 @@ function App() {
       />
 
       {/* Finish Video Dialog */}
-      <Dialog open={finishDialogOpen} onOpenChange={setFinishDialogOpen}>
+      <Dialog
+        open={finishDialogOpen}
+        onOpenChange={(open) => {
+          setFinishDialogOpen(open);
+          if (!open) resetFinishTagEditor();
+        }}
+      >
         <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-[80vw]">
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
               Finish Video
             </DialogTitle>
             <DialogDescription>
-              {finishPhase === "confirm"
+              {finishPhase === "tagPrecheck"
+                ? (
+                    <>
+                      We found <strong>{emptyTagClips.length}</strong> clip
+                      {emptyTagClips.length !== 1 ? "s" : ""} in this project with empty <strong>Tags</strong>.
+                      Fill them now, or skip.
+                    </>
+                  )
+                : finishPhase === "confirm"
                 ? <>Finalize <strong>{project?.name}</strong> with {arrangeStats?.count} clips.</>
                 : stepStatuses.every((s) => s === "done" || s === "error")
                   ? stepStatuses.every((s) => s === "done")
@@ -1334,7 +1517,68 @@ function App() {
             </DialogDescription>
           </DialogHeader>
 
-          {finishPhase === "confirm" ? (
+          {finishPhase === "tagPrecheck" ? (
+            <div className="space-y-3 text-sm">
+              <div className="flex items-center justify-between gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2">
+                <p className="flex items-center gap-1.5 text-xs font-semibold text-amber-800">
+                  <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" />
+                  {emptyTagClips.length} clip{emptyTagClips.length !== 1 ? "s" : ""} missing Tags
+                </p>
+                <div className="flex items-center gap-2">
+                  <div className="w-56">
+                    <TagPicker
+                      options={appTagOptions}
+                      selected={finishApplyAllTags}
+                      onChange={setFinishApplyAllTags}
+                      hideBadges
+                    />
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={stageTagsForAllEmptyClips}
+                    disabled={
+                      isBulkApplyingFinishTags ||
+                      finishApplyAllTags.length === 0 ||
+                      emptyTagClips.length === 0
+                    }
+                    className="cursor-pointer h-7 px-3 text-xs"
+                  >
+                    Apply to all
+                  </Button>
+                </div>
+              </div>
+
+              {finishTagInfo && (
+                <p className="text-xs text-emerald-700">{finishTagInfo}</p>
+              )}
+              {finishTagError && (
+                <p className="text-xs text-destructive">{finishTagError}</p>
+              )}
+
+              {emptyTagClips.length === 0 ? (
+                <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-700">
+                  All clips in this project have tags.
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {emptyTagClips.map((clip) => (
+                    <ClipTagEditorRow
+                      key={clip.hubspotId}
+                      clip={clip}
+                      tagOptions={appTagOptions}
+                      selected={finishTagDrafts[clip.hubspotId] ?? []}
+                      onChange={(values) =>
+                        setFinishTagDrafts((prev) => ({ ...prev, [clip.hubspotId]: values }))
+                      }
+                      isSaving={savingFinishTagClipIds.has(clip.hubspotId)}
+                      hubspotRecordUrl={`https://app-eu1.hubspot.com/contacts/146859718/record/2-192287471/${clip.hubspotId}`}
+                    />
+                  ))}
+                </div>
+              )}
+            </div>
+          ) : finishPhase === "confirm" ? (
             <div className="space-y-3 text-sm">
               {(() => {
                 const missingClips = project?.clips.filter(
@@ -1434,7 +1678,45 @@ function App() {
           )}
 
           <DialogFooter>
-            {finishPhase === "confirm" ? (
+            {finishPhase === "tagPrecheck" ? (
+              <>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setFinishPhase("confirm");
+                    setFinishTagInfo(null);
+                    setFinishTagError(null);
+                  }}
+                  disabled={isBulkApplyingFinishTags}
+                  className="cursor-pointer text-xs text-muted-foreground hover:text-foreground"
+                >
+                  Skip
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => setFinishDialogOpen(false)}
+                  disabled={isBulkApplyingFinishTags}
+                  className="cursor-pointer"
+                >
+                  Cancel
+                </Button>
+                <Button
+                  onClick={() => void commitDraftedTags()}
+                  disabled={!hasUncommittedDrafts || isBulkApplyingFinishTags}
+                  className="gap-1.5 cursor-pointer"
+                >
+                  {isBulkApplyingFinishTags ? (
+                    <>
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      Saving...
+                    </>
+                  ) : (
+                    "Save"
+                  )}
+                </Button>
+              </>
+            ) : finishPhase === "confirm" ? (
               <>
                 <Button
                   variant="outline"
@@ -1457,7 +1739,8 @@ function App() {
                 <Button
                   variant="outline"
                   onClick={() => {
-                    setFinishPhase("confirm");
+                    resetFinishTagEditor();
+                    setFinishPhase(getInitialFinishPhase(projectRef.current));
                     setStepStatuses(["pending", "pending", "pending"]);
                     setStepErrors([]);
                     setHubspotProjectId(undefined);

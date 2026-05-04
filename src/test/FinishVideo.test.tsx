@@ -80,6 +80,18 @@ function applyNewPaths(
   });
 }
 
+/** Mirrors Finish Video tag precheck candidate selection in App.tsx */
+function listClipsWithEmptyTags(clips: ProjectClip[]): ProjectClip[] {
+  return [...clips]
+    .filter((c) => c.tags.length === 0)
+    .sort((a, b) => a.order - b.order);
+}
+
+/** Mirrors "apply to all empty tags" target selection in App.tsx */
+function listApplyToAllEmptyTagTargets(clips: ProjectClip[]): string[] {
+  return listClipsWithEmptyTags(clips).map((c) => c.hubspotId);
+}
+
 // ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
@@ -356,5 +368,38 @@ describe("Missing clips warning UI", () => {
     ];
     render(<MissingClipsWarning clips={clips} />);
     expect(screen.getByText(/#5 Dave/)).toBeTruthy();
+  });
+});
+
+describe("Finish Video tag precheck targeting", () => {
+  it("includes only clips whose tags array is empty", () => {
+    const clips = [
+      clip({ hubspotId: "c1", order: 2, tags: [] }),
+      clip({ hubspotId: "c2", order: 0, tags: ["Food"] }),
+      clip({ hubspotId: "c3", order: 1, tags: [] }),
+    ];
+
+    const result = listClipsWithEmptyTags(clips);
+    expect(result.map((c) => c.hubspotId)).toEqual(["c3", "c1"]);
+  });
+
+  it("returns empty list when all clips already have tags", () => {
+    const clips = [
+      clip({ hubspotId: "c1", order: 0, tags: ["Food"] }),
+      clip({ hubspotId: "c2", order: 1, tags: ["Cute"] }),
+    ];
+
+    expect(listClipsWithEmptyTags(clips)).toEqual([]);
+  });
+
+  it("apply-to-all targets only empty-tag clips in order", () => {
+    const clips = [
+      clip({ hubspotId: "c1", order: 3, tags: [] }),
+      clip({ hubspotId: "c2", order: 0, tags: ["Classic"] }),
+      clip({ hubspotId: "c3", order: 1, tags: [] }),
+      clip({ hubspotId: "c4", order: 2, tags: ["Art"] }),
+    ];
+
+    expect(listApplyToAllEmptyTagTargets(clips)).toEqual(["c3", "c1"]);
   });
 });
