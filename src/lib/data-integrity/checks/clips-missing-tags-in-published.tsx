@@ -1,30 +1,40 @@
 import { useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { CheckCircle2, Loader2, Tags } from "lucide-react";
-import { Badge } from "@/components/ui/badge";
+import { Loader2, Tags } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { TagSuggestionPanel } from "@/components/TagSuggestionPanel";
 import {
   countClipsMissingTagsInPublished,
   fetchClipsMissingTagsInPublished,
   fetchClipVpTagsBatch,
 } from "@/lib/hubspot";
-import { fetchTagOptions, resolveTagLabel } from "@/lib/tags";
+import { fetchTagOptions, suggestEcTagsForForeignTag, useTagOptions } from "@/lib/tags";
 import type { AppSettings, Clip } from "@/types";
 import { ClipIntegrityRow } from "../components/ClipIntegrityRow";
-import type { IntegrityCheck, IntegritySectionCount, IntegritySectionPage, Severity } from "../types";
+import { VpTagCell, EcTagCell } from "../components/VpTagContext";
+import type {
+  IntegrityCheck,
+  IntegritySectionCount,
+  IntegritySectionPage,
+  Severity,
+} from "../types";
 
 interface ClipMissingTagsItem extends Clip {
+  /** Raw VP tag values (internal value of HubSpot single-select on the VP) for every published VP this clip is in. */
   vpTags: string[];
-  suggestedVpTags: string[];
+  /**
+   * EC tag values suggested for this clip. May come from an exact VP→EC match
+   * or from splitting a compound VP tag like "Cute Art" into ["Cute", "Art"]
+   * when both parts exist in the EC taxonomy.
+   */
+  suggestedTags: string[];
 }
 
 async function applyTagsToClip(token: string, clipId: string, tags: string[]): Promise<void> {
   await invoke("update_clip_properties", {
     token,
     clipId,
-    properties: {
-      tags: tags.join(";"),
-    },
+    properties: { tags: tags.join(";") },
   });
 }
 
@@ -39,84 +49,28 @@ function ClipsMissingTagsRow({
   settings: AppSettings;
   onFixed: (id: string, summary?: string) => void;
 }) {
-  const [busy, setBusy] = useState(false);
-  const [applied, setApplied] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
-
-  const onApply = async () => {
-    if (clip.suggestedVpTags.length === 0) return;
-    setBusy(true);
-    setErr(null);
-    try {
-      await applyTagsToClip(token, clip.id, clip.suggestedVpTags);
-      setApplied(true);
-      onFixed(clip.id, `Tagged: ${clip.suggestedVpTags.map((t) => resolveTagLabel(t)).join(", ")}`);
-    } catch (e) {
-      setErr(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const suggestionBadges = (
-    <div className="flex flex-wrap items-center justify-end gap-1">
-      {clip.suggestedVpTags.map((tag) => (
-        <Badge key={tag} variant="secondary" className="h-5 rounded px-1.5 text-[10px]">
-          {resolveTagLabel(tag)}
-        </Badge>
-      ))}
-    </div>
-  );
+  const [appliedSummary, setAppliedSummary] = useState<string | null>(null);
+  const tagOptions = useTagOptions(token);
 
   return (
     <ClipIntegrityRow
       clip={clip}
       settings={settings}
-      linked={applied}
+      linked={appliedSummary !== null}
+      contexts={[
+        <VpTagCell key="vp" vpTags={clip.vpTags} />,
+        <EcTagCell key="ec" suggestedTags={clip.suggestedTags} tagOptions={tagOptions} />,
+      ]}
       rightActions={(
-        <div className="flex min-w-0 max-w-[420px] flex-col items-end gap-1">
-          {clip.suggestedVpTags.length > 0 ? (
-            <>
-              {suggestionBadges}
-              <div className="flex flex-wrap items-center justify-end gap-1">
-                {applied ? (
-                  <span className="inline-flex items-center gap-1 rounded border border-emerald-200 bg-emerald-50 px-1.5 py-0.5 text-[10px] font-medium text-emerald-800">
-                    <CheckCircle2 className="h-3 w-3" />
-                    Tagged
-                  </span>
-                ) : (
-                  <Button
-                    type="button"
-                    size="sm"
-                    className="h-6 cursor-pointer px-2 text-[10px]"
-                    disabled={busy}
-                    onClick={() => {
-                      void onApply();
-                    }}
-                  >
-                    {busy ? (
-                      <>
-                        <Loader2 className="mr-1 h-3 w-3 animate-spin" />
-                        Applying...
-                      </>
-                    ) : (
-                      "Apply VP tag(s)"
-                    )}
-                  </Button>
-                )}
-              </div>
-            </>
-          ) : (
-            <div className="text-right text-[10px] text-muted-foreground">
-              {clip.vpTags.length > 0 ? (
-                <span>VP tags don't match EC taxonomy: {clip.vpTags.join(", ")}</span>
-              ) : (
-                <span>No published VP tag found</span>
-              )}
-            </div>
-          )}
-          {err && <p className="text-right text-[10px] text-destructive">{err}</p>}
-        </div>
+        <TagSuggestionPanel
+          clipId={clip.id}
+          token={token}
+          suggestedTags={clip.suggestedTags}
+          onApplied={(_values, summary) => {
+            setAppliedSummary(summary);
+            onFixed(clip.id, summary);
+          }}
+        />
       )}
     />
   );
@@ -149,10 +103,10 @@ function ClipsMissingTagsBulkActions({
     setErr(null);
     try {
       for (const clip of autoItems) {
-        if (clip.suggestedVpTags.length === 0) continue;
-        await applyTagsToClip(token, clip.id, clip.suggestedVpTags);
+        if (clip.suggestedTags.length === 0) continue;
+        await applyTagsToClip(token, clip.id, clip.suggestedTags);
         setDone((n) => n + 1);
-        onFixed(clip.id, `Tagged: ${clip.suggestedVpTags.join(", ")}`);
+        onFixed(clip.id, `Tagged: ${clip.suggestedTags.join(", ")}`);
       }
     } catch (e) {
       setErr(e instanceof Error ? e.message : String(e));
@@ -202,33 +156,34 @@ async function fetchClipsMissingTagsInPublishedSections(
     fetchClipVpTagsBatch(token, clipIds),
     fetchTagOptions(token),
   ]);
-  const validTagValues = new Set(tagOptions.map((option) => option.value));
 
   const enriched = page.clips.map<ClipMissingTagsItem>((clip) => {
     const vpTags = vpTagsByClip.get(clip.id) ?? [];
-    const suggestedVpTags = vpTags.filter((tag) => validTagValues.has(tag));
-    return {
-      ...clip,
-      vpTags,
-      suggestedVpTags,
-    };
+    const suggestedSet = new Set<string>();
+    for (const vp of vpTags) {
+      for (const matched of suggestEcTagsForForeignTag(vp, tagOptions)) {
+        suggestedSet.add(matched);
+      }
+    }
+    const suggestedTags = Array.from(suggestedSet);
+    return { ...clip, vpTags, suggestedTags };
   });
 
   return {
     sections: [
       {
         id: "auto-fixable",
-        title: "Auto-fixable (VP tag matches EC taxonomy)",
+        title: "Auto-fixable",
         severity: "warning" as Severity,
         defaultOpen: true,
-        items: enriched.filter((clip) => clip.suggestedVpTags.length > 0),
+        items: enriched.filter((clip) => clip.suggestedTags.length > 0),
       },
       {
         id: "needs-review",
-        title: "Needs review (no matching VP tag)",
+        title: "Needs review",
         severity: "info" as Severity,
         defaultOpen: false,
-        items: enriched.filter((clip) => clip.suggestedVpTags.length === 0),
+        items: enriched.filter((clip) => clip.suggestedTags.length === 0),
       },
     ],
     nextAfter: page.nextAfter,
@@ -252,7 +207,7 @@ export const clipsMissingTagsInPublishedCheck: IntegrityCheck<ClipMissingTagsIte
   id: "clips-missing-tags-in-published",
   title: "Clips with unknown tags in published videos",
   description:
-    "External Clips with unknown tags that are already in published videos and have Granted creators. Apply matching VP tags where possible.",
+    "Clips already in published videos with a Granted creator but no tags. Apply matching VP tags or pick tags manually.",
   fetchCount: fetchClipsMissingTagsInPublishedCounts,
   fetch: fetchClipsMissingTagsInPublishedSections,
   Row: ClipsMissingTagsRow,

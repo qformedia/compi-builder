@@ -1,11 +1,12 @@
 import { useCallback, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { CheckCircle2, ExternalLink, Loader2, RefreshCw, Sparkles } from "lucide-react";
+import { ExternalLink, Loader2, RefreshCw, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { CreatorPicker } from "@/components/CreatorPicker";
 import { HubSpotIcon, PlatformIcon, getPlatform } from "@/components/ClipCard";
+import { IntegrityFixedPill } from "@/lib/data-integrity/components/IntegrityFixedPill";
 import type { Clip, AppSettings } from "@/types";
 import type { CreatorOption } from "@/lib/hubspot";
 import { hubspotCreatorUrl } from "@/lib/hubspot-urls";
@@ -197,12 +198,7 @@ export function CreatorSuggestionPanel({
   );
 
   if (st.kind === "applied") {
-    return (
-      <span className="inline-flex max-w-[220px] items-center gap-1 rounded-md border border-emerald-200 bg-emerald-50 px-2 py-0.5 text-[11px] font-medium text-emerald-800">
-        <CheckCircle2 className="h-3 w-3 flex-shrink-0" />
-        <span className="truncate">Fixed → {st.name}</span>
-      </span>
-    );
+    return <IntegrityFixedPill label={`Fixed → ${st.name}`} />;
   }
 
   if (st.kind === "error") {

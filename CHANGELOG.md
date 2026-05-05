@@ -5,6 +5,17 @@ The latest release is at the top.
 
 <!-- changelog-entries -->
 
+## v1.0.8 - 2026-05-05
+
+### What's new
+
+- Data Integrity now includes a new monitor for published clips that have unknown tags, so this tagging gap is visible in one place.
+- The new monitor can apply matching video-project tags to clips directly from the list, with both per-clip and bulk actions.
+
+### What got better
+
+- Each flagged clip now shows whether its project tags can be safely reused or still needs manual review, making fixes faster and clearer.
+
 ## v1.0.7 - 2026-05-04
 
 ### What's new

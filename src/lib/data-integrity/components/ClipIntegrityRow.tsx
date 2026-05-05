@@ -67,11 +67,18 @@ export function OpenClipInHubSpotButton({ clipId }: { clipId: string }) {
 export function ClipIntegrityRow({
   clip,
   settings,
+  contexts,
   rightActions,
   linked = false,
 }: {
   clip: Clip;
   settings: AppSettings;
+  /**
+   * Optional context columns rendered between `Used Nx` and `rightActions`.
+   * Each entry becomes its own row column with a vertical divider, so the
+   * caller can build a real side-by-side layout (e.g. `VP Tag | EC Tag`).
+   */
+  contexts?: ReactNode[];
   rightActions?: ReactNode;
   linked?: boolean;
 }) {
@@ -89,114 +96,127 @@ export function ClipIntegrityRow({
   return (
     <li
       className={cn(
-        "group flex flex-wrap gap-3 px-4 py-2 transition-colors hover:bg-muted/30 sm:flex-nowrap",
-        isPreviewing ? "items-start" : "items-center",
+        "group flex min-h-[68px] flex-col divide-y divide-border/40 transition-colors hover:bg-muted/30 sm:flex-row sm:divide-x sm:divide-y-0",
         linked && "bg-emerald-50/40",
         isPreviewing && "bg-muted/30",
       )}
     >
-      {isPreviewing ? (
-        <div
-          className="flex flex-shrink-0 flex-col gap-1.5"
-          style={{ width: PREVIEW_WIDTH_PX }}
-        >
-          <div className="flex items-center gap-1">
-            <ClipUrlButton
-              link={clip.link}
-              host={host}
-              shortPath={shortPath}
-              className="flex-1"
-            />
-            <OpenClipInHubSpotButton clipId={clip.id} />
-            <button
-              type="button"
-              className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
-              title="Close preview"
-              onClick={closePreview}
-            >
-              <X className="h-3 w-3" />
-            </button>
+      <div className="flex min-w-0 flex-1 items-center gap-3 px-4 py-2.5">
+        {isPreviewing ? (
+          <div
+            className="flex flex-shrink-0 flex-col gap-1.5"
+            style={{ width: PREVIEW_WIDTH_PX }}
+          >
+            <div className="flex items-center gap-1">
+              <ClipUrlButton
+                link={clip.link}
+                host={host}
+                shortPath={shortPath}
+                className="flex-1"
+              />
+              <OpenClipInHubSpotButton clipId={clip.id} />
+              <button
+                type="button"
+                className="flex h-5 w-5 flex-shrink-0 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                title="Close preview"
+                onClick={closePreview}
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+            <div className="relative aspect-[9/16] w-full overflow-hidden rounded-md border bg-black">
+              <ClipPreview
+                clip={clip}
+                preferHubSpotPreview={settings.preferHubSpotPreview}
+                onClose={closePreview}
+              />
+            </div>
           </div>
-          <div className="relative aspect-[9/16] w-full overflow-hidden rounded-md border bg-black">
-            <ClipPreview
-              clip={clip}
-              preferHubSpotPreview={settings.preferHubSpotPreview}
-              onClose={closePreview}
-            />
+        ) : (
+          <button
+            type="button"
+            className="relative h-12 w-12 flex-shrink-0 overflow-hidden rounded-md border bg-muted transition-colors hover:border-primary"
+            onClick={() => setActivePreview(clip)}
+            title="Preview clip"
+          >
+            {showThumb && clip.fetchedThumbnail ? (
+              <img
+                src={clip.fetchedThumbnail}
+                alt=""
+                className="h-full w-full object-cover"
+              />
+            ) : (
+              <span className="flex h-full w-full items-center justify-center text-muted-foreground">
+                <PlatformIcon platform={platform} className="h-5 w-5 opacity-50" />
+              </span>
+            )}
+          </button>
+        )}
+
+        <div className="min-w-0 flex-1">
+          {!isPreviewing && (
+            <div className="flex min-w-0 items-center gap-1.5">
+              <ClipUrlButton
+                link={clip.link}
+                host={host}
+                shortPath={shortPath}
+                className="min-w-0"
+              />
+              <OpenClipInHubSpotButton clipId={clip.id} />
+            </div>
+          )}
+          <div
+            className={cn(
+              "flex min-w-0 flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground",
+              !isPreviewing && "mt-1",
+            )}
+          >
+            {clip.score && (
+              <span
+                className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${SCORE_COLORS[clip.score] ?? "bg-slate-600 text-white"}`}
+              >
+                {clip.score}
+              </span>
+            )}
+            {tags.map((t) => (
+              <Badge
+                key={t}
+                variant="secondary"
+                className="h-4 max-w-[100px] truncate rounded px-1.5 text-[10px] font-normal"
+              >
+                {t}
+              </Badge>
+            ))}
+            {moreTags > 0 && <span className="text-[10px]">+{moreTags}</span>}
           </div>
         </div>
-      ) : (
-        <button
-          type="button"
-          className="relative h-12 w-12 flex-shrink-0 overflow-hidden rounded-md border bg-muted transition-colors hover:border-primary"
-          onClick={() => setActivePreview(clip)}
-          title="Preview clip"
-        >
-          {showThumb && clip.fetchedThumbnail ? (
-            <img
-              src={clip.fetchedThumbnail}
-              alt=""
-              className="h-full w-full object-cover"
-            />
-          ) : (
-            <span className="flex h-full w-full items-center justify-center text-muted-foreground">
-              <PlatformIcon platform={platform} className="h-5 w-5 opacity-50" />
-            </span>
-          )}
-        </button>
+      </div>
+
+      {np > 0 && (
+        <div className="flex w-full flex-shrink-0 items-center justify-end bg-muted/10 px-3 py-2 sm:w-16 sm:justify-center">
+          <Badge
+            variant="outline"
+            className="h-5 shrink-0 rounded-full border-red-200 bg-red-50 px-1.5 text-[10px] font-medium text-red-700"
+          >
+            Used {np}x
+          </Badge>
+        </div>
       )}
 
-      <div className="min-w-0 flex-1">
-        {!isPreviewing && (
-          <div className="flex min-w-0 items-center gap-1.5">
-            <ClipUrlButton
-              link={clip.link}
-              host={host}
-              shortPath={shortPath}
-              className="min-w-0"
-            />
-            <OpenClipInHubSpotButton clipId={clip.id} />
-          </div>
-        )}
+      {contexts?.map((node, i) => (
         <div
-          className={cn(
-            "flex min-w-0 flex-wrap items-center gap-1.5 text-[11px] text-muted-foreground",
-            !isPreviewing && "mt-1",
-          )}
+          key={i}
+          className="flex w-full flex-shrink-0 items-center bg-muted/10 px-2.5 py-2.5 sm:w-32"
         >
-          {clip.score && (
-            <span
-              className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${SCORE_COLORS[clip.score] ?? "bg-slate-600 text-white"}`}
-            >
-              {clip.score}
-            </span>
-          )}
-          {tags.map((t) => (
-            <Badge
-              key={t}
-              variant="secondary"
-              className="h-4 max-w-[100px] truncate rounded px-1.5 text-[10px] font-normal"
-            >
-              {t}
-            </Badge>
-          ))}
-          {moreTags > 0 && <span className="text-[10px]">+{moreTags}</span>}
+          {node}
         </div>
-      </div>
+      ))}
 
-      <div className="ml-auto flex w-full min-w-0 flex-col items-stretch gap-1 sm:ml-0 sm:w-auto sm:items-end">
-        <div className="flex flex-wrap items-center justify-end gap-1.5">
-          {np > 0 && (
-            <Badge
-              variant="outline"
-              className="h-5 shrink-0 rounded-full border-red-200 bg-red-50 px-1.5 text-[10px] font-medium text-red-700"
-            >
-              Used {np}x
-            </Badge>
-          )}
+      {rightActions && (
+        <div className="flex w-full flex-shrink-0 items-center justify-end bg-muted/5 px-2 py-2.5 sm:w-52">
           {rightActions}
         </div>
-      </div>
+      )}
     </li>
   );
 }
