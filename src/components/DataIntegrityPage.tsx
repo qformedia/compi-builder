@@ -67,38 +67,12 @@ export function DataIntegrityPage({ isActive, settings }: Props) {
     consumeCheckFetchSyncBatch,
   } = useIntegrity();
   const [cardOpen, setCardOpen] = useState<Record<string, boolean>>({});
-  const [sectionOpen, setSectionOpen] = useState<Record<string, boolean>>({});
   const [fixedThisSession, setFixedThisSession] = useState<Record<string, number>>({});
 
-  // Apply section/collapse defaults after each check fetch (mirrors previous inline loadCheck logic).
+  // Apply card collapse defaults after each check fetch.
   useLayoutEffect(() => {
     const batch = consumeCheckFetchSyncBatch();
-    for (const { checkId, reset, sections, total } of batch) {
-      if (reset) {
-        setSectionOpen((s) => {
-          const next: Record<string, boolean> = { ...s };
-          for (const k of Object.keys(next)) {
-            if (k.startsWith(`${checkId}::`)) {
-              delete next[k];
-            }
-          }
-          for (const sec of sections) {
-            next[`${checkId}::${sec.id}`] = sec.defaultOpen ?? true;
-          }
-          return next;
-        });
-      } else {
-        setSectionOpen((s) => {
-          const next: Record<string, boolean> = { ...s };
-          for (const sec of sections) {
-            const key = `${checkId}::${sec.id}`;
-            if (!(key in next)) {
-              next[key] = sec.defaultOpen ?? true;
-            }
-          }
-          return next;
-        });
-      }
+    for (const { checkId, total } of batch) {
       setCardOpen((c) => {
         if (c[checkId] === undefined) {
           return { ...c, [checkId]: total > 0 };
@@ -194,8 +168,6 @@ export function DataIntegrityPage({ isActive, settings }: Props) {
               onToggleCard={() =>
                 setCardOpen((c) => ({ ...c, [check.id]: c[check.id] === false ? true : false }))
               }
-              sectionOpen={sectionOpen}
-              onToggleSection={(k, o) => setSectionOpen((s) => ({ ...s, [k]: o }))}
               onRefresh={() => {
                 void loadCheck(check, true);
               }}
@@ -235,8 +207,6 @@ function CheckCard<T extends { id: string }>({
   loadingMore,
   open,
   onToggleCard,
-  sectionOpen,
-  onToggleSection,
   onRefresh,
   onLoadMore,
   fixedCount,
@@ -250,8 +220,6 @@ function CheckCard<T extends { id: string }>({
   loadingMore: boolean;
   open: boolean;
   onToggleCard: () => void;
-  sectionOpen: Record<string, boolean>;
-  onToggleSection: (key: string, o: boolean) => void;
   onRefresh: () => void;
   onLoadMore: () => void;
   fixedCount: number;
@@ -398,24 +366,14 @@ function CheckCard<T extends { id: string }>({
                 .slice()
                 .sort((a, b) => SEV_RANK[b.severity] - SEV_RANK[a.severity])
                 .map((section) => {
-                  const sKey = `${check.id}::${section.id}`;
                   const singleSectionNoTitle = sections.length === 1 && !section.title;
-                  const secOpen: boolean = singleSectionNoTitle
-                    ? true
-                    : sectionOpen[sKey] === undefined
-                      ? (section.defaultOpen ?? true)
-                      : Boolean(sectionOpen[sKey]);
                   const sectionTotal = sectionTotals.get(section.id) ?? section.items.length;
                   if (section.items.length === 0 && sectionTotal === 0) return null;
 
                   return (
                     <section key={section.id} className="border-b last:border-0">
                       {!singleSectionNoTitle && (
-                        <button
-                          type="button"
-                          className="sticky top-0 z-10 flex w-full items-center justify-between border-b border-border/60 bg-muted px-4 py-2 text-left transition-colors hover:bg-muted/80"
-                          onClick={() => onToggleSection(sKey, !secOpen)}
-                        >
+                        <div className="sticky top-0 z-10 flex w-full items-center justify-between border-b border-border/60 bg-muted px-4 py-2 text-left">
                           <span className="flex min-w-0 items-center gap-2">
                             <span
                               className={cn(
@@ -440,27 +398,19 @@ function CheckCard<T extends { id: string }>({
                                 : sectionTotal}
                             </Badge>
                           </span>
-                          <ChevronDown
-                            className={cn(
-                              "h-3.5 w-3.5 text-muted-foreground transition-transform",
-                              !secOpen && "-rotate-90",
-                            )}
+                        </div>
+                      )}
+                      <ul className="divide-y divide-border/60">
+                        {section.items.map((item) => (
+                          <Row
+                            key={item.id}
+                            item={item as T}
+                            token={token}
+                            settings={settings}
+                            onFixed={(_id, _summary) => onFixedOne()}
                           />
-                        </button>
-                      )}
-                      {secOpen && (
-                        <ul className="divide-y divide-border/60">
-                          {section.items.map((item) => (
-                            <Row
-                              key={item.id}
-                              item={item as T}
-                              token={token}
-                              settings={settings}
-                              onFixed={(_id, _summary) => onFixedOne()}
-                            />
-                          ))}
-                        </ul>
-                      )}
+                        ))}
+                      </ul>
                     </section>
                   );
                 })}

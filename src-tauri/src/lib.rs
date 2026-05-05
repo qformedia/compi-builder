@@ -4352,7 +4352,7 @@ async fn search_clips_missing_creator(
             .insert("after".into(), serde_json::json!(a));
     }
 
-    send_missing_creator_search(&client, &search_url, &token, body, "search").await
+    send_external_clips_search(&client, &search_url, &token, body, "search").await
 }
 
 /// Count External Clips with no creator linked without fetching all rows.
@@ -4381,7 +4381,7 @@ async fn count_clips_missing_creator(token: String) -> Result<serde_json::Value,
             "limit": 1
         });
 
-        let page = send_missing_creator_search(client, search_url, token, body, "count").await?;
+        let page = send_external_clips_search(client, search_url, token, body, "count").await?;
 
         Ok(page.get("total").and_then(|v| v.as_u64()).unwrap_or(0))
     }
@@ -4409,7 +4409,77 @@ async fn count_clips_missing_creator(token: String) -> Result<serde_json::Value,
     }))
 }
 
-async fn send_missing_creator_search(
+/// Search one page of External Clips with To Delete set to true.
+#[tauri::command]
+async fn search_clips_to_delete(
+    token: String,
+    after: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let search_url = format!(
+        "https://api.hubapi.com/crm/v3/objects/{}/search",
+        EXTERNAL_CLIPS_OBJECT_ID
+    );
+
+    let mut props: Vec<serde_json::Value> = CLIP_PROPERTIES
+        .iter()
+        .map(|p| serde_json::json!(p))
+        .collect();
+    props.push(serde_json::json!("hs_lastmodifieddate"));
+
+    let mut body = serde_json::json!({
+        "filterGroups": [{
+            "filters": [
+                { "propertyName": "to_delete", "operator": "EQ", "value": "true" }
+            ]
+        }],
+        "properties": props,
+        "sorts": [{ "propertyName": "hs_lastmodifieddate", "direction": "DESCENDING" }],
+        "limit": 50
+    });
+    if let Some(ref a) = after {
+        body.as_object_mut()
+            .unwrap()
+            .insert("after".into(), serde_json::json!(a));
+    }
+
+    send_external_clips_search(&client, &search_url, &token, body, "search").await
+}
+
+/// Count External Clips with To Delete set to true without fetching all rows.
+#[tauri::command]
+async fn count_clips_to_delete(token: String) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let search_url = format!(
+        "https://api.hubapi.com/crm/v3/objects/{}/search",
+        EXTERNAL_CLIPS_OBJECT_ID
+    );
+
+    let body = serde_json::json!({
+        "filterGroups": [{
+            "filters": [
+                { "propertyName": "to_delete", "operator": "EQ", "value": "true" }
+            ]
+        }],
+        "properties": ["hs_object_id"],
+        "limit": 1
+    });
+
+    let page = send_external_clips_search(&client, &search_url, &token, body, "count").await?;
+    let total = page.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    Ok(serde_json::json!({ "total": total }))
+}
+
+async fn send_external_clips_search(
     client: &reqwest::Client,
     search_url: &str,
     token: &str,
@@ -4425,7 +4495,7 @@ async fn send_missing_creator_search(
             .json(&body)
             .send()
             .await
-            .map_err(|e| format!("Clips-missing-creator {context} failed: {e}"))?;
+            .map_err(|e| format!("External-clips integrity {context} failed: {e}"))?;
 
         if res.status().is_success() {
             return res
@@ -5494,6 +5564,8 @@ pub fn run() {
             search_untagged_clips,
             search_clips_missing_creator,
             count_clips_missing_creator,
+            search_clips_to_delete,
+            count_clips_to_delete,
             search_clips_missing_metrics,
             update_clip_properties,
             update_creator_properties,

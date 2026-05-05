@@ -192,6 +192,29 @@ export async function countClipsMissingCreator(
   return invoke<ClipsMissingCreatorCountResponse>("count_clips_missing_creator", { token });
 }
 
+/** One page of External Clips marked with To Delete = true (Data Integrity). */
+export async function fetchClipsToDelete(
+  token: string,
+  after?: string,
+): Promise<{ clips: Clip[]; total: number; nextAfter?: string }> {
+  const data = await invoke<HubSpotSearchResponse>("search_clips_to_delete", {
+    token,
+    after: after ?? null,
+  });
+  return {
+    clips: data.results.map(parseClip),
+    total: data.total,
+    nextAfter: data.paging?.next?.after,
+  };
+}
+
+/** Count External Clips marked with To Delete = true without fetching all matching records. */
+export async function countClipsToDelete(
+  token: string,
+): Promise<{ total: number }> {
+  return invoke<{ total: number }>("count_clips_to_delete", { token });
+}
+
 function parseClip(record: {
   id: string;
   properties: Record<string, string | null>;
