@@ -19,6 +19,11 @@ interface ClipsMissingCreatorCountResponse {
   other: number;
 }
 
+interface ClipVpTagsResponseRow {
+  clipId: string;
+  vpTags: string[];
+}
+
 /** Search External Clips by tags (and optionally scores) via the Rust backend */
 export async function searchClipsByTags(
   token: string,
@@ -213,6 +218,42 @@ export async function countClipsToDelete(
   token: string,
 ): Promise<{ total: number }> {
   return invoke<{ total: number }>("count_clips_to_delete", { token });
+}
+
+/** One page of External Clips with unknown tags in published videos (Data Integrity). */
+export async function fetchClipsMissingTagsInPublished(
+  token: string,
+  after?: string,
+): Promise<{ clips: Clip[]; total: number; nextAfter?: string }> {
+  const data = await invoke<HubSpotSearchResponse>("search_clips_missing_tags_in_published", {
+    token,
+    after: after ?? null,
+  });
+  return {
+    clips: data.results.map(parseClip),
+    total: data.total,
+    nextAfter: data.paging?.next?.after,
+  };
+}
+
+/** Count External Clips with unknown tags in published videos. */
+export async function countClipsMissingTagsInPublished(
+  token: string,
+): Promise<{ total: number }> {
+  return invoke<{ total: number }>("count_clips_missing_tags_in_published", { token });
+}
+
+/** Fetch associated published VP tags for a batch of External Clips. */
+export async function fetchClipVpTagsBatch(
+  token: string,
+  clipIds: string[],
+): Promise<Map<string, string[]>> {
+  if (clipIds.length === 0) return new Map();
+  const rows = await invoke<ClipVpTagsResponseRow[]>("fetch_clip_vp_tags_batch", {
+    token,
+    clipIds,
+  });
+  return new Map(rows.map((row) => [row.clipId, row.vpTags]));
 }
 
 function parseClip(record: {

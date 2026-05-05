@@ -51,4 +51,10 @@ export interface IntegrityCheck<TItem extends { id: string }> {
     onFixed: (id: string, summary?: string) => void;
     settings: AppSettings;
   }>;
+  BulkActions?: ComponentType<{
+    sections: IntegritySection<TItem>[];
+    token: string;
+    settings: AppSettings;
+    onFixed: (id: string, summary?: string) => void;
+  }>;
 }

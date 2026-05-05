@@ -4479,6 +4479,272 @@ async fn count_clips_to_delete(token: String) -> Result<serde_json::Value, Strin
     Ok(serde_json::json!({ "total": total }))
 }
 
+/// Search one page of External Clips with no tags, in published videos, with Granted creators.
+#[tauri::command]
+async fn search_clips_missing_tags_in_published(
+    token: String,
+    after: Option<String>,
+) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let search_url = format!(
+        "https://api.hubapi.com/crm/v3/objects/{}/search",
+        EXTERNAL_CLIPS_OBJECT_ID
+    );
+
+    let mut props: Vec<serde_json::Value> = CLIP_PROPERTIES
+        .iter()
+        .map(|p| serde_json::json!(p))
+        .collect();
+    props.push(serde_json::json!("hs_lastmodifieddate"));
+
+    let mut body = serde_json::json!({
+        "filterGroups": [{
+            "filters": [
+                { "propertyName": "tags", "operator": "NOT_HAS_PROPERTY" },
+                { "propertyName": "num_of_published_video_project", "operator": "GT", "value": "0" },
+                { "propertyName": "creator_status", "operator": "EQ", "value": "Granted" },
+                { "propertyName": "link_not_working_anymore", "operator": "NEQ", "value": "true" }
+            ]
+        }],
+        "properties": props,
+        "sorts": [{ "propertyName": "num_of_published_video_project", "direction": "DESCENDING" }],
+        "limit": 50
+    });
+    if let Some(ref a) = after {
+        body.as_object_mut()
+            .unwrap()
+            .insert("after".into(), serde_json::json!(a));
+    }
+
+    send_external_clips_search(&client, &search_url, &token, body, "search").await
+}
+
+/// Count External Clips with no tags, in published videos, with Granted creators.
+#[tauri::command]
+async fn count_clips_missing_tags_in_published(token: String) -> Result<serde_json::Value, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let search_url = format!(
+        "https://api.hubapi.com/crm/v3/objects/{}/search",
+        EXTERNAL_CLIPS_OBJECT_ID
+    );
+
+    let body = serde_json::json!({
+        "filterGroups": [{
+            "filters": [
+                { "propertyName": "tags", "operator": "NOT_HAS_PROPERTY" },
+                { "propertyName": "num_of_published_video_project", "operator": "GT", "value": "0" },
+                { "propertyName": "creator_status", "operator": "EQ", "value": "Granted" },
+                { "propertyName": "link_not_working_anymore", "operator": "NEQ", "value": "true" }
+            ]
+        }],
+        "properties": ["hs_object_id"],
+        "limit": 1
+    });
+
+    let page = send_external_clips_search(&client, &search_url, &token, body, "count").await?;
+    let total = page.get("total").and_then(|v| v.as_u64()).unwrap_or(0);
+
+    Ok(serde_json::json!({ "total": total }))
+}
+
+/// Fetch associated published Video Project tags for many External Clips at once.
+/// Returns: [{ clipId, vpTags }]
+#[tauri::command]
+async fn fetch_clip_vp_tags_batch(
+    token: String,
+    clip_ids: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    if clip_ids.is_empty() {
+        return Ok(serde_json::json!([]));
+    }
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // 1) Batch read clip->video-project associations.
+    let assoc_url = format!(
+        "https://api.hubapi.com/crm/v4/associations/{}/{}/batch/read",
+        EXTERNAL_CLIPS_OBJECT_ID, VIDEO_PROJECTS_OBJECT_ID
+    );
+
+    let assoc_body = serde_json::json!({
+        "inputs": clip_ids.iter().map(|id| serde_json::json!({ "id": id })).collect::<Vec<_>>()
+    });
+
+    let assoc_res = client
+        .post(&assoc_url)
+        .bearer_auth(&token)
+        .json(&assoc_body)
+        .send()
+        .await
+        .map_err(|e| format!("Clip->VP associations batch read failed: {e}"))?;
+
+    if !assoc_res.status().is_success() {
+        let status = assoc_res.status();
+        let text = assoc_res.text().await.unwrap_or_default();
+        return Err(format!(
+            "HubSpot clip->VP associations error ({}): {}",
+            status, text
+        ));
+    }
+
+    let assoc_json: serde_json::Value = assoc_res
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse clip->VP associations: {e}"))?;
+
+    let mut clip_to_vp_ids: HashMap<String, Vec<String>> = HashMap::new();
+    let mut vp_ids_set: HashSet<String> = HashSet::new();
+
+    if let Some(results) = assoc_json.get("results").and_then(|r| r.as_array()) {
+        for row in results {
+            let clip_id = row
+                .get("fromObjectId")
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(|| {
+                    row.get("from")
+                        .and_then(|v| v.get("id"))
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                });
+
+            let Some(clip_id) = clip_id else {
+                continue;
+            };
+
+            let to_ids: Vec<String> = row
+                .get("to")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|to| {
+                            to.get("toObjectId")
+                                .and_then(|v| v.as_i64())
+                                .map(|id| id.to_string())
+                                .or_else(|| {
+                                    to.get("toObjectId")
+                                        .and_then(|v| v.as_str())
+                                        .map(String::from)
+                                })
+                                .or_else(|| {
+                                    to.get("id").and_then(|v| v.as_str()).map(String::from)
+                                })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            for vp_id in &to_ids {
+                vp_ids_set.insert(vp_id.clone());
+            }
+            clip_to_vp_ids.insert(clip_id, to_ids);
+        }
+    }
+
+    // Ensure every requested clip appears in output even with no associations.
+    for clip_id in &clip_ids {
+        clip_to_vp_ids.entry(clip_id.clone()).or_default();
+    }
+
+    // 2) Batch read VP tag + status.
+    let mut vp_meta: HashMap<String, (String, String)> = HashMap::new();
+    if !vp_ids_set.is_empty() {
+        let vp_ids: Vec<String> = vp_ids_set.into_iter().collect();
+        let batch_url = format!(
+            "https://api.hubapi.com/crm/v3/objects/{}/batch/read",
+            VIDEO_PROJECTS_OBJECT_ID
+        );
+
+        for chunk in vp_ids.chunks(100) {
+            let body = serde_json::json!({
+                "properties": ["tag", "status"],
+                "inputs": chunk.iter().map(|id| serde_json::json!({ "id": id })).collect::<Vec<_>>()
+            });
+
+            let res = client
+                .post(&batch_url)
+                .bearer_auth(&token)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("VP batch read failed: {e}"))?;
+
+            if !res.status().is_success() {
+                let status = res.status();
+                let text = res.text().await.unwrap_or_default();
+                return Err(format!("HubSpot VP batch read error ({}): {}", status, text));
+            }
+
+            let json: serde_json::Value = res
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse VP batch read: {e}"))?;
+
+            if let Some(results) = json.get("results").and_then(|r| r.as_array()) {
+                for vp in results {
+                    let id = vp
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                        .unwrap_or_default();
+                    if id.is_empty() {
+                        continue;
+                    }
+                    let props = vp.get("properties").and_then(|p| p.as_object());
+                    let tag = props
+                        .and_then(|p| p.get("tag"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let status = props
+                        .and_then(|p| p.get("status"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    vp_meta.insert(id, (tag, status));
+                }
+            }
+        }
+    }
+
+    // 3) Build output with only published VP tags.
+    let out = clip_ids
+        .iter()
+        .map(|clip_id| {
+            let mut tags_set: HashSet<String> = HashSet::new();
+            for vp_id in clip_to_vp_ids.get(clip_id).cloned().unwrap_or_default() {
+                if let Some((tag, status)) = vp_meta.get(&vp_id) {
+                    if status.trim().eq_ignore_ascii_case("published") {
+                        let clean = tag.trim();
+                        if !clean.is_empty() {
+                            tags_set.insert(clean.to_string());
+                        }
+                    }
+                }
+            }
+            let mut vp_tags: Vec<String> = tags_set.into_iter().collect();
+            vp_tags.sort();
+            serde_json::json!({
+                "clipId": clip_id,
+                "vpTags": vp_tags
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Ok(serde_json::json!(out))
+}
+
 async fn send_external_clips_search(
     client: &reqwest::Client,
     search_url: &str,
@@ -5566,6 +5832,9 @@ pub fn run() {
             count_clips_missing_creator,
             search_clips_to_delete,
             count_clips_to_delete,
+            search_clips_missing_tags_in_published,
+            count_clips_missing_tags_in_published,
+            fetch_clip_vp_tags_batch,
             search_clips_missing_metrics,
             update_clip_properties,
             update_creator_properties,

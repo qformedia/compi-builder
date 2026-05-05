@@ -248,6 +248,7 @@ function CheckCard<T extends { id: string }>({
   );
   const canLoadMore = Boolean(data?.nextAfter);
   const Row = check.Row;
+  const BulkActions = check.BulkActions;
   const loadMoreSentinelRef = useRef<HTMLDivElement | null>(null);
 
   // Auto-load the next page as the load-more footer scrolls into view.
@@ -294,33 +295,43 @@ function CheckCard<T extends { id: string }>({
           </CardDescription>
         )}
         <CardAction>
-          <div className="flex items-center gap-0.5">
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7 cursor-pointer"
-              title="Refresh this check"
-              disabled={loading}
-              onClick={onRefresh}
-            >
-              <RefreshCw className={cn("h-3.5 w-3.5 text-muted-foreground", loading && "animate-spin")} />
-            </Button>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7 cursor-pointer"
-              onClick={onToggleCard}
-              title={open ? "Collapse" : "Expand"}
-            >
-              <ChevronDown
-                className={cn(
-                  "h-3.5 w-3.5 transition-transform text-muted-foreground",
-                  !open && "-rotate-90",
-                )}
+          <div className="flex flex-col items-end gap-1">
+            <div className="flex items-center gap-0.5">
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 cursor-pointer"
+                title="Refresh this check"
+                disabled={loading}
+                onClick={onRefresh}
+              >
+                <RefreshCw className={cn("h-3.5 w-3.5 text-muted-foreground", loading && "animate-spin")} />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 cursor-pointer"
+                onClick={onToggleCard}
+                title={open ? "Collapse" : "Expand"}
+              >
+                <ChevronDown
+                  className={cn(
+                    "h-3.5 w-3.5 transition-transform text-muted-foreground",
+                    !open && "-rotate-90",
+                  )}
+                />
+              </Button>
+            </div>
+            {BulkActions && !loading && !hasErr && countTotal > 0 && sections.length > 0 && (
+              <BulkActions
+                sections={sections as unknown as IntegritySection<T>[]}
+                token={token}
+                settings={settings}
+                onFixed={onFixedOne}
               />
-            </Button>
+            )}
           </div>
         </CardAction>
       </CardHeader>
