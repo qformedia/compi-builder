@@ -11,10 +11,12 @@ The latest release is at the top.
 
 - Data Integrity now includes a new monitor for published clips that have unknown tags, so this tagging gap is visible in one place.
 - The new monitor can apply matching video-project tags to clips directly from the list, with both per-clip and bulk actions.
+- Data Integrity now also flags clips that are still marked for deletion, so risky clips can be reviewed before they continue through the workflow.
 
 ### What got better
 
-- Each flagged clip now shows whether its project tags can be safely reused or still needs manual review, making fixes faster and clearer.
+- The tag-fix rows now show the project tag and clip tag suggestion in separate side-by-side columns, making mappings easier to scan.
+- Tag matching is smarter for compound project tags, so names like "Cute Art" can map to existing clip tags when each part is valid.
 
 ## v1.0.7 - 2026-05-04
 
