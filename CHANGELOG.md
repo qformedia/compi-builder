@@ -5,7 +5,7 @@ The latest release is at the top.
 
 <!-- changelog-entries -->
 
-## v1.0.8 - 2026-05-05
+## v1.1.0 - 2026-05-05
 
 ### What's new
 
