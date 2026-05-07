@@ -5,6 +5,18 @@ The latest release is at the top.
 
 <!-- changelog-entries -->
 
+## v1.2.0 - 2026-05-07
+
+### What's new
+
+- New "Ask MiniMiki" button in the header opens a chat with our team's Telegram assistant, with the current page, project, and a screenshot of the active window already attached so you don't have to re-explain what you were doing. Hold Shift while clicking to skip the screenshot.
+- MiniMiki guides bug reports and feature ideas through a quick conversation in Telegram and sends a clean summary to Miquel for review, with one-tap Approve or Reject buttons in his admin chat.
+- The existing "Share Feedback" form stays in place during the trial, so you can use whichever feels easier — both end up in the same place.
+
+### Behind the scenes
+
+- New conversation, message, and handoff tables back the assistant; admin notifications now include the chat transcript and approval buttons.
+
 ## v1.1.0 - 2026-05-05
 
 ### What's new

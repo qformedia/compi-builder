@@ -1,0 +1,19 @@
+# Supabase project config. Per-function overrides for Edge Function
+# deployment. Functions that receive third-party webhooks (Telegram) must
+# disable Supabase's default JWT verification because the caller can't
+# sign a Supabase JWT — they're authenticated by an in-function secret
+# header check instead.
+
+[functions.telegram-bot]
+verify_jwt = false
+
+[functions.telegram-callback]
+verify_jwt = false
+
+# notify-feedback is called by Supabase's database webhooks, which can be
+# configured to send the service-role key as Authorization. Leave JWT
+# verification on for that one. If your database webhook is configured
+# without an auth header and you start seeing 401s here, flip this to
+# `verify_jwt = false` too.
+[functions.notify-feedback]
+verify_jwt = true

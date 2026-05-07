@@ -1,5 +1,6 @@
 mod download_log;
 mod helpers;
+mod minimiki;
 mod resolver;
 mod socialkit;
 mod ytdlp_repair;
@@ -5843,6 +5844,7 @@ pub fn run() {
             download_log::get_download_log,
             download_log::clear_download_log,
             download_log::log_event,
+            minimiki::prepare_minimiki_handoff,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
