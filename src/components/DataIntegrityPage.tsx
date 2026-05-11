@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, CheckCircle2, AlertTriangle, Loader2, RefreshCw, ShieldAlert } from "lucide-react";
+import { ChevronDown, CheckCircle2, AlertTriangle, RefreshCw, ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {

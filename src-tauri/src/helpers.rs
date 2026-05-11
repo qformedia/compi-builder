@@ -686,6 +686,68 @@ pub(crate) fn extract_hashtags(caption: &str) -> Option<String> {
     }
 }
 
+// ── Creator property registry ────────────────────────────────────────────────
+
+/// HubSpot internal property names fetched by `fetch_creators_batch` for
+/// every "deep read" surface that needs to render the creator side-by-side
+/// (e.g. the Duplicates page detail view). The narrower CSV-export path uses
+/// only a subset of these (see `name`, `main_link`, etc.) but reusing one
+/// canonical list keeps the request payloads consistent and avoids a creator
+/// suddenly losing a column when a new feature consumes the same fetch.
+///
+/// Keep this in sync with the side-by-side property labels in
+/// `src/lib/duplicates/diff.ts` — a property that's fetched here but missing
+/// from the labels registry will render with its raw HubSpot internal name.
+pub(crate) fn full_creator_properties() -> &'static [&'static str] {
+    &[
+        // Identity / classification
+        "name",
+        "main_link",
+        "main_account",
+        "status",
+        "category",
+        "tags",
+        "hubspot_owner_id",
+        "license_type",
+        "license_checked",
+        // Profile URLs (the 5 in-scope columns + cross-network extras)
+        "instagram",
+        "secondary_instagram",
+        "tiktok",
+        "secondary_tiktok",
+        "youtube",
+        "facebook",
+        "x",
+        "web",
+        "other_links",
+        // China-network handles
+        "from_china",
+        "bilibili",
+        "douyin_id",
+        "ixigua",
+        "kuaishou_id",
+        "weibo",
+        "wechat",
+        "xiaohongshu_id",
+        // Notes / follow-up
+        "notes",
+        "keep_up_1",
+        "keep_up_2",
+        "keep_up_3",
+        "date_found",
+        "date_initial_contact",
+        "video_types_could_do",
+        "discarded",
+        "special_requests",
+        // System / activity
+        "hs_createdate",
+        "hs_lastmodifieddate",
+        "num_associated_video_projects",
+        "num_associated_external_clips",
+        "num_associated_contacts",
+    ]
+}
+
 // ── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1539,5 +1601,40 @@ mod tests {
             extract_hashtags(caption),
             Some("cool_art;my_video_123".into())
         );
+    }
+
+    // ── full_creator_properties ──────────────────────────────────────────
+
+    #[test]
+    fn full_creator_properties_contains_required_fields() {
+        let props = full_creator_properties();
+        // Every consumer of the side-by-side detail view depends on these.
+        for required in [
+            "name",
+            "instagram",
+            "secondary_instagram",
+            "tiktok",
+            "secondary_tiktok",
+            "youtube",
+        ] {
+            assert!(
+                props.contains(&required),
+                "full_creator_properties is missing `{required}`",
+            );
+        }
+    }
+
+    #[test]
+    fn full_creator_properties_has_no_duplicates() {
+        let props = full_creator_properties();
+        let mut sorted: Vec<&&str> = props.iter().collect();
+        sorted.sort();
+        for window in sorted.windows(2) {
+            assert!(
+                window[0] != window[1],
+                "duplicate property `{}` in full_creator_properties",
+                window[0]
+            );
+        }
     }
 }

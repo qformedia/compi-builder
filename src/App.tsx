@@ -26,6 +26,8 @@ import { SearchTab } from "@/components/SearchTab";
 import { ArrangeTab, decodeEditingNotes } from "@/components/ArrangeTab";
 import { GeneralSearchTab } from "@/components/GeneralSearchTab";
 import { DataIntegrityPage } from "@/components/DataIntegrityPage";
+import { DuplicatesPage } from "@/components/DuplicatesPage";
+import { isSupabaseConfigured } from "@/lib/supabase";
 import { IntegrityProvider, useIntegrity } from "@/lib/data-integrity/use-data-integrity";
 import {
   describeCreatorExportProgress,
@@ -1459,6 +1461,46 @@ function App() {
                 <TabErrorBoundary name="Data integrity">
                   <DataIntegrityPage
                     isActive={activePage === "data-integrity"}
+                    settings={settings}
+                  />
+                </TabErrorBoundary>
+              </div>
+            )}
+          </div>
+
+          {/* ── Duplicates page ── */}
+          <div className={`flex flex-1 flex-col overflow-hidden ${activePage === "duplicates" ? "" : "hidden"}`}>
+            {!isConfigured ? (
+              <div className="flex flex-1 items-center justify-center">
+                <div className="text-center">
+                  <p className="mb-4 text-muted-foreground">
+                    Configure your HubSpot token and project folder to get started.
+                  </p>
+                  <Button onClick={() => setActivePage("settings")}>
+                    Open Settings
+                  </Button>
+                </div>
+              </div>
+            ) : !isSupabaseConfigured ? (
+              <div className="flex flex-1 items-center justify-center">
+                <div className="max-w-md text-center">
+                  <p className="mb-2 text-muted-foreground">
+                    Set up Supabase to use the Duplicates page.
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Presence indicators and resolution-status sync require
+                    <code className="mx-1">VITE_SUPABASE_URL</code>
+                    and
+                    <code className="mx-1">VITE_SUPABASE_ANON_KEY</code>
+                    in your environment.
+                  </p>
+                </div>
+              </div>
+            ) : (
+              <div className="flex-1 overflow-hidden">
+                <TabErrorBoundary name="Duplicates">
+                  <DuplicatesPage
+                    isActive={activePage === "duplicates"}
                     settings={settings}
                   />
                 </TabErrorBoundary>

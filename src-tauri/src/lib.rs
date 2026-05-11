@@ -823,6 +823,29 @@ async fn fetch_video_projects_by_ids(
         .map_err(|e| format!("Failed to parse response: {e}"))
 }
 
+/// Best-effort OS username, used as a presence fallback when the user has
+/// not configured an owner email yet (see `joinDuplicatesRoom` in
+/// src/lib/duplicates/supabase.ts). Returns the first non-empty value of:
+///
+///   USER → USERNAME → LOGNAME → "anonymous"
+///
+/// We avoid pulling in a `whoami` crate to keep the dependency surface
+/// minimal — these env vars are reliable on macOS, Linux and modern Windows
+/// (where USERNAME is the conventional Win32 var). We never reach into the
+/// keychain or any identity provider; this is a display-only fallback.
+#[tauri::command]
+fn current_os_username() -> String {
+    for var in ["USER", "USERNAME", "LOGNAME"] {
+        if let Ok(value) = std::env::var(var) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return trimmed.to_string();
+            }
+        }
+    }
+    "anonymous".to_string()
+}
+
 /// Batch-read Creator records by IDs for CSV export
 #[tauri::command]
 async fn fetch_creators_batch(
@@ -841,18 +864,11 @@ async fn fetch_creators_batch(
         "https://api.hubapi.com/crm/v3/objects/{}/batch/read",
         CREATORS_OBJECT_ID
     );
-    let props = vec![
-        "main_link",
-        "main_account",
-        "name",
-        "douyin_id",
-        "kuaishou_id",
-        "xiaohongshu_id",
-        "special_requests",
-        "notes",
-        "license_checked",
-        "license_type",
-    ];
+    // One canonical property set lives in `helpers::full_creator_properties`
+    // so every consumer of this command (CSV export, Duplicates side-by-side,
+    // future surfaces) gets the same shape and a property added in one place
+    // shows up everywhere.
+    let props: Vec<&str> = helpers::full_creator_properties().to_vec();
 
     let mut all_results: Vec<serde_json::Value> = Vec::new();
 
@@ -6189,6 +6205,7 @@ pub fn run() {
             upload_clip_video,
             ensure_clip_video_uploaded,
             fetch_creators_batch,
+            current_os_username,
             create_project,
             load_project,
             save_project_data,

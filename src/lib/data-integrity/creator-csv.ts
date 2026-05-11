@@ -19,6 +19,18 @@ export interface CreatorRow {
   values: Partial<Record<CreatorUrlField, string>>;
 }
 
+/**
+ * Same source CSV as `CreatorRow`, but exposes ALL columns by trimmed header
+ * name. Used by the Duplicates page so the detector + side-by-side preview
+ * have access to every creator column without each consumer needing its own
+ * parser.
+ */
+export interface CreatorRowFull {
+  id: string;
+  name: string;
+  raw: Record<string, string>;
+}
+
 export interface CreatorUrlIssue {
   /** Stable id across pages — `creatorId:field`. */
   id: string;
@@ -230,6 +242,50 @@ export function validateCreatorUrls(rows: CreatorRow[]): CreatorUrlIssue[] {
         value,
       });
     }
+  }
+  return out;
+}
+
+/**
+ * Convert the parsed CSV into one row per creator with every column kept
+ * verbatim under its trimmed header name. Use this when downstream code needs
+ * access to columns beyond the 5 URL fields (e.g. the Duplicates page side-by-
+ * side preview, which surfaces Owner / Status / Category / etc.).
+ *
+ * Header lookup is case-sensitive on the trimmed header — match what HubSpot
+ * exports, e.g. `"Record ID"`, `"Name"`, `"Instagram"`. Aliases are not
+ * resolved here; consumers should fall back to alternate names via
+ * `findColumn`-style helpers if needed.
+ */
+export function parseCreatorsCsvFull(csv: string): CreatorRowFull[] {
+  const rows = parseCsv(csv);
+  if (rows.length === 0) return [];
+
+  const header = rows[0].map((h) => h.trim());
+  const idIdx = findColumn(header, ["Record ID", "Record Id", "hs_object_id", "Object ID"]);
+  const nameIdx = findColumn(header, ["Name", "name"]);
+
+  if (idIdx < 0) {
+    const preview = header.slice(0, 12).join(", ");
+    throw new Error(
+      `Creators CSV is missing the record-ID column. First headers seen: ${preview}${header.length > 12 ? "…" : ""}`,
+    );
+  }
+
+  const out: CreatorRowFull[] = [];
+  for (let i = 1; i < rows.length; i++) {
+    const r = rows[i];
+    if (r.length === 1 && r[0] === "") continue;
+    const id = (r[idIdx] ?? "").trim();
+    if (!id) continue;
+    const name = nameIdx >= 0 ? (r[nameIdx] ?? "").trim() : "";
+    const raw: Record<string, string> = {};
+    for (let c = 0; c < header.length; c++) {
+      const key = header[c];
+      if (!key) continue;
+      raw[key] = (r[c] ?? "").trim();
+    }
+    out.push({ id, name, raw });
   }
   return out;
 }
