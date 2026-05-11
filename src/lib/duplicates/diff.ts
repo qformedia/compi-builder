@@ -79,10 +79,31 @@ export const CREATOR_PROPERTY_LABELS: Record<string, string> = {
   // System / activity
   hs_createdate: "Object create date/time",
   hs_lastmodifieddate: "Object last modified date/time",
-  num_associated_video_projects: "# Video Projects",
-  num_associated_external_clips: "# External Clips",
-  num_associated_contacts: "# Contacts",
 };
+
+/**
+ * Rollup property keys that are displayed in the dedicated Associations card
+ * on the Duplicates detail page (not in the property diff buckets).
+ */
+export const ASSOCIATION_ROLLUP_KEYS = [
+  "num_of_contacts",
+  "num_of_external_clips",
+  "num_of_public_video_projects",
+  "num_of_send_link_actions",
+  "num_of_social_interactions",
+  "num_of_video_projects",
+] as const;
+
+export const ASSOCIATION_ROLLUP_LABELS: Record<string, string> = {
+  num_of_contacts: "Num of Contacts",
+  num_of_external_clips: "Num of External Clips",
+  num_of_public_video_projects: "Num of Public Video Projects",
+  num_of_send_link_actions: "Num of Send Link Actions",
+  num_of_social_interactions: "Num of Social Interactions",
+  num_of_video_projects: "Num of Video Projects",
+};
+
+const SKIP_KEYS = new Set<string>(ASSOCIATION_ROLLUP_KEYS);
 
 const BUCKET_ORDER: Record<PropDiffBucket, number> = {
   mismatch: 0,
@@ -117,6 +138,7 @@ export function sortPropertiesForDiff(
 
   const rows: PropDiff[] = [];
   for (const key of keys) {
+    if (SKIP_KEYS.has(key)) continue;
     const valueA = normalize(a[key]);
     const valueB = normalize(b[key]);
     if (!valueA && !valueB) continue;

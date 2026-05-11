@@ -15,7 +15,7 @@
  * v1: read-only. No "Mark resolved" / "Mark not-a-duplicate" buttons yet.
  */
 
-import { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   ArrowLeft,
@@ -37,12 +37,14 @@ import { cn } from "@/lib/utils";
 import {
   CREATOR_PROPERTY_LABELS,
   sortPropertiesForDiff,
+  ASSOCIATION_ROLLUP_KEYS,
+  ASSOCIATION_ROLLUP_LABELS,
   type PropDiff,
   type PropDiffBucket,
 } from "@/lib/duplicates/diff";
 import type { DuplicatePair } from "@/lib/duplicates/find-pairs";
 import type { PresenceEntry } from "@/lib/duplicates/supabase";
-import { hubspotCreatorUrl } from "@/lib/hubspot-urls";
+import { hubspotClipUrl, hubspotCreatorUrl, hubspotVideoProjectUrl } from "@/lib/hubspot-urls";
 
 interface CreatorRecord {
   id: string;
@@ -61,6 +63,22 @@ interface Props {
   localUser: string;
   otherViewers: PresenceEntry[];
   onBack: () => void;
+}
+
+interface AssociatedRecord {
+  id: string;
+  name: string;
+  [key: string]: string;
+}
+
+interface CreatorAssociations {
+  id: string;
+  videoProjects: AssociatedRecord[];
+  externalClips: AssociatedRecord[];
+}
+
+interface AssociationsResponse {
+  results: CreatorAssociations[];
 }
 
 const BUCKET_LABEL: Record<PropDiffBucket, string> = {
@@ -119,6 +137,43 @@ export function DuplicatePairDetail({
         setError(err instanceof Error ? err.message : String(err));
       } finally {
         if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pair.a.rid, pair.b.rid, token]);
+
+  // ── Associations fetch (parallel, independent) ──────────────────────────
+  const [assocData, setAssocData] = useState<{
+    a: CreatorAssociations | null;
+    b: CreatorAssociations | null;
+  } | null>(null);
+  const [assocLoading, setAssocLoading] = useState(true);
+  const [assocError, setAssocError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    setAssocLoading(true);
+    setAssocError(null);
+    (async () => {
+      try {
+        if (!token) throw new Error("HubSpot token is not configured");
+        const res = await invoke<AssociationsResponse>(
+          "fetch_creator_associations_batch",
+          { token, creatorIds: [pair.a.rid, pair.b.rid] },
+        );
+        if (cancelled) return;
+        const map = new Map(res.results.map((r) => [r.id, r]));
+        setAssocData({
+          a: map.get(pair.a.rid) ?? null,
+          b: map.get(pair.b.rid) ?? null,
+        });
+      } catch (err) {
+        if (cancelled) return;
+        setAssocError(err instanceof Error ? err.message : String(err));
+      } finally {
+        if (!cancelled) setAssocLoading(false);
       }
     })();
     return () => {
@@ -209,6 +264,109 @@ export function DuplicatePairDetail({
           </CardContent>
         </Card>
 
+        {/* Associations card */}
+        <Card>
+          <CardHeader className="gap-1.5">
+            <CardTitle className="text-base">Associations</CardTitle>
+            <CardDescription className="text-xs">
+              Rollup counts and associated records for each side.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {/* Counts table */}
+            {props ? (
+              <div className="rounded-md border">
+                <div className="grid grid-cols-[minmax(160px,200px)_1fr_1fr] items-center gap-3 border-b bg-muted/40 px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                  <span>Count</span>
+                  <span>{aName}</span>
+                  <span>{bName}</span>
+                </div>
+                <ul className="divide-y">
+                  {ASSOCIATION_ROLLUP_KEYS.map((key) => {
+                    const valA = props.a[key] ?? "0";
+                    const valB = props.b[key] ?? "0";
+                    const differs = valA !== valB;
+                    return (
+                      <li
+                        key={key}
+                        className={cn(
+                          "grid grid-cols-[minmax(160px,200px)_1fr_1fr] items-center gap-3 px-4 py-1.5 text-xs",
+                          differs && "bg-amber-50/40",
+                        )}
+                      >
+                        <span className="font-medium">
+                          {ASSOCIATION_ROLLUP_LABELS[key] ?? key}
+                        </span>
+                        <span className={cn(differs && "font-semibold text-amber-700")}>
+                          {valA || "0"}
+                        </span>
+                        <span className={cn(differs && "font-semibold text-amber-700")}>
+                          {valB || "0"}
+                        </span>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            ) : (
+              <div className="h-24 animate-pulse rounded-md bg-muted/60" />
+            )}
+
+            {/* Associated records */}
+            {assocLoading ? (
+              <div className="space-y-2">
+                {[0, 1, 2].map((i) => (
+                  <div key={i} className="h-10 animate-pulse rounded-md bg-muted/60" />
+                ))}
+              </div>
+            ) : assocError ? (
+              <div className="flex flex-wrap items-center gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" />
+                <span className="min-w-0 break-words">{assocError}</span>
+              </div>
+            ) : assocData ? (
+              <div className="space-y-3">
+                <AssociatedRecordsSection
+                  title="Video Projects"
+                  recordsA={assocData.a?.videoProjects ?? []}
+                  recordsB={assocData.b?.videoProjects ?? []}
+                  renderChips={(r) => {
+                    const tag = r.tag as string | undefined;
+                    const status = r.status as string | undefined;
+                    return (
+                      <>
+                        {tag && (
+                          <Badge variant="outline" className="h-4 px-1 text-[9px]">{tag}</Badge>
+                        )}
+                        {status && (
+                          <Badge variant="secondary" className="h-4 px-1 text-[9px]">{status}</Badge>
+                        )}
+                      </>
+                    );
+                  }}
+                  buildUrl={(r) => hubspotVideoProjectUrl(r.id)}
+                />
+                <AssociatedRecordsSection
+                  title="External Clips"
+                  recordsA={assocData.a?.externalClips ?? []}
+                  recordsB={assocData.b?.externalClips ?? []}
+                  renderChips={(r) => {
+                    const score = r.score as string | undefined;
+                    return (
+                      <>
+                        {score && (
+                          <Badge variant="outline" className="h-4 px-1 text-[9px]">{score}</Badge>
+                        )}
+                      </>
+                    );
+                  }}
+                  buildUrl={(r) => hubspotClipUrl(r.id)}
+                />
+              </div>
+            ) : null}
+          </CardContent>
+        </Card>
+
         {/* Side-by-side */}
         {loading ? (
           <div className="space-y-2">
@@ -259,8 +417,8 @@ export function DuplicatePairDetail({
                           )}
                         >
                           <div className="font-medium text-foreground">{row.label}</div>
-                          <PropValueCell value={row.valueA} />
-                          <PropValueCell value={row.valueB} />
+                          <PropValueCell value={row.valueA} propKey={row.key} />
+                          <PropValueCell value={row.valueB} propKey={row.key} />
                         </li>
                       ))}
                     </ul>
@@ -290,6 +448,95 @@ export function DuplicatePairDetail({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+function AssociatedRecordsSection({
+  title,
+  recordsA,
+  recordsB,
+  renderChips,
+  buildUrl,
+}: {
+  title: string;
+  recordsA: AssociatedRecord[];
+  recordsB: AssociatedRecord[];
+  renderChips: (r: AssociatedRecord) => React.ReactNode;
+  buildUrl: (r: AssociatedRecord) => string;
+}) {
+  const bothEmpty = recordsA.length === 0 && recordsB.length === 0;
+  return (
+    <div className="rounded-md border">
+      <div className="flex items-center gap-2 border-b bg-muted/40 px-4 py-1.5">
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+          {title}
+        </span>
+        <span className="text-[11px] text-muted-foreground">
+          ({recordsA.length} / {recordsB.length})
+        </span>
+      </div>
+      {bothEmpty ? (
+        <div className="px-4 py-3 text-xs text-muted-foreground">No associated records.</div>
+      ) : (
+        <div className="grid grid-cols-[minmax(160px,200px)_1fr_1fr] gap-3">
+          {/* Empty spacer column */}
+          <div />
+          <div className="divide-y border-l">
+            {recordsA.length === 0 ? (
+              <div className="px-3 py-2 text-xs text-muted-foreground">—</div>
+            ) : (
+              recordsA.map((r) => (
+                <AssociatedRecordRow
+                  key={r.id}
+                  record={r}
+                  renderChips={renderChips}
+                  buildUrl={buildUrl}
+                />
+              ))
+            )}
+          </div>
+          <div className="divide-y border-l">
+            {recordsB.length === 0 ? (
+              <div className="px-3 py-2 text-xs text-muted-foreground">—</div>
+            ) : (
+              recordsB.map((r) => (
+                <AssociatedRecordRow
+                  key={r.id}
+                  record={r}
+                  renderChips={renderChips}
+                  buildUrl={buildUrl}
+                />
+              ))
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AssociatedRecordRow({
+  record,
+  renderChips,
+  buildUrl,
+}: {
+  record: AssociatedRecord;
+  renderChips: (r: AssociatedRecord) => React.ReactNode;
+  buildUrl: (r: AssociatedRecord) => string;
+}) {
+  return (
+    <div className="flex items-center gap-1.5 px-3 py-1.5 text-xs">
+      <span className="min-w-0 truncate font-medium">{record.name || record.mainLink || "Unnamed"}</span>
+      {renderChips(record)}
+      <button
+        type="button"
+        onClick={() => void openUrl(buildUrl(record))}
+        className="ml-auto flex-shrink-0 text-muted-foreground hover:text-foreground"
+        title="Open in HubSpot"
+      >
+        <ExternalLink className="h-3 w-3" />
+      </button>
     </div>
   );
 }
@@ -324,7 +571,7 @@ function CreatorHeader({
   );
 }
 
-function PropValueCell({ value }: { value: string }) {
+function PropValueCell({ value, propKey }: { value: string; propKey: string }) {
   if (!value) return <span className="text-muted-foreground">—</span>;
   // Detect URLs for clickability — light heuristic, no protocol coercion.
   const isUrl = /^https?:\/\//i.test(value);
@@ -340,7 +587,9 @@ function PropValueCell({ value }: { value: string }) {
       </button>
     );
   }
-  return <span className="break-words text-foreground">{value}</span>;
+  const isDateProp = propKey === "date_found" || propKey === "hs_createdate" || propKey === "hs_lastmodifieddate";
+  const display = isDateProp ? formatWithDaysAgo(value) : value;
+  return <span className="break-words text-foreground">{display}</span>;
 }
 
 function normalizeProps(props: Record<string, string | null>): Record<string, string> {
@@ -352,6 +601,15 @@ function normalizeProps(props: Record<string, string | null>): Record<string, st
 }
 
 /** Map detector source codes to short user-facing chips on the why-card. */
+
+function formatWithDaysAgo(value: string): string {
+  const d = new Date(value);
+  if (Number.isNaN(d.getTime())) return value;
+  const days = Math.floor((Date.now() - d.getTime()) / (1000 * 60 * 60 * 24));
+  const ago = days === 0 ? "today" : days === 1 ? "1 day ago" : `${days} days ago`;
+  return `(${ago}) ${value}`;
+}
+
 function humanizeSource(s: string): string {
   switch (s) {
     case "canonical_collision":

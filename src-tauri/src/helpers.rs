@@ -742,9 +742,13 @@ pub(crate) fn full_creator_properties() -> &'static [&'static str] {
         // System / activity
         "hs_createdate",
         "hs_lastmodifieddate",
-        "num_associated_video_projects",
-        "num_associated_external_clips",
-        "num_associated_contacts",
+        // Rollup counts (team-defined properties)
+        "num_of_contacts",
+        "num_of_external_clips",
+        "num_of_public_video_projects",
+        "num_of_send_link_actions",
+        "num_of_social_interactions",
+        "num_of_video_projects",
     ]
 }
 
@@ -1616,6 +1620,12 @@ mod tests {
             "tiktok",
             "secondary_tiktok",
             "youtube",
+            "num_of_contacts",
+            "num_of_external_clips",
+            "num_of_public_video_projects",
+            "num_of_send_link_actions",
+            "num_of_social_interactions",
+            "num_of_video_projects",
         ] {
             assert!(
                 props.contains(&required),

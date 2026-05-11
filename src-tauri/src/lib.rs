@@ -906,6 +906,328 @@ async fn fetch_creators_batch(
     Ok(serde_json::json!({ "results": all_results }))
 }
 
+/// Fetch associated Video Projects and External Clips for a batch of Creator IDs.
+///
+/// Returns per-creator lists of associated records (with name + key properties)
+/// so the Duplicates detail view can show an "Associations" panel side-by-side.
+///
+/// HubSpot v4 association batch read returns up to 1000 to-ids per from-id,
+/// which is well above what any creator has in practice — no pagination for v1.
+#[tauri::command]
+async fn fetch_creator_associations_batch(
+    token: String,
+    creator_ids: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    if creator_ids.is_empty() {
+        return Ok(serde_json::json!({ "results": [] }));
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // -- Step 1: Creator → Video Project associations (v4 batch read) -----------
+    let vp_assoc_url = format!(
+        "https://api.hubapi.com/crm/v4/associations/{}/{}/batch/read",
+        CREATORS_OBJECT_ID, VIDEO_PROJECTS_OBJECT_ID
+    );
+    let vp_assoc_body = serde_json::json!({
+        "inputs": creator_ids.iter().map(|id| serde_json::json!({ "id": id })).collect::<Vec<_>>()
+    });
+
+    let vp_assoc_res = client
+        .post(&vp_assoc_url)
+        .bearer_auth(&token)
+        .json(&vp_assoc_body)
+        .send()
+        .await
+        .map_err(|e| format!("Creator→VP associations request failed: {e}"))?;
+
+    if !vp_assoc_res.status().is_success() {
+        let status = vp_assoc_res.status();
+        let text = vp_assoc_res.text().await.unwrap_or_default();
+        return Err(format!(
+            "HubSpot Creator→VP associations error ({}): {}",
+            status, text
+        ));
+    }
+
+    let vp_assoc_json: serde_json::Value = vp_assoc_res
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Creator→VP associations: {e}"))?;
+
+    let mut creator_to_vp_ids: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut all_vp_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    if let Some(results) = vp_assoc_json.get("results").and_then(|r| r.as_array()) {
+        for row in results {
+            let from_id = row
+                .get("from")
+                .and_then(|v| v.get("id"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(|| {
+                    row.get("fromObjectId")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                });
+
+            let to_ids: Vec<String> = row
+                .get("to")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|to| {
+                            to.get("id")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                                .or_else(|| {
+                                    to.get("toObjectId")
+                                        .and_then(|v| v.as_i64())
+                                        .map(|id| id.to_string())
+                                })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if let Some(from) = from_id {
+                for id in &to_ids {
+                    all_vp_ids.insert(id.clone());
+                }
+                creator_to_vp_ids.insert(from, to_ids);
+            }
+        }
+    }
+
+    // Ensure every creator appears even with no associations.
+    for id in &creator_ids {
+        creator_to_vp_ids.entry(id.clone()).or_default();
+    }
+
+    // -- Step 2: Creator → External Clip associations (v4 batch read) -----------
+    let clip_assoc_url = format!(
+        "https://api.hubapi.com/crm/v4/associations/{}/{}/batch/read",
+        CREATORS_OBJECT_ID, EXTERNAL_CLIPS_OBJECT_ID
+    );
+    let clip_assoc_body = serde_json::json!({
+        "inputs": creator_ids.iter().map(|id| serde_json::json!({ "id": id })).collect::<Vec<_>>()
+    });
+
+    let clip_assoc_res = client
+        .post(&clip_assoc_url)
+        .bearer_auth(&token)
+        .json(&clip_assoc_body)
+        .send()
+        .await
+        .map_err(|e| format!("Creator→Clip associations request failed: {e}"))?;
+
+    if !clip_assoc_res.status().is_success() {
+        let status = clip_assoc_res.status();
+        let text = clip_assoc_res.text().await.unwrap_or_default();
+        return Err(format!(
+            "HubSpot Creator→Clip associations error ({}): {}",
+            status, text
+        ));
+    }
+
+    let clip_assoc_json: serde_json::Value = clip_assoc_res
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse Creator→Clip associations: {e}"))?;
+
+    let mut creator_to_clip_ids: std::collections::HashMap<String, Vec<String>> =
+        std::collections::HashMap::new();
+    let mut all_clip_ids: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    if let Some(results) = clip_assoc_json.get("results").and_then(|r| r.as_array()) {
+        for row in results {
+            let from_id = row
+                .get("from")
+                .and_then(|v| v.get("id"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .or_else(|| {
+                    row.get("fromObjectId")
+                        .and_then(|v| v.as_str())
+                        .map(String::from)
+                });
+
+            let to_ids: Vec<String> = row
+                .get("to")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|to| {
+                            to.get("id")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                                .or_else(|| {
+                                    to.get("toObjectId")
+                                        .and_then(|v| v.as_i64())
+                                        .map(|id| id.to_string())
+                                })
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            if let Some(from) = from_id {
+                for id in &to_ids {
+                    all_clip_ids.insert(id.clone());
+                }
+                creator_to_clip_ids.insert(from, to_ids);
+            }
+        }
+    }
+
+    for id in &creator_ids {
+        creator_to_clip_ids.entry(id.clone()).or_default();
+    }
+
+    // -- Step 3: Batch-read VP properties ---------------------------------------
+    let mut vp_meta: std::collections::HashMap<String, serde_json::Value> =
+        std::collections::HashMap::new();
+    if !all_vp_ids.is_empty() {
+        let vp_ids: Vec<String> = all_vp_ids.into_iter().collect();
+        let batch_url = format!(
+            "https://api.hubapi.com/crm/v3/objects/{}/batch/read",
+            VIDEO_PROJECTS_OBJECT_ID
+        );
+        for chunk in vp_ids.chunks(100) {
+            let body = serde_json::json!({
+                "properties": ["name", "tag", "pub_date", "status", "youtube_video_id"],
+                "inputs": chunk.iter().map(|id| serde_json::json!({ "id": id })).collect::<Vec<_>>()
+            });
+            let res = client
+                .post(&batch_url)
+                .bearer_auth(&token)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("VP batch read failed: {e}"))?;
+
+            if !res.status().is_success() {
+                let status = res.status();
+                let text = res.text().await.unwrap_or_default();
+                return Err(format!("HubSpot VP batch read error ({}): {}", status, text));
+            }
+
+            let batch: serde_json::Value = res
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse VP batch read: {e}"))?;
+
+            if let Some(results) = batch.get("results").and_then(|r| r.as_array()) {
+                for item in results {
+                    let id = item
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let props = item.get("properties").cloned().unwrap_or(serde_json::json!({}));
+                    vp_meta.insert(
+                        id,
+                        serde_json::json!({
+                            "id": item.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                            "name": props.get("name").and_then(|v| v.as_str()).unwrap_or("Unnamed"),
+                            "tag": props.get("tag").and_then(|v| v.as_str()).unwrap_or(""),
+                            "pubDate": props.get("pub_date").and_then(|v| v.as_str()).unwrap_or(""),
+                            "status": props.get("status").and_then(|v| v.as_str()).unwrap_or(""),
+                            "youtubeVideoId": props.get("youtube_video_id").and_then(|v| v.as_str()).unwrap_or(""),
+                        }),
+                    );
+                }
+            }
+        }
+    }
+
+    // -- Step 4: Batch-read External Clip properties ----------------------------
+    let mut clip_meta: std::collections::HashMap<String, serde_json::Value> =
+        std::collections::HashMap::new();
+    if !all_clip_ids.is_empty() {
+        let clip_ids: Vec<String> = all_clip_ids.into_iter().collect();
+        let batch_url = format!(
+            "https://api.hubapi.com/crm/v3/objects/{}/batch/read",
+            EXTERNAL_CLIPS_OBJECT_ID
+        );
+        for chunk in clip_ids.chunks(100) {
+            let body = serde_json::json!({
+                "properties": ["name", "main_link", "score", "hs_createdate"],
+                "inputs": chunk.iter().map(|id| serde_json::json!({ "id": id })).collect::<Vec<_>>()
+            });
+            let res = client
+                .post(&batch_url)
+                .bearer_auth(&token)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| format!("Clip batch read failed: {e}"))?;
+
+            if !res.status().is_success() {
+                let status = res.status();
+                let text = res.text().await.unwrap_or_default();
+                return Err(format!(
+                    "HubSpot Clip batch read error ({}): {}",
+                    status, text
+                ));
+            }
+
+            let batch: serde_json::Value = res
+                .json()
+                .await
+                .map_err(|e| format!("Failed to parse Clip batch read: {e}"))?;
+
+            if let Some(results) = batch.get("results").and_then(|r| r.as_array()) {
+                for item in results {
+                    let id = item
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let props = item.get("properties").cloned().unwrap_or(serde_json::json!({}));
+                    clip_meta.insert(
+                        id,
+                        serde_json::json!({
+                            "id": item.get("id").and_then(|v| v.as_str()).unwrap_or(""),
+                            "name": props.get("name").and_then(|v| v.as_str()).unwrap_or("Unnamed"),
+                            "mainLink": props.get("main_link").and_then(|v| v.as_str()).unwrap_or(""),
+                            "score": props.get("score").and_then(|v| v.as_str()).unwrap_or(""),
+                            "createdate": props.get("hs_createdate").and_then(|v| v.as_str()).unwrap_or(""),
+                        }),
+                    );
+                }
+            }
+        }
+    }
+
+    // -- Step 5: Assemble response ----------------------------------------------
+    let results: Vec<serde_json::Value> = creator_ids
+        .iter()
+        .map(|cid| {
+            let vp_ids = creator_to_vp_ids.get(cid).cloned().unwrap_or_default();
+            let clip_ids = creator_to_clip_ids.get(cid).cloned().unwrap_or_default();
+            let video_projects: Vec<serde_json::Value> = vp_ids
+                .iter()
+                .filter_map(|id| vp_meta.get(id).cloned())
+                .collect();
+            let external_clips: Vec<serde_json::Value> = clip_ids
+                .iter()
+                .filter_map(|id| clip_meta.get(id).cloned())
+                .collect();
+            serde_json::json!({
+                "id": cid,
+                "videoProjects": video_projects,
+                "externalClips": external_clips,
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({ "results": results }))
+}
+
 /// Create a Video Project in HubSpot and associate the given External Clip IDs.
 #[tauri::command]
 async fn create_video_project(
@@ -6205,6 +6527,7 @@ pub fn run() {
             upload_clip_video,
             ensure_clip_video_uploaded,
             fetch_creators_batch,
+            fetch_creator_associations_batch,
             current_os_username,
             create_project,
             load_project,
