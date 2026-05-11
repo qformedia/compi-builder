@@ -527,7 +527,7 @@ function AssociatedRecordRow({
 }) {
   return (
     <div className="flex items-center gap-1.5 px-3 py-1.5 text-xs">
-      <span className="min-w-0 truncate font-medium">{record.name || record.mainLink || "Unnamed"}</span>
+      <span className="min-w-0 truncate font-medium">{record.name || record.link || "Unnamed"}</span>
       {renderChips(record)}
       <button
         type="button"

@@ -1155,7 +1155,7 @@ async fn fetch_creator_associations_batch(
         );
         for chunk in clip_ids.chunks(100) {
             let body = serde_json::json!({
-                "properties": ["name", "main_link", "score", "hs_createdate"],
+                "properties": ["name", "link", "score", "hs_createdate"],
                 "inputs": chunk.iter().map(|id| serde_json::json!({ "id": id })).collect::<Vec<_>>()
             });
             let res = client
@@ -1193,7 +1193,7 @@ async fn fetch_creator_associations_batch(
                         serde_json::json!({
                             "id": item.get("id").and_then(|v| v.as_str()).unwrap_or(""),
                             "name": props.get("name").and_then(|v| v.as_str()).unwrap_or("Unnamed"),
-                            "mainLink": props.get("main_link").and_then(|v| v.as_str()).unwrap_or(""),
+                            "link": props.get("link").and_then(|v| v.as_str()).unwrap_or(""),
                             "score": props.get("score").and_then(|v| v.as_str()).unwrap_or(""),
                             "createdate": props.get("hs_createdate").and_then(|v| v.as_str()).unwrap_or(""),
                         }),
