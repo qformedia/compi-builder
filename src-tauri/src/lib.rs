@@ -1132,7 +1132,7 @@ async fn fetch_creator_associations_batch(
                         id,
                         serde_json::json!({
                             "id": item.get("id").and_then(|v| v.as_str()).unwrap_or(""),
-                            "name": props.get("name").and_then(|v| v.as_str()).unwrap_or("Unnamed"),
+                            "name": props.get("name").and_then(|v| v.as_str()).unwrap_or(""),
                             "tag": props.get("tag").and_then(|v| v.as_str()).unwrap_or(""),
                             "pubDate": props.get("pub_date").and_then(|v| v.as_str()).unwrap_or(""),
                             "status": props.get("status").and_then(|v| v.as_str()).unwrap_or(""),
@@ -1192,7 +1192,7 @@ async fn fetch_creator_associations_batch(
                         id,
                         serde_json::json!({
                             "id": item.get("id").and_then(|v| v.as_str()).unwrap_or(""),
-                            "name": props.get("name").and_then(|v| v.as_str()).unwrap_or("Unnamed"),
+                            "name": props.get("name").and_then(|v| v.as_str()).unwrap_or(""),
                             "link": props.get("link").and_then(|v| v.as_str()).unwrap_or(""),
                             "score": props.get("score").and_then(|v| v.as_str()).unwrap_or(""),
                             "createdate": props.get("hs_createdate").and_then(|v| v.as_str()).unwrap_or(""),
