@@ -43,7 +43,17 @@ export interface IntegrityCheck<TItem extends { id: string }> {
   id: string;
   title: string;
   description: string;
-  fetchCount: (token: string) => Promise<IntegritySectionCount[]>;
+  /**
+   * `force` is set by the integrity provider when the user triggered an
+   * explicit refresh (the "Refresh all" header button or the banner's
+   * Retry). Checks that maintain their own derived caches (e.g. a parsed
+   * CSV) should bypass them when force is true so a hard reset actually
+   * fetches fresh data.
+   */
+  fetchCount: (
+    token: string,
+    opts?: { force?: boolean },
+  ) => Promise<IntegritySectionCount[]>;
   fetch: (token: string, after?: string) => Promise<IntegritySectionPage<TItem>>;
   Row: ComponentType<{
     item: TItem;

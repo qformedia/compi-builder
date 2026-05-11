@@ -4,6 +4,7 @@ import type { FeedbackPayload } from "@/types";
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
 const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 const screenshotsBucket = import.meta.env.VITE_SUPABASE_FEEDBACK_BUCKET || "feedback-screenshots";
+const hsExportsBucket = import.meta.env.VITE_SUPABASE_HS_EXPORTS_BUCKET || "hs-exports";
 
 export const isSupabaseConfigured = Boolean(supabaseUrl && supabaseAnonKey);
 
@@ -84,3 +85,82 @@ export async function reportDownloadIssue(info: DownloadIssueInfo) {
 
   await submitFeedback(payload);
 }
+
+/* ------------------------------------------------------------------ */
+/* HubSpot export cache (all-creators CSV for Data Integrity)         */
+/* ------------------------------------------------------------------ */
+
+const HS_EXPORT_KIND_ALL_CREATORS = "all_creators";
+
+export interface CreatorsExportPointer {
+  storagePath: string;
+  generatedAt: Date;
+  rowCount: number | null;
+}
+
+/** Returns the most recent `all_creators` export pointer, or null if there is none. */
+export async function getLatestCreatorsExport(): Promise<CreatorsExportPointer | null> {
+  const client = createSupabaseClient();
+  const { data, error } = await client
+    .from("hs_exports")
+    .select("storage_path, generated_at, row_count")
+    .eq("kind", HS_EXPORT_KIND_ALL_CREATORS)
+    .order("generated_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!data) return null;
+
+  return {
+    storagePath: data.storage_path as string,
+    generatedAt: new Date(data.generated_at as string),
+    rowCount: (data.row_count as number | null) ?? null,
+  };
+}
+
+/** Downloads the CSV stored at `storagePath` in the hs-exports bucket as text. */
+export async function downloadCreatorsExport(storagePath: string): Promise<string> {
+  const client = createSupabaseClient();
+  const { data, error } = await client.storage.from(hsExportsBucket).download(storagePath);
+  if (error) throw error;
+  if (!data) throw new Error("Empty response downloading creators export");
+  return await data.text();
+}
+
+/**
+ * Uploads a fresh all-creators CSV under a timestamped object path and
+ * returns where it landed. We never overwrite existing exports so the
+ * `hs_exports` table doubles as an audit log.
+ */
+export async function uploadCreatorsExport(csv: string): Promise<{ storagePath: string }> {
+  const client = createSupabaseClient();
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const storagePath = `all-creators/all-creators-${stamp}.csv`;
+
+  const blob = new Blob([csv], { type: "text/csv" });
+  const { error } = await client.storage.from(hsExportsBucket).upload(storagePath, blob, {
+    cacheControl: "3600",
+    upsert: false,
+    contentType: "text/csv",
+  });
+  if (error) throw error;
+  return { storagePath };
+}
+
+/** Insert a pointer row in `hs_exports` for an export we just uploaded. */
+export async function recordCreatorsExport(
+  storagePath: string,
+  rowCount: number,
+  appVersion?: string,
+): Promise<void> {
+  const client = createSupabaseClient();
+  const { error } = await client.from("hs_exports").insert({
+    kind: HS_EXPORT_KIND_ALL_CREATORS,
+    storage_path: storagePath,
+    row_count: rowCount,
+    app_version: appVersion ?? null,
+  });
+  if (error) throw error;
+}
+

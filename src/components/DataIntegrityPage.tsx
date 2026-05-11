@@ -324,7 +324,11 @@ function CheckCard<T extends { id: string }>({
                 />
               </Button>
             </div>
-            {BulkActions && !loading && !hasErr && countTotal > 0 && sections.length > 0 && (
+            {/* BulkActions render whenever the check is loaded — individual
+                checks early-return null when they have nothing to offer. This
+                lets checks (e.g. `creator-urls`) expose actions even when
+                there are zero issues. */}
+            {BulkActions && !loading && !hasErr && (
               <BulkActions
                 sections={sections as unknown as IntegritySection<T>[]}
                 token={token}

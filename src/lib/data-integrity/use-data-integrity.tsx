@@ -154,7 +154,7 @@ export function IntegrityProvider({
 
       setCheckLoading((l) => ({ ...l, [id]: true }));
       try {
-        const counts = await check.fetchCount(token);
+        const counts = await check.fetchCount(token, { force });
         setCheckData((prev) => ({
           ...prev,
           [id]: {
@@ -315,6 +315,23 @@ export function IntegrityProvider({
       checkFetchSyncQueueRef.current = [];
     }
   }, [token, loadAll]);
+
+  // Allow individual checks (currently `creator-urls`) to ask for an
+  // immediate reload after they finish a side-effect (e.g. a forced HubSpot
+  // CSV re-export). Decoupled via a CustomEvent so the check file doesn't
+  // need to import the provider hook.
+  useEffect(() => {
+    function onRefreshRequested(e: Event) {
+      const checkId = (e as CustomEvent<string>).detail || "creator-urls";
+      const check = INTEGRITY_CHECKS.find((c) => c.id === checkId);
+      if (!check) return;
+      void loadCheckCount(check, true).then(() => loadCheck(check, true));
+    }
+    window.addEventListener("creator-urls:refresh-requested", onRefreshRequested);
+    return () => {
+      window.removeEventListener("creator-urls:refresh-requested", onRefreshRequested);
+    };
+  }, [loadCheck, loadCheckCount]);
 
   const summary = useMemo((): IntegritySummary => {
     let c = 0;

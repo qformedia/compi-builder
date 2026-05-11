@@ -27,6 +27,11 @@ import { ArrangeTab, decodeEditingNotes } from "@/components/ArrangeTab";
 import { GeneralSearchTab } from "@/components/GeneralSearchTab";
 import { DataIntegrityPage } from "@/components/DataIntegrityPage";
 import { IntegrityProvider, useIntegrity } from "@/lib/data-integrity/use-data-integrity";
+import {
+  describeCreatorExportProgress,
+  isCreatorExportInProgress,
+  useCreatorExportProgress,
+} from "@/lib/creator-export";
 import { TagClipsTab } from "@/components/TagClipsTab";
 import { TagPicker } from "@/components/TagPicker";
 import { ClipTagEditorRow } from "@/components/ClipTagEditorRow";
@@ -102,6 +107,33 @@ function IntegrityAlertBanner({ onNavigate }: { onNavigate: () => void }) {
   const c = summary.critical;
   const w = summary.warning;
   const firstError = errors[0];
+  const exportProgress = useCreatorExportProgress();
+  const exportBusy = isCreatorExportInProgress(exportProgress);
+  const exportMessage = describeCreatorExportProgress(exportProgress);
+
+  // While the creators export is still being prepared the integrity check has
+  // not had a chance to finish — surface that in plain language so the user
+  // doesn't see a confusing "Couldn't check data integrity" flash. Progress
+  // takes precedence over an error from the same check.
+  if (exportBusy && exportMessage) {
+    return (
+      <button
+        type="button"
+        onClick={onNavigate}
+        className="flex w-full cursor-pointer items-center justify-between gap-3 border-b bg-gradient-to-r from-sky-500 to-indigo-500 px-4 py-2 text-left text-sm font-medium text-white"
+      >
+        <span className="flex min-w-0 items-center gap-2">
+          <Loader2 className="h-4 w-4 flex-shrink-0 animate-spin" />
+          <span className="min-w-0 truncate">{exportMessage}</span>
+        </span>
+        <span className="flex shrink-0 items-center gap-0.5 text-xs font-bold text-white/95">
+          Details
+          <ArrowRight className="h-3.5 w-3.5" />
+        </span>
+      </button>
+    );
+  }
+
   if (firstError) {
     const text =
       firstError.kind === "rateLimit"

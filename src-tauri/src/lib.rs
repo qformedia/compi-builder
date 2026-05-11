@@ -5641,6 +5641,385 @@ async fn search_latest_clips_by_platform(
         .map_err(|e| format!("Failed to parse search response: {e}"))
 }
 
+// ── HubSpot async CSV exports (Data Integrity / Creator profile URLs) ──────
+//
+// HubSpot's `/crm/v3/exports/export/async` endpoint asynchronously generates
+// the same kind of CSV available from the UI "Export" button. We use it to
+// produce the all-creators CSV that backs the "Creator profile URLs" check.
+// CORS prevents calling it straight from the webview, so we proxy through
+// Rust like the other HubSpot calls.
+
+/// Internal property names included in the all-creators export. Mirrors the
+/// 56-column reference CSV the Quantastic ops team uses, so any downstream
+/// tooling that reads it stays compatible.
+const ALL_CREATORS_EXPORT_PROPERTIES: &[&str] = &[
+    "hs_object_id",
+    "name",
+    "main_link",
+    "status",
+    "category",
+    "tags",
+    "hubspot_owner_id",
+    "license_type",
+    "license_checked",
+    "main_account",
+    "tiktok",
+    "instagram",
+    "notes",
+    "keep_up_1",
+    "keep_up_2",
+    "keep_up_3",
+    "date_found",
+    "hs_createdate",
+    "date_initial_contact",
+    "youtube",
+    "facebook",
+    "secondary_instagram",
+    "secondary_tiktok",
+    "twitter",
+    "web",
+    "other_links",
+    "from_china",
+    "bilibili",
+    "douyin",
+    "ixigua",
+    "kuaishou",
+    "weibo",
+    "wechat",
+    "xiaohongshu",
+    "hs_lastmodifieddate",
+    "video_types_could_do",
+    "discarded",
+    "old_crm_id",
+    "created_by_in_old_crm",
+    "hs_created_by_user_id",
+    "num_of_public_video_projects",
+    "num_of_social_interactions",
+    "num_of_external_clips",
+    "num_of_video_projects",
+    "num_of_contacts",
+    "num_of_send_link_actions",
+];
+
+/// Kick off an asynchronous CSV export of every Creator record in HubSpot.
+/// Returns the task ID HubSpot assigns; poll it with `hubspot_export_status`.
+#[tauri::command]
+async fn hubspot_export_all_creators_start(token: String) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(60))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let body = serde_json::json!({
+        "exportType": "VIEW",
+        "format": "CSV",
+        "exportName": format!("compiflow-all-creators-{}", Utc::now().format("%Y%m%dT%H%M%SZ")),
+        "objectType": CREATORS_OBJECT_ID,
+        "objectProperties": ALL_CREATORS_EXPORT_PROPERTIES,
+        "associatedObjectType": ["CONTACT", EXTERNAL_CLIPS_OBJECT_ID, VIDEO_PROJECTS_OBJECT_ID],
+        "language": "EN",
+    });
+
+    let res = client
+        .post("https://api.hubapi.com/crm/v3/exports/export/async")
+        .header("Authorization", format!("Bearer {}", token))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Export start failed: {e}"))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("HubSpot export start error ({}): {}", status, text));
+    }
+
+    let parsed: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse export start response: {e}"))?;
+
+    let id = parsed
+        .get("id")
+        .and_then(|v| v.as_str().map(|s| s.to_string()).or_else(|| v.as_i64().map(|n| n.to_string())))
+        .ok_or_else(|| format!("Export start response missing id: {}", parsed))?;
+
+    Ok(id)
+}
+
+#[derive(Serialize)]
+pub struct HubspotExportStatus {
+    pub status: String,
+    #[serde(rename = "downloadUrl", skip_serializing_if = "Option::is_none")]
+    pub download_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// Poll an export task. Status is one of HubSpot's: `PROCESSING`, `PENDING`,
+/// `COMPLETE`, `CANCELED`, `FAILED`. When `COMPLETE` the download URL is the
+/// signed link to the generated CSV (no Authorization needed).
+#[tauri::command]
+async fn hubspot_export_all_creators_status(
+    token: String,
+    task_id: String,
+) -> Result<HubspotExportStatus, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let url = format!(
+        "https://api.hubapi.com/crm/v3/exports/export/async/tasks/{}/status",
+        task_id
+    );
+
+    let res = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", token))
+        .send()
+        .await
+        .map_err(|e| format!("Export status failed: {e}"))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("HubSpot export status error ({}): {}", status, text));
+    }
+
+    let parsed: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse export status response: {e}"))?;
+
+    let status = parsed
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("UNKNOWN")
+        .to_string();
+
+    let download_url = parsed
+        .get("result")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    let message = parsed
+        .get("message")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    Ok(HubspotExportStatus {
+        status,
+        download_url,
+        message,
+    })
+}
+
+/// Download the CSV body from a HubSpot-signed export URL. The URL itself
+/// already encodes authorization so no headers are required.
+///
+/// HubSpot's async Export API actually returns a ZIP archive containing the
+/// CSV (despite `format: "CSV"`), so we sniff for the ZIP magic bytes
+/// (`PK\x03\x04`) and extract the first CSV-looking entry. If it's not a
+/// ZIP we treat the body as a raw UTF-8 CSV (defensive — in case HubSpot
+/// changes the contract in the future).
+#[tauri::command]
+async fn hubspot_export_download(url: String) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let res = client
+        .get(&url)
+        // reqwest is built without the gzip feature, so we ask S3 not to
+        // compress the body. Otherwise we'd get raw gzip bytes back and the
+        // frontend CSV parser would fail with a cryptic header mismatch.
+        .header("Accept-Encoding", "identity")
+        .send()
+        .await
+        .map_err(|e| format!("Export download failed: {e}"))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("Export download error ({}): {}", status, text));
+    }
+
+    let bytes = res
+        .bytes()
+        .await
+        .map_err(|e| format!("Export download body failed: {e}"))?;
+
+    let bytes_vec = bytes.to_vec();
+    if bytes_vec.len() >= 4 && &bytes_vec[0..4] == b"PK\x03\x04" {
+        extract_csv_from_zip(&bytes_vec)
+    } else {
+        // Fallback: treat as raw CSV. Use lossy decode so we never throw away
+        // bytes that the downstream parser could still use to produce a
+        // helpful error.
+        Ok(String::from_utf8(bytes_vec.clone())
+            .unwrap_or_else(|_| String::from_utf8_lossy(&bytes_vec).into_owned()))
+    }
+}
+
+/// Pull the first CSV entry out of a HubSpot-style export ZIP. HubSpot
+/// usually puts a single `<export-name>.csv` at the root; we tolerate
+/// metadata sidecars by skipping non-CSV entries.
+fn extract_csv_from_zip(bytes: &[u8]) -> Result<String, String> {
+    use std::io::Read;
+    let reader = std::io::Cursor::new(bytes);
+    let mut archive = zip::ZipArchive::new(reader)
+        .map_err(|e| format!("Export ZIP is not readable: {e}"))?;
+
+    let mut first_csv: Option<usize> = None;
+    let mut first_any: Option<usize> = None;
+    for i in 0..archive.len() {
+        let file = archive
+            .by_index(i)
+            .map_err(|e| format!("Failed to read ZIP entry {i}: {e}"))?;
+        if file.is_dir() {
+            continue;
+        }
+        let name = file.name().to_string();
+        if first_any.is_none() {
+            first_any = Some(i);
+        }
+        if name.to_lowercase().ends_with(".csv") {
+            first_csv = Some(i);
+            break;
+        }
+    }
+
+    let target_idx = first_csv.or(first_any).ok_or_else(|| {
+        "HubSpot export ZIP was empty (no files inside)".to_string()
+    })?;
+    let mut entry = archive
+        .by_index(target_idx)
+        .map_err(|e| format!("Failed to open ZIP entry: {e}"))?;
+    let mut buf = Vec::with_capacity(entry.size() as usize);
+    entry
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("Failed to read CSV from ZIP: {e}"))?;
+
+    Ok(String::from_utf8(buf.clone())
+        .unwrap_or_else(|_| String::from_utf8_lossy(&buf).into_owned()))
+}
+
+#[derive(Serialize)]
+pub struct CachedCreatorsExport {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub csv: Option<String>,
+    #[serde(rename = "generatedAt", skip_serializing_if = "Option::is_none")]
+    pub generated_at: Option<String>,
+    #[serde(rename = "storagePath", skip_serializing_if = "Option::is_none")]
+    pub storage_path: Option<String>,
+}
+
+fn creators_cache_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    use tauri::Manager;
+    let base = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| format!("Failed to resolve app data dir: {e}"))?;
+    Ok(base.join("hs-exports"))
+}
+
+fn creators_cache_csv_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(creators_cache_dir(app)?.join("all-creators.csv"))
+}
+
+fn creators_cache_meta_path(app: &AppHandle) -> Result<PathBuf, String> {
+    Ok(creators_cache_dir(app)?.join("all-creators.meta.json"))
+}
+
+/// Read the cached all-creators CSV from `<app_data>/hs-exports/`, returning
+/// the body plus the timestamp we wrote alongside it. Missing files yield
+/// `Ok(None)`-shaped fields rather than errors so the caller can fall back
+/// to Supabase.
+#[tauri::command]
+fn read_local_creators_export(app: AppHandle) -> Result<CachedCreatorsExport, String> {
+    let csv_path = creators_cache_csv_path(&app)?;
+    let meta_path = creators_cache_meta_path(&app)?;
+
+    if !csv_path.exists() {
+        return Ok(CachedCreatorsExport {
+            csv: None,
+            generated_at: None,
+            storage_path: None,
+        });
+    }
+
+    let csv = fs::read_to_string(&csv_path)
+        .map_err(|e| format!("Failed to read cached creators export: {e}"))?;
+
+    let (generated_at, storage_path) = if meta_path.exists() {
+        let raw = fs::read_to_string(&meta_path)
+            .map_err(|e| format!("Failed to read creators export metadata: {e}"))?;
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
+        (
+            parsed
+                .get("generatedAt")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            parsed
+                .get("storagePath")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+        )
+    } else {
+        (None, None)
+    };
+
+    Ok(CachedCreatorsExport {
+        csv: Some(csv),
+        generated_at,
+        storage_path,
+    })
+}
+
+/// Remove the cached all-creators CSV (and its metadata sidecar) so the
+/// next `read_local_creators_export` call falls back to Supabase/HubSpot.
+/// Used by the integrity check when parsing the cached CSV failed and we
+/// don't want subsequent app starts to keep hitting the same bad file.
+#[tauri::command]
+fn clear_local_creators_export(app: AppHandle) -> Result<(), String> {
+    let csv_path = creators_cache_csv_path(&app)?;
+    let meta_path = creators_cache_meta_path(&app)?;
+    let _ = fs::remove_file(&csv_path);
+    let _ = fs::remove_file(&meta_path);
+    Ok(())
+}
+
+/// Persist a freshly-fetched all-creators CSV plus its timestamp/source
+/// pointer so subsequent app starts can short-circuit the network round-trip.
+#[tauri::command]
+fn write_local_creators_export(
+    app: AppHandle,
+    csv: String,
+    generated_at: String,
+    storage_path: Option<String>,
+) -> Result<(), String> {
+    let dir = creators_cache_dir(&app)?;
+    fs::create_dir_all(&dir)
+        .map_err(|e| format!("Failed to create creators export cache dir: {e}"))?;
+
+    let csv_path = dir.join("all-creators.csv");
+    let meta_path = dir.join("all-creators.meta.json");
+
+    fs::write(&csv_path, csv).map_err(|e| format!("Failed to write cached CSV: {e}"))?;
+
+    let meta = serde_json::json!({
+        "generatedAt": generated_at,
+        "storagePath": storage_path,
+    });
+    fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap_or_default())
+        .map_err(|e| format!("Failed to write cache metadata: {e}"))?;
+
+    Ok(())
+}
+
 /// Save arbitrary text content to a file via native save dialog
 #[tauri::command]
 async fn save_text_file(
@@ -5841,6 +6220,12 @@ pub fn run() {
             update_creator_properties,
             search_latest_clips_by_platform,
             save_text_file,
+            hubspot_export_all_creators_start,
+            hubspot_export_all_creators_status,
+            hubspot_export_download,
+            read_local_creators_export,
+            write_local_creators_export,
+            clear_local_creators_export,
             download_log::get_download_log,
             download_log::clear_download_log,
             download_log::log_event,
