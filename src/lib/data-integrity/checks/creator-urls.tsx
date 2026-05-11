@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { AlertTriangle, ExternalLink, RefreshCw } from "lucide-react";
+import { AlertTriangle, ExternalLink, Loader2, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -14,9 +14,11 @@ import {
 import { cn } from "@/lib/utils";
 import {
   clearLocalCreatorsExport,
+  describeCreatorExportProgress,
   ensureCreatorsExport,
   isCreatorExportStale,
   subscribeCreatorExportProgress,
+  useCreatorExportProgress,
   type CreatorExportProgress,
   type CreatorExportResult,
 } from "@/lib/creator-export";
@@ -199,6 +201,18 @@ function CreatorUrlRow({
   );
 }
 
+function CreatorUrlsStatusLine() {
+  const progress = useCreatorExportProgress();
+  const message = describeCreatorExportProgress(progress);
+  if (!message) return null;
+  return (
+    <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+      <Loader2 className="h-3 w-3 flex-shrink-0 animate-spin" />
+      <span className="min-w-0 truncate">{message}</span>
+    </div>
+  );
+}
+
 function CreatorUrlsBulkActions({ token }: { token: string }) {
   const [progress, setProgress] = useState<CreatorExportProgress>({ phase: "idle" });
   const [refreshing, setRefreshing] = useState(false);
@@ -235,7 +249,6 @@ function CreatorUrlsBulkActions({ token }: { token: string }) {
   };
 
   const ageLabel = generatedAt ? `Last export: ${formatAge(generatedAt)}` : "No cached export";
-  const phaseMessage = progress.message;
   const isBusy =
     refreshing ||
     [
@@ -251,11 +264,6 @@ function CreatorUrlsBulkActions({ token }: { token: string }) {
     <>
       <div className="flex flex-col items-end gap-1">
         <span className="text-[11px] text-muted-foreground">{ageLabel}</span>
-        {isBusy && phaseMessage && (
-          <span className="max-w-[260px] truncate text-[11px] text-muted-foreground">
-            {phaseMessage}
-          </span>
-        )}
         <Button
           type="button"
           variant="outline"
@@ -314,4 +322,5 @@ export const creatorUrlsCheck: IntegrityCheck<CreatorUrlIssue> = {
   fetch: fetchCreatorUrlsSections,
   Row: CreatorUrlRow,
   BulkActions: CreatorUrlsBulkActions,
+  StatusLine: CreatorUrlsStatusLine,
 };

@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { ChevronDown, CheckCircle2, AlertTriangle, RefreshCw, ShieldAlert } from "lucide-react";
+import { ChevronDown, CheckCircle2, AlertTriangle, Loader2, RefreshCw, ShieldAlert } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -294,6 +294,9 @@ function CheckCard<T extends { id: string }>({
             {check.description}
           </CardDescription>
         )}
+        {check.StatusLine && (
+          <check.StatusLine token={token} settings={settings} />
+        )}
         <CardAction>
           <div className="flex flex-col items-end gap-1">
             <div className="flex items-center gap-0.5">
@@ -343,11 +346,16 @@ function CheckCard<T extends { id: string }>({
       {open && (
         <CardContent className="space-y-0 p-0">
           {loading && (
-            <div className="space-y-1.5 px-4 py-3">
-              {[0, 1, 2].map((i) => (
-                <div key={i} className="h-12 animate-pulse rounded-md bg-muted/60" />
-              ))}
-            </div>
+            <>
+              {check.StatusLine && (
+                <check.StatusLine token={token} settings={settings} />
+              )}
+              <div className="space-y-1.5 px-4 py-3">
+                {[0, 1, 2].map((i) => (
+                  <div key={i} className="h-12 animate-pulse rounded-md bg-muted/60" />
+                ))}
+              </div>
+            </>
           )}
 
           {!loading && hasErr && (

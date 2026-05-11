@@ -67,4 +67,6 @@ export interface IntegrityCheck<TItem extends { id: string }> {
     settings: AppSettings;
     onFixed: (id: string, summary?: string) => void;
   }>;
+  /** Always-visible status line rendered in the card header (even while loading or collapsed). Returns null when idle. */
+  StatusLine?: ComponentType<{ token: string; settings: AppSettings }>;
 }
