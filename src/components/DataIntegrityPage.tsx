@@ -59,10 +59,10 @@ export function DataIntegrityPage({ isActive, settings }: Props) {
     lastRun,
     refreshAllLoading,
     summary,
-    loadCheck,
     loadMoreCheck,
     ensureFullLoaded,
     loadAll,
+    refreshCheck,
     syncVersion,
     consumeCheckFetchSyncBatch,
   } = useIntegrity();
@@ -169,7 +169,7 @@ export function DataIntegrityPage({ isActive, settings }: Props) {
                 setCardOpen((c) => ({ ...c, [check.id]: c[check.id] === false ? true : false }))
               }
               onRefresh={() => {
-                void loadCheck(check, true);
+                void refreshCheck(check);
               }}
               onLoadMore={() => {
                 void loadMoreCheck(check);

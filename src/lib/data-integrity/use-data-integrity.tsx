@@ -60,6 +60,7 @@ type IntegrityContextValue = {
   loadMoreCheck: (check: (typeof INTEGRITY_CHECKS)[number]) => Promise<void>;
   ensureFullLoaded: (check: (typeof INTEGRITY_CHECKS)[number], resetSectionKeys: boolean) => Promise<void>;
   loadAll: (options?: { resetSectionKeys?: boolean; force?: boolean }) => Promise<void>;
+  refreshCheck: (check: (typeof INTEGRITY_CHECKS)[number]) => Promise<void>;
   /** Incremented when one or more checks finish successfully; read batch then. */
   syncVersion: number;
   consumeCheckFetchSyncBatch: () => CheckFetchUiSync[];
@@ -304,6 +305,14 @@ export function IntegrityProvider({
     [token, loadCheckCount],
   );
 
+  const refreshCheck = useCallback(
+    async (check: (typeof INTEGRITY_CHECKS)[number]) => {
+      await loadCheckCount(check, true);
+      await loadCheck(check, true);
+    },
+    [loadCheck, loadCheckCount],
+  );
+
   useEffect(() => {
     if (token) {
       void loadAll();
@@ -381,6 +390,7 @@ export function IntegrityProvider({
       loadMoreCheck,
       ensureFullLoaded,
       loadAll,
+      refreshCheck,
       syncVersion,
       consumeCheckFetchSyncBatch,
     }),
@@ -397,6 +407,7 @@ export function IntegrityProvider({
       loadMoreCheck,
       ensureFullLoaded,
       loadAll,
+      refreshCheck,
       syncVersion,
       consumeCheckFetchSyncBatch,
     ],

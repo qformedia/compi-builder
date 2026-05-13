@@ -30,12 +30,33 @@ interface ClipMissingTagsItem extends Clip {
   suggestedTags: string[];
 }
 
+/**
+ * HubSpot's search API is eventually consistent — it can take tens of seconds
+ * before a PATCH that sets `tags` is reflected in the NOT_HAS_PROPERTY filter.
+ * We remember locally-fixed clip IDs so the next refresh filters them out
+ * immediately instead of resurrecting them from the stale index.
+ */
+const RECENTLY_FIXED_TTL_MS = 90_000;
+const recentlyFixedClipIds = new Map<string, number>();
+
+function rememberFixedClip(id: string) {
+  recentlyFixedClipIds.set(id, Date.now());
+}
+
+function pruneFixedClips() {
+  const now = Date.now();
+  for (const [id, at] of recentlyFixedClipIds) {
+    if (now - at > RECENTLY_FIXED_TTL_MS) recentlyFixedClipIds.delete(id);
+  }
+}
+
 async function applyTagsToClip(token: string, clipId: string, tags: string[]): Promise<void> {
   await invoke("update_clip_properties", {
     token,
     clipId,
     properties: { tags: tags.join(";") },
   });
+  rememberFixedClip(clipId);
 }
 
 function ClipsMissingTagsRow({
@@ -67,6 +88,7 @@ function ClipsMissingTagsRow({
           token={token}
           suggestedTags={clip.suggestedTags}
           onApplied={(_values, summary) => {
+            rememberFixedClip(clip.id);
             setAppliedSummary(summary);
             onFixed(clip.id, summary);
           }}
@@ -151,13 +173,19 @@ async function fetchClipsMissingTagsInPublishedSections(
   after?: string,
 ): Promise<IntegritySectionPage<ClipMissingTagsItem>> {
   const page = await fetchClipsMissingTagsInPublished(token, after);
-  const clipIds = page.clips.map((clip) => clip.id);
+
+  pruneFixedClips();
+  const filteredClips = page.clips.filter(
+    (clip) => !recentlyFixedClipIds.has(clip.id) && clip.tags.length === 0,
+  );
+
+  const clipIds = filteredClips.map((clip) => clip.id);
   const [vpTagsByClip, tagOptions] = await Promise.all([
     fetchClipVpTagsBatch(token, clipIds),
     fetchTagOptions(token),
   ]);
 
-  const enriched = page.clips.map<ClipMissingTagsItem>((clip) => {
+  const enriched = filteredClips.map<ClipMissingTagsItem>((clip) => {
     const vpTags = vpTagsByClip.get(clip.id) ?? [];
     const suggestedSet = new Set<string>();
     for (const vp of vpTags) {
@@ -191,14 +219,16 @@ async function fetchClipsMissingTagsInPublishedSections(
 }
 
 async function fetchClipsMissingTagsInPublishedCounts(token: string): Promise<IntegritySectionCount[]> {
+  pruneFixedClips();
   const counts = await countClipsMissingTagsInPublished(token);
+  const total = Math.max(0, counts.total - recentlyFixedClipIds.size);
   return [
     {
       id: "all",
       title: "",
       severity: "warning" as Severity,
       defaultOpen: true,
-      total: counts.total,
+      total,
     },
   ];
 }
