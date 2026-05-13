@@ -5731,7 +5731,8 @@ async fn hubspot_create_creator_record(
     Ok(serde_json::json!({ "id": id, "name": name }))
 }
 
-/// Pre-flight for duplicates, then create. Non-IG/TT uses `main_link`.
+/// Pre-flight for duplicates, then create. Sets the platform-specific URL
+/// column so HubSpot can compute the calculated `main_link` itself.
 #[tauri::command]
 async fn create_creator_from_enrichment(
     token: String,
@@ -5819,17 +5820,18 @@ async fn create_creator_from_enrichment(
         .unwrap_or_else(|| handle.to_string());
     let plat = profile.platform.to_lowercase();
     let main_account = hubspot_main_account_label(&plat);
+    let url_property = helpers::hubspot_creator_url_property(&plat).ok_or_else(|| {
+        format!(
+            "Cannot create Creator: no HubSpot URL column mapped for platform `{plat}`. Pick the creator manually instead."
+        )
+    })?;
 
-    let mut props = serde_json::json!({
+    let props = serde_json::json!({
         "name": name,
         "main_account": main_account,
         "status": "To Contact",
-        "main_link": profile.profile_url,
+        url_property: profile.profile_url,
     });
-    // For IG/TT also write the dedicated platform field — that's how `create_creator` does it.
-    if plat == "instagram" || plat == "tiktok" {
-        props[plat.as_str()] = serde_json::Value::String(profile.profile_url.clone());
-    }
 
     hubspot_create_creator_record(&token, props).await
 }

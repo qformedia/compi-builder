@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { CreatorSuggestionPanel } from "@/components/CreatorSuggestionPanel";
+import { useCreatorSuggestion } from "@/components/CreatorSuggestionPanel";
 import { setActivePreview } from "@/lib/data-integrity/clip-preview-store";
 import { countClipsMissingCreator, fetchClipsMissingCreator } from "@/lib/hubspot";
 import type { AppSettings, Clip } from "@/types";
@@ -17,8 +17,6 @@ function ClipsMissingCreatorRow({
   settings: AppSettings;
   onFixed: (id: string, summary?: string) => void;
 }) {
-  // Tracks success purely for the row's green tint — `CreatorSuggestionPanel`
-  // owns its own "Fixed → name" badge once linked.
   const [linked, setLinked] = useState(false);
   const onLinked = useCallback(
     (name: string) => {
@@ -28,20 +26,21 @@ function ClipsMissingCreatorRow({
     [clip.id, onFixed],
   );
 
+  const { trigger, panel } = useCreatorSuggestion({
+    clip,
+    token,
+    settings,
+    onLinked,
+    onSuggestStart: () => setActivePreview(clip),
+  });
+
   return (
     <ClipIntegrityRow
       clip={clip}
       settings={settings}
       linked={linked}
-      rightActions={(
-        <CreatorSuggestionPanel
-          clip={clip}
-          token={token}
-          settings={settings}
-          onLinked={onLinked}
-          onSuggestStart={() => setActivePreview(clip)}
-        />
-      )}
+      rightActions={trigger}
+      expandedPanel={panel}
     />
   );
 }

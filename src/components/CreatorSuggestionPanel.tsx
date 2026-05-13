@@ -1,7 +1,7 @@
-import { useCallback, useState } from "react";
+import { type ReactNode, useCallback, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { ExternalLink, Loader2, RefreshCw, Sparkles } from "lucide-react";
+import { AlertTriangle, ExternalLink, Loader2, RefreshCw, Sparkles, UserPlus, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { CreatorPicker } from "@/components/CreatorPicker";
@@ -82,7 +82,11 @@ function canLiveResolve(url: string): boolean {
   return LIVE_RESOLVABLE_PLATFORMS.has(getPlatform(url).toLowerCase());
 }
 
-interface Props {
+// ---------------------------------------------------------------------------
+// Hook
+// ---------------------------------------------------------------------------
+
+interface UseCreatorSuggestionArgs {
   clip: Clip;
   token: string;
   settings: AppSettings;
@@ -90,18 +94,30 @@ interface Props {
   onSuggestStart?: () => void;
 }
 
-export function CreatorSuggestionPanel({
+export interface CreatorSuggestionUI {
+  kind: PanelState["kind"];
+  /** Compact element for the right-actions column of the integrity row. */
+  trigger: ReactNode;
+  /** Full-width element rendered below the row. `null` when compact is enough. */
+  panel: ReactNode | null;
+}
+
+/**
+ * Owns the creator suggestion state machine and returns split UI elements
+ * (`trigger` for the compact right column, `panel` for the full-width
+ * expanded section below the row).
+ */
+export function useCreatorSuggestion({
   clip,
   token,
   settings,
   onLinked,
   onSuggestStart,
-}: Props) {
+}: UseCreatorSuggestionArgs): CreatorSuggestionUI {
   const [st, setSt] = useState<PanelState>({ kind: "idle" });
   const [busy, setBusy] = useState(false);
   const [actionErr, setActionErr] = useState<string | null>(null);
 
-  /** Pure side-effect: associate clip↔creator and transition into the "applied" state. */
   const finalizeLink = useCallback(
     async (creatorId: string, name: string) => {
       await invoke("associate_clip_to_creator", {
@@ -115,7 +131,6 @@ export function CreatorSuggestionPanel({
     [clip.id, onLinked, token],
   );
 
-  /** Wraps `finalizeLink` with the panel's busy/error UI for direct user actions. */
   const linkClipToCreator = useCallback(
     async (creatorId: string, name: string) => {
       setBusy(true);
@@ -133,8 +148,6 @@ export function CreatorSuggestionPanel({
 
   const runSuggest = useCallback(
     async (forceLive: boolean) => {
-      // Unsupported networks (Xiaohongshu, Bilibili, Douyin, Kuaishou, Pinterest)
-      // skip the live resolver entirely and drop straight into the HubSpot picker.
       if (!canLiveResolve(clip.link)) {
         setSt({ kind: "manual" });
         return;
@@ -197,199 +210,369 @@ export function CreatorSuggestionPanel({
     [linkClipToCreator],
   );
 
-  if (st.kind === "applied") {
-    return <IntegrityFixedPill label={`Fixed → ${st.name}`} />;
+  // ---- idle ---------------------------------------------------------------
+
+  if (st.kind === "idle") {
+    const liveResolvable = canLiveResolve(clip.link);
+    return {
+      kind: "idle" as const,
+      trigger: (
+        <div className="flex flex-col gap-1 sm:items-end">
+          <div className="flex flex-wrap justify-end gap-1">
+            {liveResolvable && (
+              <Button
+                type="button"
+                size="sm"
+                variant="secondary"
+                className="h-7 cursor-pointer gap-1 text-[10px]"
+                onClick={() => {
+                  onSuggestStart?.();
+                  void runSuggest(false);
+                }}
+              >
+                <Sparkles className="h-3 w-3" />
+                Suggest creator
+              </Button>
+            )}
+            <CreatorPicker
+              token={token}
+              value={null}
+              onChange={onManualPick}
+              emptyButtonLabel={liveResolvable ? "Pick manually…" : "Pick creator…"}
+            />
+          </div>
+        </div>
+      ),
+      panel: null,
+    };
   }
 
-  if (st.kind === "error") {
-    return (
-      <div className="flex w-full min-w-0 max-w-sm flex-col items-stretch gap-1.5">
-        <p className="text-[10px] leading-tight text-destructive">{st.message}</p>
-        <div className="flex flex-wrap gap-1">
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-7 cursor-pointer text-[11px]"
-            onClick={() => setSt({ kind: "idle" })}
-          >
-            Dismiss
-          </Button>
-        </div>
-        <CreatorPicker
-          token={token}
-          value={null}
-          onChange={onManualPick}
-          emptyButtonLabel="Pick creator…"
-        />
-      </div>
-    );
-  }
+  // ---- loading ------------------------------------------------------------
 
   if (st.kind === "loading") {
-    return (
-      <span className="inline-flex items-center gap-1.5 px-1 text-[11px] text-muted-foreground">
-        <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        Looking up author…
-      </span>
-    );
+    return {
+      kind: "loading" as const,
+      trigger: (
+        <span className="inline-flex items-center gap-1.5 px-1 text-[11px] text-muted-foreground">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          Looking up author…
+        </span>
+      ),
+      panel: null,
+    };
   }
+
+  // ---- applied ------------------------------------------------------------
+
+  if (st.kind === "applied") {
+    return {
+      kind: "applied" as const,
+      trigger: <IntegrityFixedPill label={`Fixed → ${st.name}`} />,
+      panel: null,
+    };
+  }
+
+  // ---- error --------------------------------------------------------------
+
+  if (st.kind === "error") {
+    return {
+      kind: "error" as const,
+      trigger: (
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-7 cursor-pointer text-[11px] text-muted-foreground"
+          onClick={() => setSt({ kind: "idle" })}
+        >
+          Dismiss
+        </Button>
+      ),
+      panel: (
+        <div className="relative flex w-full flex-col gap-3 rounded-lg border border-destructive/30 bg-destructive/5 p-4 shadow-sm">
+          <button
+            type="button"
+            onClick={() => setSt({ kind: "idle" })}
+            className="absolute right-2 top-2 flex h-6 w-6 cursor-pointer items-center justify-center rounded text-destructive/70 hover:bg-destructive/10 hover:text-destructive"
+            title="Dismiss"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+          <div className="flex items-start gap-2 pr-6">
+            <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-destructive" />
+            <div className="min-w-0 flex-1">
+              <p className="text-[12px] font-medium text-destructive">
+                Couldn't resolve creator automatically
+              </p>
+              <p className="mt-0.5 text-[11px] leading-relaxed text-destructive/80">
+                {st.message}
+              </p>
+            </div>
+          </div>
+          <div className="rounded-md border border-border bg-background p-2.5">
+            <p className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              Pick a creator manually
+            </p>
+            <CreatorPicker
+              token={token}
+              value={null}
+              onChange={onManualPick}
+              emptyButtonLabel="Search HubSpot creators…"
+            />
+          </div>
+        </div>
+      ),
+    };
+  }
+
+  // ---- resolved -----------------------------------------------------------
 
   if (st.kind === "resolved") {
     const p = st.profile;
     const hasStrong = st.matches.some((m) => STRONG_MATCHES.includes(m.confidence));
     const fromCache = p.source === "hubspot_cache" && p.cachedAt != null;
-    return (
-      <div className="flex w-full min-w-0 max-w-lg flex-col gap-2 rounded-md border border-border/80 bg-card/30 p-2.5 text-left">
-        <div className="flex min-w-0 items-start gap-2">
-          <ProfileAvatar
-            key={p.profileUrl}
-            src={p.avatar}
-            platform={platformDisplayFromKey(p.platform)}
-          />
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-1.5 text-[12px] font-medium">
-              <span>@{p.handle}</span>
-              {fromCache && (
-                <span className="inline-flex items-center gap-1 text-[10px] font-normal text-muted-foreground">
-                  <span className="rounded-full border border-border bg-muted/40 px-1.5 py-0.5">
-                    Cached · {daysSinceResolved(p.cachedAt)}d
-                  </span>
-                  <button
-                    type="button"
-                    title="Re-resolve live (bypasses cache)"
-                    onClick={() => {
-                      void runSuggest(true);
-                    }}
-                    className="inline-flex cursor-pointer rounded p-0.5 hover:bg-muted disabled:cursor-not-allowed disabled:opacity-50"
-                    disabled={busy}
-                  >
-                    <RefreshCw className="h-3.5 w-3.5" />
-                  </button>
-                </span>
-              )}
-            </div>
-            {p.displayName && (
-              <p className="text-[10px] text-muted-foreground">{p.displayName}</p>
-            )}
-            <a
-              href={p.profileUrl}
-              onClick={(e) => {
-                e.preventDefault();
-                void openUrl(p.profileUrl);
-              }}
-              className="mt-0.5 inline-flex items-center gap-0.5 text-[10px] text-sky-700 hover:underline"
-            >
-              Open profile <ExternalLink className="h-3 w-3" />
-            </a>
-          </div>
-        </div>
 
-        {st.matches.length > 0 && (
-          <ul className="space-y-1.5">
-            {st.matches.map((m) => (
-              <MatchRow
-                key={m.creatorId}
-                match={m}
-                disabled={busy}
-                onApply={() => linkClipToCreator(m.creatorId, m.name)}
-              />
-            ))}
-          </ul>
-        )}
-
-        {!hasStrong && (
-          <Button
-            type="button"
-            variant="secondary"
-            size="sm"
-            className="h-7 text-[10px] cursor-pointer"
-            disabled={busy}
-            onClick={() => {
-              void onCreateNew();
-            }}
-          >
-            Create new Creator
-          </Button>
-        )}
-
-        {actionErr && <p className="text-[10px] text-destructive">{actionErr}</p>}
-
-        <div className="border-t border-border/40 pt-1.5">
-          <button
-            type="button"
-            onClick={() => setSt({ kind: "manual" })}
-            className="text-[10px] text-muted-foreground hover:text-foreground hover:underline"
-          >
-            None of these — pick manually
-          </button>
-        </div>
-      </div>
-    );
-  }
-
-  if (st.kind === "manual") {
-    return (
-      <div className="flex w-full min-w-0 max-w-sm flex-col gap-1.5">
-        <CreatorPicker
-          token={token}
-          value={null}
-          onChange={onManualPick}
-          emptyButtonLabel="Pick creator…"
-        />
+    return {
+      kind: "resolved" as const,
+      trigger: (
         <button
           type="button"
           onClick={() => setSt({ kind: "idle" })}
-          className="self-start text-[10px] text-muted-foreground hover:underline"
+          className="flex h-7 w-7 cursor-pointer items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+          title="Cancel"
+        >
+          <X className="h-4 w-4" />
+        </button>
+      ),
+      panel: (
+        <div className="relative flex w-full flex-col gap-3 rounded-lg border border-border bg-background p-4 shadow-sm text-left">
+          <button
+            type="button"
+            onClick={() => setSt({ kind: "idle" })}
+            className="absolute right-2 top-2 flex h-6 w-6 cursor-pointer items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+            title="Cancel"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+          {/* Header: who did we find? */}
+          <div className="flex items-start gap-3 border-b border-border/60 pb-3 pr-6">
+            <ProfileAvatar
+              key={p.profileUrl}
+              src={p.avatar}
+              platform={platformDisplayFromKey(p.platform)}
+              sizeClass="h-12 w-12"
+              iconClass="h-6 w-6"
+            />
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-[14px] font-semibold text-foreground">
+                  @{p.handle}
+                </span>
+                {fromCache && (
+                  <span className="inline-flex items-center gap-1">
+                    <span className="rounded-full border border-border bg-muted/40 px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground">
+                      Cached · {daysSinceResolved(p.cachedAt)}d
+                    </span>
+                    <button
+                      type="button"
+                      title="Re-resolve live (bypasses cache)"
+                      onClick={() => {
+                        void runSuggest(true);
+                      }}
+                      className="inline-flex cursor-pointer items-center rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground disabled:cursor-not-allowed disabled:opacity-50"
+                      disabled={busy}
+                    >
+                      <RefreshCw className="h-3.5 w-3.5" />
+                    </button>
+                  </span>
+                )}
+              </div>
+              {p.displayName && (
+                <p className="mt-0.5 text-[12px] text-muted-foreground">{p.displayName}</p>
+              )}
+              <a
+                href={p.profileUrl}
+                onClick={(e) => {
+                  e.preventDefault();
+                  void openUrl(p.profileUrl);
+                }}
+                className="mt-1 inline-flex items-center gap-1 text-[11px] font-medium text-sky-700 hover:underline"
+              >
+                Open profile <ExternalLink className="h-3 w-3" />
+              </a>
+            </div>
+          </div>
+
+          {/* Matches */}
+          {st.matches.length > 0 ? (
+            <div className="flex flex-col gap-2">
+              <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">
+                {st.matches.length === 1
+                  ? "Suggested match"
+                  : `Suggested matches · ${st.matches.length}`}
+              </p>
+              <ul className="flex flex-col gap-1.5">
+                {st.matches.map((m) => (
+                  <MatchRow
+                    key={m.creatorId}
+                    match={m}
+                    disabled={busy}
+                    onApply={() => linkClipToCreator(m.creatorId, m.name)}
+                  />
+                ))}
+              </ul>
+            </div>
+          ) : (
+            <div className="rounded-md border border-dashed border-border bg-muted/30 px-3 py-2 text-[11px] text-muted-foreground">
+              No existing creator matches this handle.
+            </div>
+          )}
+
+          {actionErr && (
+            <p className="rounded-md border border-destructive/30 bg-destructive/5 px-2 py-1.5 text-[11px] text-destructive">
+              {actionErr}
+            </p>
+          )}
+
+          {/* Footer actions */}
+          <div className="flex flex-col gap-2 border-t border-border/60 pt-3 sm:flex-row sm:items-center sm:justify-between">
+            {!hasStrong ? (
+              <Button
+                type="button"
+                variant="default"
+                size="sm"
+                className="h-8 cursor-pointer gap-1.5 text-[11px]"
+                disabled={busy}
+                onClick={() => {
+                  void onCreateNew();
+                }}
+              >
+                <UserPlus className="h-3.5 w-3.5" />
+                Create new Creator from @{p.handle}
+              </Button>
+            ) : (
+              <span className="text-[11px] text-muted-foreground">
+                Apply one of the suggested matches above.
+              </span>
+            )}
+            <button
+              type="button"
+              onClick={() => setSt({ kind: "manual" })}
+              className="cursor-pointer text-[11px] font-medium text-muted-foreground hover:text-foreground hover:underline"
+            >
+              None of these — pick manually
+            </button>
+          </div>
+        </div>
+      ),
+    };
+  }
+
+  // ---- manual -------------------------------------------------------------
+
+  if (st.kind === "manual") {
+    return {
+      kind: "manual" as const,
+      trigger: (
+        <button
+          type="button"
+          onClick={() => setSt({ kind: "idle" })}
+          className="cursor-pointer text-[11px] font-medium text-muted-foreground hover:text-foreground hover:underline"
         >
           Back to Suggest
         </button>
-      </div>
-    );
+      ),
+      panel: (
+        <div className="relative flex w-full flex-col gap-2 rounded-lg border border-border bg-background p-4 shadow-sm">
+          <button
+            type="button"
+            onClick={() => setSt({ kind: "idle" })}
+            className="absolute right-2 top-2 flex h-6 w-6 cursor-pointer items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+            title="Back to Suggest"
+          >
+            <X className="h-3.5 w-3.5" />
+          </button>
+          <p className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground pr-6">
+            Pick a creator manually
+          </p>
+          <CreatorPicker
+            token={token}
+            value={null}
+            onChange={onManualPick}
+            emptyButtonLabel="Search HubSpot creators…"
+          />
+        </div>
+      ),
+    };
   }
 
-  const liveResolvable = canLiveResolve(clip.link);
+  // Exhaustiveness — all PanelState variants are handled above.
+  return { kind: "idle" as const, trigger: null, panel: null };
+}
 
+// ---------------------------------------------------------------------------
+// Backwards-compatible wrapper (renders trigger + panel inline)
+// ---------------------------------------------------------------------------
+
+interface Props {
+  clip: Clip;
+  token: string;
+  settings: AppSettings;
+  onLinked: (name: string) => void;
+  onSuggestStart?: () => void;
+}
+
+export function CreatorSuggestionPanel({
+  clip,
+  token,
+  settings,
+  onLinked,
+  onSuggestStart,
+}: Props) {
+  const { trigger, panel } = useCreatorSuggestion({
+    clip,
+    token,
+    settings,
+    onLinked,
+    onSuggestStart,
+  });
   return (
-    <div className="flex flex-col gap-1 sm:items-end">
-      <div className="flex flex-wrap justify-end gap-1">
-        {liveResolvable && (
-          <Button
-            type="button"
-            size="sm"
-            variant="secondary"
-            className="h-7 cursor-pointer gap-1 text-[10px]"
-            onClick={() => {
-              onSuggestStart?.();
-              void runSuggest(false);
-            }}
-          >
-            <Sparkles className="h-3 w-3" />
-            Suggest creator
-          </Button>
-        )}
-        <CreatorPicker
-          token={token}
-          value={null}
-          onChange={onManualPick}
-          emptyButtonLabel={liveResolvable ? "Pick manually…" : "Pick creator…"}
-        />
-      </div>
-    </div>
+    <>
+      {trigger}
+      {panel}
+    </>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Helper components
+// ---------------------------------------------------------------------------
 
 interface ProfileAvatarProps {
   src: string | undefined;
   platform: string;
+  /** Tailwind size classes for the container. Defaults to "h-10 w-10" (40px). */
+  sizeClass?: string;
+  /** Tailwind size classes for the platform fallback icon. */
+  iconClass?: string;
 }
 
 /** Square avatar with a platform-icon fallback when the URL is missing or fails to load. */
-function ProfileAvatar({ src, platform }: ProfileAvatarProps) {
+function ProfileAvatar({
+  src,
+  platform,
+  sizeClass = "h-10 w-10",
+  iconClass = "h-5 w-5",
+}: ProfileAvatarProps) {
   const [failed, setFailed] = useState(false);
   const showImg = !!src && !failed;
   return (
-    <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center overflow-hidden rounded border border-border/60 bg-muted">
+    <div
+      className={cn(
+        "flex flex-shrink-0 items-center justify-center overflow-hidden rounded-md border border-border/60 bg-muted",
+        sizeClass,
+      )}
+    >
       {showImg ? (
         <img
           src={src}
@@ -399,7 +582,7 @@ function ProfileAvatar({ src, platform }: ProfileAvatarProps) {
           onError={() => setFailed(true)}
         />
       ) : (
-        <PlatformIcon platform={platform} className="h-5 w-5 text-muted-foreground/70" />
+        <PlatformIcon platform={platform} className={cn("text-muted-foreground/70", iconClass)} />
       )}
     </div>
   );
@@ -467,11 +650,22 @@ function MatchRow({ match: m, disabled, onApply }: MatchRowProps) {
       : "Open Instagram on file — verify same person";
 
   return (
-    <li className="flex flex-col gap-0.5 rounded border border-border/50 bg-background/50 px-2 py-1.5 sm:flex-row sm:items-center sm:justify-between">
-      <div className="min-w-0 text-[10px]">
-        <p className="font-medium text-foreground">{m.name}</p>
+    <li className="flex flex-row items-center justify-between gap-3 rounded-md border border-border/60 bg-card px-3 py-2 transition-colors hover:border-border hover:bg-muted/30">
+      <div className="min-w-0 flex-1">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="text-[12px] font-semibold text-foreground">{m.name}</p>
+          <Badge
+            variant="outline"
+            className={cn(
+              "h-auto whitespace-normal text-left text-[10px] font-medium leading-tight",
+              CONF_BADGE[m.confidence] ?? CONF_BADGE.low,
+            )}
+          >
+            {(CONF_LABEL[m.confidence] ?? m.confidence)}: {m.reason}
+          </Badge>
+        </div>
         {links.length > 0 && (
-          <ul className="mt-0.5 flex flex-col gap-0.5">
+          <ul className="mt-1 flex flex-col gap-0.5 text-[10px]">
             {links.map((l) => (
               <li key={l.url} className="min-w-0">
                 <SocialLinkChip url={l.url} platform={l.platform} />
@@ -480,33 +674,24 @@ function MatchRow({ match: m, disabled, onApply }: MatchRowProps) {
           </ul>
         )}
         {crossLink && (
-          <p className="mt-0.5 text-amber-800">
+          <p className="mt-1 text-[10px] text-amber-800">
             <button
               type="button"
               onClick={() => {
                 void openUrl(crossLink);
               }}
-              className="underline"
+              className="cursor-pointer underline hover:text-amber-900"
             >
               {crossLabel}
             </button>
           </p>
         )}
-        <Badge
-          variant="outline"
-          className={cn(
-            "mt-1 h-4 text-[9px] font-medium",
-            CONF_BADGE[m.confidence] ?? CONF_BADGE.low,
-          )}
-        >
-          {(CONF_LABEL[m.confidence] ?? m.confidence)}: {m.reason}
-        </Badge>
       </div>
-      <div className="flex w-full shrink-0 items-stretch gap-1 sm:ml-2 sm:w-auto">
+      <div className="flex shrink-0 items-center gap-1">
         <Button
           type="button"
           size="sm"
-          className="h-7 flex-1 text-[10px] sm:w-[72px] sm:flex-none"
+          className="h-8 w-20 cursor-pointer text-[11px] font-medium"
           disabled={disabled}
           onClick={() => {
             void onApply();
@@ -518,7 +703,7 @@ function MatchRow({ match: m, disabled, onApply }: MatchRowProps) {
           type="button"
           size="icon"
           variant="ghost"
-          className="h-7 w-7 shrink-0 cursor-pointer"
+          className="h-8 w-8 shrink-0 cursor-pointer"
           title="Open creator in HubSpot"
           onClick={() => {
             void openUrl(hubspotCreatorUrl(m.creatorId));

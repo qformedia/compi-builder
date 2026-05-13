@@ -695,6 +695,29 @@ pub(crate) fn extract_hashtags(caption: &str) -> Option<String> {
 /// canonical list keeps the request payloads consistent and avoids a creator
 /// suddenly losing a column when a new feature consumes the same fetch.
 ///
+/// HubSpot Creator property name that stores the profile URL for the given
+/// platform key, or `None` if we don't have a dedicated column. The names
+/// mirror the team's Creator object schema in HubSpot — kept in sync with
+/// the dropdown options on the `main_account` property.
+///
+/// HubSpot computes `main_link` from these columns; never write `main_link`
+/// directly because it's a calculated property and the API will 400.
+pub(crate) fn hubspot_creator_url_property(platform_key: &str) -> Option<&'static str> {
+    match platform_key {
+        "instagram" => Some("instagram"),
+        "tiktok" => Some("tiktok"),
+        "youtube" => Some("youtube"),
+        "facebook" => Some("facebook"),
+        "twitter" | "x" => Some("x"),
+        "bilibili" => Some("bilibili"),
+        "douyin" => Some("douyin_id"),
+        "xiaohongshu" => Some("xiaohongshu_id"),
+        "kuaishou" => Some("kuaishou_id"),
+        "ixigua" => Some("ixigua"),
+        _ => None,
+    }
+}
+
 /// Keep this in sync with the side-by-side property labels in
 /// `src/lib/duplicates/diff.ts` — a property that's fetched here but missing
 /// from the labels registry will render with its raw HubSpot internal name.
@@ -1644,6 +1667,78 @@ mod tests {
                 window[0] != window[1],
                 "duplicate property `{}` in full_creator_properties",
                 window[0]
+            );
+        }
+    }
+
+    // ── hubspot_creator_url_property ─────────────────────────────────────
+
+    #[test]
+    fn hubspot_creator_url_property_known_platforms() {
+        // Live resolver paths — these MUST map or new creators 400 on
+        // `main_link` because nothing else feeds the calculated property.
+        assert_eq!(hubspot_creator_url_property("instagram"), Some("instagram"));
+        assert_eq!(hubspot_creator_url_property("tiktok"), Some("tiktok"));
+        assert_eq!(hubspot_creator_url_property("youtube"), Some("youtube"));
+    }
+
+    #[test]
+    fn hubspot_creator_url_property_extended_platforms() {
+        assert_eq!(hubspot_creator_url_property("facebook"), Some("facebook"));
+        assert_eq!(hubspot_creator_url_property("twitter"), Some("x"));
+        assert_eq!(hubspot_creator_url_property("x"), Some("x"));
+        assert_eq!(hubspot_creator_url_property("bilibili"), Some("bilibili"));
+        assert_eq!(hubspot_creator_url_property("douyin"), Some("douyin_id"));
+        assert_eq!(
+            hubspot_creator_url_property("xiaohongshu"),
+            Some("xiaohongshu_id")
+        );
+        assert_eq!(hubspot_creator_url_property("kuaishou"), Some("kuaishou_id"));
+        assert_eq!(hubspot_creator_url_property("ixigua"), Some("ixigua"));
+    }
+
+    #[test]
+    fn hubspot_creator_url_property_unknown_returns_none() {
+        // Pinterest isn't a `main_account` dropdown option and has no URL
+        // column on the Creator object — caller must surface this instead of
+        // silently creating a record without a profile link.
+        assert_eq!(hubspot_creator_url_property("pinterest"), None);
+        assert_eq!(hubspot_creator_url_property("other"), None);
+        assert_eq!(hubspot_creator_url_property(""), None);
+    }
+
+    #[test]
+    fn hubspot_creator_url_property_is_case_sensitive() {
+        // Callers always pass `platform.to_lowercase()`; document the
+        // contract so a future caller doesn't accidentally pass "Instagram".
+        assert_eq!(hubspot_creator_url_property("Instagram"), None);
+        assert_eq!(hubspot_creator_url_property("TIKTOK"), None);
+    }
+
+    #[test]
+    fn hubspot_creator_url_property_returns_real_column_names() {
+        // Every mapping must point at a column that exists in
+        // `full_creator_properties()`, otherwise the POST will succeed but
+        // the value lands on an unknown property and main_link stays empty.
+        let known: std::collections::HashSet<&&str> =
+            full_creator_properties().iter().collect();
+        for platform in [
+            "instagram",
+            "tiktok",
+            "youtube",
+            "facebook",
+            "twitter",
+            "bilibili",
+            "douyin",
+            "xiaohongshu",
+            "kuaishou",
+            "ixigua",
+        ] {
+            let prop = hubspot_creator_url_property(platform)
+                .unwrap_or_else(|| panic!("missing mapping for {platform}"));
+            assert!(
+                known.contains(&prop),
+                "platform {platform} maps to `{prop}` which is not in full_creator_properties()"
             );
         }
     }

@@ -13,7 +13,7 @@ import { hubspotClipUrl } from "@/lib/hubspot-urls";
 import type { AppSettings, Clip } from "@/types";
 import { cn } from "@/lib/utils";
 
-const PREVIEW_WIDTH_PX = 280;
+const PREVIEW_WIDTH_PX = 380;
 
 export function clipUrlParts(link: string): { host: string; shortPath: string } {
   try {
@@ -69,6 +69,7 @@ export function ClipIntegrityRow({
   settings,
   contexts,
   rightActions,
+  expandedPanel,
   linked = false,
 }: {
   clip: Clip;
@@ -80,6 +81,8 @@ export function ClipIntegrityRow({
    */
   contexts?: ReactNode[];
   rightActions?: ReactNode;
+  /** Full-width panel rendered below the row. Used for expanded suggestion UIs. */
+  expandedPanel?: ReactNode;
   linked?: boolean;
 }) {
   const platform = getPlatform(clip.link);
@@ -96,12 +99,13 @@ export function ClipIntegrityRow({
   return (
     <li
       className={cn(
-        "group flex min-h-[68px] flex-col divide-y divide-border/40 transition-colors hover:bg-muted/30 sm:flex-row sm:divide-x sm:divide-y-0",
+        "group flex flex-col divide-y divide-border/40 transition-colors hover:bg-muted/30",
         linked && "bg-emerald-50/40",
         isPreviewing && "bg-muted/30",
       )}
     >
-      <div className="flex min-w-0 flex-1 items-center gap-3 px-4 py-2.5">
+      <div className="flex min-h-[68px] flex-col divide-y divide-border/40 sm:flex-row sm:divide-x sm:divide-y-0">
+        <div className="flex min-w-0 flex-1 items-center gap-3 px-4 py-2.5">
         {isPreviewing ? (
           <div
             className="flex flex-shrink-0 flex-col gap-1.5"
@@ -212,11 +216,17 @@ export function ClipIntegrityRow({
         </div>
       ))}
 
-      {rightActions && (
+      {rightActions && !expandedPanel && (
         <div className="flex w-full flex-shrink-0 items-center justify-end bg-muted/5 px-2 py-2.5 sm:w-52">
           {rightActions}
         </div>
       )}
+      {expandedPanel && (
+        <div className="flex w-full min-w-0 flex-1 items-start bg-muted/30 px-3 py-2.5 sm:min-w-[420px]">
+          {expandedPanel}
+        </div>
+      )}
+      </div>
     </li>
   );
 }

@@ -930,8 +930,10 @@ export function getEmbedUrl(url: string): string | null {
 
     if (u.hostname.includes("instagram.com")) {
       const match = url.match(/\/(reel|reels|p)\/([^/?]+)/);
-      if (match)
-        return `https://www.instagram.com/reel/${match[2]}/embed`;
+      if (match) {
+        const kind = match[1] === "p" ? "p" : "reel";
+        return `https://www.instagram.com/${kind}/${match[2]}/embed/captioned/`;
+      }
     }
 
     return null;

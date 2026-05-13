@@ -10,14 +10,40 @@ interface ClipPreviewProps {
   onClose: () => void;
 }
 
+function CloseButton({ onClose }: { onClose: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        onClose();
+      }}
+      className="absolute right-1 top-1 z-10 rounded-full bg-black/60 p-1 text-white hover:bg-black/80"
+      title="Close preview"
+    >
+      <X className="h-3.5 w-3.5" />
+    </button>
+  );
+}
+
+/**
+ * Shared inline clip preview used by Data Integrity rows and the Tag tab.
+ * Render order:
+ *   1. HubSpot-hosted MP4 (when `preferHubSpotPreview` and `clip.originalClip`)
+ *   2. Platform embed iframe (Instagram `/embed/captioned/`, TikTok, YouTube)
+ *   3. "No in-app preview" fallback with an "Open in browser" CTA
+ *
+ * Instagram occasionally serves a "broken or removed" placeholder inside the
+ * iframe for restricted/private reels — that's an upstream content issue,
+ * not something we can fix client-side. Most reels embed fine.
+ */
 export function ClipPreview({ clip, preferHubSpotPreview, onClose }: ClipPreviewProps) {
   const useHubSpotVideo = preferHubSpotPreview && !!clip.originalClip;
-  const embedUrl = useHubSpotVideo ? null : getEmbedUrl(clip.link);
-
   if (useHubSpotVideo) {
     return <DirectVideoPlayer src={clip.originalClip!} onClose={onClose} />;
   }
 
+  const embedUrl = getEmbedUrl(clip.link);
   if (embedUrl) {
     return (
       <>
@@ -27,17 +53,7 @@ export function ClipPreview({ clip, preferHubSpotPreview, onClose }: ClipPreview
           allowFullScreen
           allow="autoplay; encrypted-media"
         />
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onClose();
-          }}
-          className="absolute right-1 top-1 z-10 rounded-full bg-black/60 p-1 text-white hover:bg-black/80"
-          title="Close preview"
-        >
-          <X className="h-3.5 w-3.5" />
-        </button>
+        <CloseButton onClose={onClose} />
       </>
     );
   }
@@ -56,6 +72,7 @@ export function ClipPreview({ clip, preferHubSpotPreview, onClose }: ClipPreview
       >
         Open in browser
       </Button>
+      <CloseButton onClose={onClose} />
     </div>
   );
 }
