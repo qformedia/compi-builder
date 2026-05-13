@@ -81,6 +81,20 @@ interface AssociationsResponse {
   results: CreatorAssociations[];
 }
 
+interface OwnerRecord {
+  id: string;
+  email: string;
+  firstName: string;
+  lastName: string;
+}
+
+/** Build the "Firstname Lastname" / email fallback that we use across the app
+ *  whenever a HubSpot owner needs to be shown to a human. */
+function ownerDisplayName(o: OwnerRecord): string {
+  const full = `${o.firstName ?? ""} ${o.lastName ?? ""}`.trim();
+  return full || o.email || o.id;
+}
+
 const BUCKET_LABEL: Record<PropDiffBucket, string> = {
   mismatch: "Differs",
   only_a: "Only on A",
@@ -143,6 +157,31 @@ export function DuplicatePairDetail({
       cancelled = true;
     };
   }, [pair.a.rid, pair.b.rid, token]);
+
+  // ── Owners fetch — used to resolve `hubspot_owner_id` (a numeric string)
+  // into a friendly "First Last" / email label in the diff table. Failure is
+  // non-fatal: we just fall back to the raw id, same as before this fetch
+  // existed. ────────────────────────────────────────────────────────────────
+  const [ownersById, setOwnersById] = useState<Map<string, string>>(new Map());
+  useEffect(() => {
+    if (!token) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const owners = await invoke<OwnerRecord[]>("list_owners", { token });
+        if (cancelled) return;
+        const map = new Map<string, string>();
+        for (const o of owners) map.set(String(o.id), ownerDisplayName(o));
+        setOwnersById(map);
+      } catch {
+        // Silent: the column will keep showing the id, which is still
+        // unambiguous when paired with the HubSpot record link in the header.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [token]);
 
   // ── Associations fetch (parallel, independent) ──────────────────────────
   const [assocData, setAssocData] = useState<{
@@ -408,19 +447,23 @@ export function DuplicatePairDetail({
                       </span>
                     </div>
                     <ul className="divide-y divide-border/60">
-                      {rows.map((row) => (
-                        <li
-                          key={row.key}
-                          className={cn(
-                            "grid grid-cols-[minmax(160px,200px)_1fr_1fr] items-start gap-3 px-4 py-2 text-xs",
-                            BUCKET_ROW_CLASS[row.bucket],
-                          )}
-                        >
-                          <div className="font-medium text-foreground">{row.label}</div>
-                          <PropValueCell value={row.valueA} propKey={row.key} />
-                          <PropValueCell value={row.valueB} propKey={row.key} />
-                        </li>
-                      ))}
+                      {rows.map((row) => {
+                        const displayA = formatDisplayValue(row.key, row.valueA, ownersById);
+                        const displayB = formatDisplayValue(row.key, row.valueB, ownersById);
+                        return (
+                          <li
+                            key={row.key}
+                            className={cn(
+                              "grid grid-cols-[minmax(160px,200px)_1fr_1fr] items-start gap-3 px-4 py-2 text-xs",
+                              BUCKET_ROW_CLASS[row.bucket],
+                            )}
+                          >
+                            <div className="font-medium text-foreground">{row.label}</div>
+                            <PropValueCell value={displayA} rawValue={row.valueA} propKey={row.key} />
+                            <PropValueCell value={displayB} rawValue={row.valueB} propKey={row.key} />
+                          </li>
+                        );
+                      })}
                     </ul>
                   </section>
                 );
@@ -571,15 +614,26 @@ function CreatorHeader({
   );
 }
 
-function PropValueCell({ value, propKey }: { value: string; propKey: string }) {
+function PropValueCell({
+  value,
+  rawValue,
+  propKey,
+}: {
+  value: string;
+  /** The unformatted value as returned by HubSpot. Used for URL detection and
+   *  the `openUrl` target so that an owner-name override (where `value` is a
+   *  human label and `rawValue` is the numeric id) doesn't break the click. */
+  rawValue?: string;
+  propKey: string;
+}) {
   if (!value) return <span className="text-muted-foreground">—</span>;
-  // Detect URLs for clickability — light heuristic, no protocol coercion.
-  const isUrl = /^https?:\/\//i.test(value);
+  const linkTarget = rawValue ?? value;
+  const isUrl = /^https?:\/\//i.test(linkTarget);
   if (isUrl) {
     return (
       <button
         type="button"
-        onClick={() => void openUrl(value)}
+        onClick={() => void openUrl(linkTarget)}
         className="inline-flex items-start gap-1 break-all text-left text-primary hover:underline"
       >
         <span className="break-all">{value}</span>
@@ -590,6 +644,23 @@ function PropValueCell({ value, propKey }: { value: string; propKey: string }) {
   const isDateProp = propKey === "date_found" || propKey === "hs_createdate" || propKey === "hs_lastmodifieddate";
   const display = isDateProp ? formatWithDaysAgo(value) : value;
   return <span className="break-words text-foreground">{display}</span>;
+}
+
+/** Map a HubSpot property value to the string we actually want to show in the
+ *  diff table. Currently only resolves `hubspot_owner_id` → owner name, but
+ *  this is the natural extension point if other id-typed properties surface
+ *  later (e.g. associated record ids). Falls through to the raw value when no
+ *  override applies or the lookup misses. */
+function formatDisplayValue(
+  propKey: string,
+  value: string,
+  ownersById: Map<string, string>,
+): string {
+  if (!value) return value;
+  if (propKey === "hubspot_owner_id") {
+    return ownersById.get(value) ?? value;
+  }
+  return value;
 }
 
 function normalizeProps(props: Record<string, string | null>): Record<string, string> {
