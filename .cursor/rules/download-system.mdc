@@ -16,13 +16,28 @@ invariants.
   with `pub(crate)` visibility. Tests are in `#[cfg(test)] mod tests` at the
   bottom of the file. Run `cargo test` in `src-tauri/` to verify.
 - **`src-tauri/src/lib.rs`**: Tauri commands and wiring only. Imports helpers.
-- **Provider cascade**: `download_clip()` loops through providers from
-  `providers_for_url()`. Providers: `"ytdlp"` (default) and `"evil0ctal"`
-  (Douyin/Kuaishou/Bilibili). See `DEFAULT_DOWNLOAD_PROVIDERS` in `src/types.ts`.
+- **`src-tauri/src/cascade.rs`**: Generic "service waterfall" runner shared
+  with the creator-resolution pipeline (`resolver.rs`). `Step` carries a
+  boxed future returning `StepOutcome::{Ok, Skip, Err}`. `cascade::run`
+  short-circuits on first `Ok`, distinguishes Skip (not applicable) from
+  Err (tried and failed) so the user-visible error never blames a
+  not-configured key.
+- **Provider cascade**: `download_clip()` builds a `Vec<cascade::Step<'_, ()>>`
+  starting with `hubspot_cdn` (HubSpot CDN fast path), then the providers
+  returned by `providers_for_url()`. Providers: `"ytdlp"` (default),
+  `"evil0ctal"` (Douyin/Kuaishou/Bilibili), `"socialfetch"` (paid
+  TikTok/Instagram fallback via `socialfetch.rs`). See
+  `DEFAULT_DOWNLOAD_PROVIDERS` in `src/types.ts`.
 
 When adding new helper logic, put it in `helpers.rs` and add tests.
-When adding a new download provider, add a `run_{name}_download()` fn and
-a match arm in `download_clip()`'s provider loop.
+When adding a new download provider:
+1. Add a function returning `cascade::StepOutcome<()>` (write its file to
+   `{clips_dir}/{clipId}_{providerName}.mp4` so `find_downloaded_file`
+   keeps working — this invariant is non-negotiable).
+2. Add a match arm in `download_clip()`'s step-builder loop.
+3. Add `Skip` paths for "not configured" / "wrong platform" cases so we
+   never bill or blame the user when the step couldn't apply.
+4. Add unit tests for the Skip gate (see `socialfetch.rs::media_download_skip_reason`).
 
 ## Cross-Platform Checklist
 

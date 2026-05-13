@@ -89,6 +89,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   ownerEmail: "",
   ownerId: "",
   socialkitApiKey: "",
+  socialfetchApiKey: "",
 };
 
 function buildIntegrityAlertText(c: number, w: number): string {
@@ -547,6 +548,7 @@ function App() {
         hubspotUrl: clip.originalClip || null,
         evil0ctalApiUrl: settings.evil0ctalApiUrl || null,
         downloadProviders: JSON.stringify(settings.downloadProviders ?? DEFAULT_DOWNLOAD_PROVIDERS),
+        socialfetchApiKey: settings.socialfetchApiKey || null,
       }).catch((err) => {
         invoke("log_event", {
           level: "error",
@@ -777,6 +779,7 @@ function App() {
           hubspotUrl: clip.originalClip || null,
           evil0ctalApiUrl: settings.evil0ctalApiUrl || null,
           downloadProviders: JSON.stringify(settings.downloadProviders ?? DEFAULT_DOWNLOAD_PROVIDERS),
+          socialfetchApiKey: settings.socialfetchApiKey || null,
         }).catch(() => {});
       }
     } catch (e) {
@@ -844,6 +847,7 @@ function App() {
       hubspotUrl: clip.originalClip || null,
       evil0ctalApiUrl: settings.evil0ctalApiUrl || null,
       downloadProviders: JSON.stringify(settings.downloadProviders ?? DEFAULT_DOWNLOAD_PROVIDERS),
+      socialfetchApiKey: settings.socialfetchApiKey || null,
     }).catch(() => {});
   };
 

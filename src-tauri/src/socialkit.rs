@@ -1,8 +1,42 @@
 //! Optional SocialKit API — Instagram /stats only (paid fallback for creator resolution).
 
 use crate::helpers::username_from_ig_profile_url;
-use crate::resolver::{EnrichedProfile, ResolveError};
+use crate::resolver::EnrichedProfile;
 use reqwest::Url;
+
+/// Classified failure reasons from a SocialKit call. Each variant maps to a
+/// stable `reason` string consumed by the cascade and the frontend's smart
+/// error classifier (Phase D).
+#[derive(Debug)]
+pub enum SocialkitError {
+    /// HTTP 401 / 403 — `access_key` rejected. User-actionable: update key.
+    BadApiKey(String),
+    /// HTTP 404 / `data: null` / "media not found". We cannot tell deleted
+    /// from "gated to logged-in viewers" from the upstream response alone;
+    /// `needs_login` is the actionable framing because the user can fix the
+    /// gated case (configure cookies / try a logged-in scraper).
+    NeedsLogin(String),
+    /// HTTP 429.
+    RateLimited(String),
+    /// Network / 5xx / parse failures — i.e. SocialKit itself is sick.
+    Network(String),
+    /// 2xx but the payload didn't yield a usable handle (e.g. `author` was
+    /// numeric pk and `authorLink` was empty/numeric).
+    UnresolvableData,
+}
+
+impl SocialkitError {
+    /// Stable identifier consumed by the frontend classifier.
+    pub fn reason(&self) -> String {
+        match self {
+            SocialkitError::BadApiKey(s) => format!("bad_api_key: {s}"),
+            SocialkitError::NeedsLogin(s) => format!("needs_login: {s}"),
+            SocialkitError::RateLimited(s) => format!("rate_limited: {s}"),
+            SocialkitError::Network(s) => format!("network: {s}"),
+            SocialkitError::UnresolvableData => "unresolvable_data".to_string(),
+        }
+    }
+}
 
 /// Reject SocialKit `author` values that are clearly Instagram `pk` numeric
 /// IDs leaking through the API (e.g. for restricted/private posts) instead
@@ -41,12 +75,18 @@ pub(crate) fn pick_socialkit_ig_handle(data: &serde_json::Value) -> Option<Strin
 }
 
 /// GET /instagram/stats and map `author` + `authorLink` into an [`EnrichedProfile`].
+///
+/// On HTTP errors the response is *classified* (see [`SocialkitError`]) so
+/// callers can produce truthful messages — the previous behaviour collapsed
+/// every failure into "unresolvable", which led to "add a SocialKit key"
+/// errors firing even when SocialKit was working but the post was gated to
+/// logged-in viewers.
 pub async fn resolve_via_socialkit_instagram_stats(
     url: &str,
     api_key: &str,
-) -> Result<EnrichedProfile, ResolveError> {
+) -> Result<EnrichedProfile, SocialkitError> {
     let mut u = Url::parse("https://api.socialkit.dev/instagram/stats")
-        .map_err(|e| ResolveError::NetworkError(e.to_string()))?;
+        .map_err(|e| SocialkitError::Network(e.to_string()))?;
     u.query_pairs_mut()
         .append_pair("url", url)
         .append_pair("access_key", api_key)
@@ -56,27 +96,36 @@ pub async fn resolve_via_socialkit_instagram_stats(
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(20))
         .build()
-        .map_err(|e| ResolveError::NetworkError(e.to_string()))?;
+        .map_err(|e| SocialkitError::Network(e.to_string()))?;
 
     let res = client
         .get(u)
         .header("User-Agent", "CompiBuilder/1.0 (Tauri; creator-resolve)")
         .send()
         .await
-        .map_err(|e| ResolveError::NetworkError(e.to_string()))?;
+        .map_err(|e| SocialkitError::Network(e.to_string()))?;
 
-    if !res.status().is_success() {
-        return Err(ResolveError::UnresolvableUrl);
+    let status = res.status();
+    if !status.is_success() {
+        let status_code = status.as_u16();
+        let body_preview = res.text().await.unwrap_or_default();
+        let body_short: String = body_preview.chars().take(200).collect();
+        return Err(match status_code {
+            401 | 403 => SocialkitError::BadApiKey(format!("HTTP {status_code}: {body_short}")),
+            404 => SocialkitError::NeedsLogin(format!("HTTP 404: {body_short}")),
+            429 => SocialkitError::RateLimited(format!("HTTP 429: {body_short}")),
+            _ => SocialkitError::Network(format!("HTTP {status_code}: {body_short}")),
+        });
     }
 
     let json: serde_json::Value = res
         .json()
         .await
-        .map_err(|e| ResolveError::NetworkError(e.to_string()))?;
+        .map_err(|e| SocialkitError::Network(format!("json: {e}")))?;
 
     let data = json.get("data").unwrap_or(&json);
 
-    let handle = pick_socialkit_ig_handle(data).ok_or(ResolveError::UnresolvableUrl)?;
+    let handle = pick_socialkit_ig_handle(data).ok_or(SocialkitError::UnresolvableData)?;
 
     // Always rebuild the canonical profile URL from the validated handle so
     // we can never store a `https://www.instagram.com/<numeric-pk>/` link

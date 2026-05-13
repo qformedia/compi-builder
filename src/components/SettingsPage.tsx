@@ -203,6 +203,12 @@ export function SettingsPage({ settings, onSave, onCheckUpdate }: Props) {
               <CheckCircle className="h-3 w-3" /> Verified
             </p>
           )}
+          {draft.hubspotToken.trim() && !draft.ownerEmail.trim() && (
+            <p className="text-xs text-amber-700">
+              You have a HubSpot token but no owner email — new creators won't
+              be assigned to anyone. Set an owner email to fix.
+            </p>
+          )}
           <p className="text-xs text-muted-foreground">
             Used as the Owner when creating clips via General Search. Verified against HubSpot on save.
           </p>
@@ -276,6 +282,23 @@ export function SettingsPage({ settings, onSave, onCheckUpdate }: Props) {
               <p className="text-xs text-muted-foreground">
                 Used as a fallback when free Instagram resolution fails. Leave empty to skip — those
                 clips fall back to the manual creator picker.
+              </p>
+            </div>
+
+            <div className="grid gap-2">
+              <Label htmlFor="socialfetch">SocialFetch (optional)</Label>
+              <Input
+                id="socialfetch"
+                type="password"
+                value={draft.socialfetchApiKey}
+                onChange={(e) => setDraft({ ...draft, socialfetchApiKey: e.target.value })}
+                placeholder="API key from socialfetch.dev"
+                autoComplete="off"
+              />
+              <p className="text-xs text-muted-foreground">
+                Last-resort paid fallback for TikTok / Instagram / YouTube creator
+                resolution and TikTok / Instagram media download. Only billed when every
+                cheaper path has already failed. Leave empty to skip.
               </p>
             </div>
 

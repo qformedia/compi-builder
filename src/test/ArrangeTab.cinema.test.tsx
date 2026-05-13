@@ -114,6 +114,7 @@ const settings: AppSettings = {
   ownerEmail: "",
   ownerId: "",
   socialkitApiKey: "",
+  socialfetchApiKey: "",
 };
 
 const projectWithDownloadedClip: Project = {

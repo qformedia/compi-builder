@@ -70,9 +70,16 @@ export function resolveClipPath(rootFolder: string, projectName: string, relativ
 export type DownloadProviders = Record<string, string[]>;
 
 export const DEFAULT_DOWNLOAD_PROVIDERS: DownloadProviders = {
+  // Chinese platforms keep yt-dlp/Evil0ctal only — SocialFetch doesn't
+  // cover Douyin / Kuaishou / Bilibili / Xiaohongshu.
   douyin:   ["evil0ctal", "ytdlp"],
   bilibili: ["evil0ctal", "ytdlp"],
-  default:  ["ytdlp"],
+  // SocialFetch covers TikTok and Instagram media download. It only runs
+  // when both yt-dlp and (where applicable) the user's browser cookies
+  // didn't get the file. Skipped automatically when no API key is set.
+  tiktok:    ["ytdlp", "socialfetch"],
+  instagram: ["ytdlp", "socialfetch"],
+  default:   ["ytdlp"],
 };
 
 /** App settings persisted locally */
@@ -92,6 +99,13 @@ export interface AppSettings {
    * scrape both fail. Leave empty to use manual pick on those edge cases.
    */
   socialkitApiKey: string;
+  /**
+   * Optional key for socialfetch.dev — paid last-resort fallback for both
+   * creator resolution (TikTok / Instagram / YouTube) and media download
+   * (TikTok / Instagram). Only runs when cheaper / cookie-aware paths have
+   * already failed. Leave empty to skip entirely (never billed).
+   */
+  socialfetchApiKey: string;
 }
 
 export type FeedbackType = "bug" | "feature";

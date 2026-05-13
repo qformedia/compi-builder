@@ -18,13 +18,24 @@ import {
   type CreatorMatch,
   type MatchConfidence,
 } from "@/lib/creator-resolver";
+import { classifyResolveError } from "@/lib/resolve-error-message";
+import {
+  MissingConfigNudge,
+  type MissingConfigKind,
+} from "@/components/MissingConfigNudge";
 import { cn } from "@/lib/utils";
 
 type PanelState =
   | { kind: "idle" }
   | { kind: "loading" }
   | { kind: "resolved"; profile: EnrichedProfile; matches: CreatorMatch[] }
-  | { kind: "error"; message: string }
+  | {
+      kind: "error";
+      message: string;
+      /** When set, an inline `<MissingConfigNudge>` is rendered above the
+       *  manual creator picker so the user can fix the underlying config. */
+      nudge?: MissingConfigKind;
+    }
   | { kind: "applied"; name: string }
   | { kind: "manual" };
 
@@ -157,6 +168,7 @@ export function useCreatorSuggestion({
       try {
         const profile = await resolveCreatorFromClipUrl(token, clip.id, clip.link, {
           socialkitApiKey: settings.socialkitApiKey,
+          socialfetchApiKey: settings.socialfetchApiKey,
           cookiesBrowser: settings.cookiesBrowser,
           cookiesFile: settings.cookiesFile,
           forceLive,
@@ -164,14 +176,19 @@ export function useCreatorSuggestion({
         const matches = await matchCreatorsForHandle(token, profile);
         setSt({ kind: "resolved", profile, matches });
       } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        setSt({
-          kind: "error",
-          message:
-            msg === "unresolvable_url" || msg.includes("unresolvable")
-              ? "Couldn't resolve from public endpoints. Add a SocialKit key in Settings to enable the paid Instagram fallback, or pick manually below."
-              : msg || "Failed to look up author.",
-        });
+        // Classifier consumes the structured `ResolveCreatorError` JSON now
+        // emitted by the Rust resolver and returns an actionable message.
+        // See `src/lib/resolve-error-message.ts` for the rule set; it
+        // notably stops blaming a missing SocialKit key when the failure was
+        // upstream (gated post, rate limit, bad key, network).
+        const classified = classifyResolveError(e);
+        const nudge: MissingConfigKind | undefined =
+          classified.kind === "needs_paid_fallback"
+            ? "socialkit"
+            : classified.kind === "needs_socialfetch"
+              ? "socialfetch"
+              : undefined;
+        setSt({ kind: "error", message: classified.message, nudge });
       }
     },
     [
@@ -180,6 +197,7 @@ export function useCreatorSuggestion({
       settings.cookiesBrowser,
       settings.cookiesFile,
       settings.socialkitApiKey,
+      settings.socialfetchApiKey,
       token,
     ],
   );
@@ -309,6 +327,9 @@ export function useCreatorSuggestion({
               </p>
             </div>
           </div>
+          {st.nudge && (
+            <MissingConfigNudge kind={st.nudge} className="text-[12px]" />
+          )}
           <div className="rounded-md border border-border bg-background p-2.5">
             <p className="mb-1.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
               Pick a creator manually

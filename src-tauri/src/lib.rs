@@ -1,7 +1,9 @@
+mod cascade;
 mod download_log;
 mod helpers;
 mod minimiki;
 mod resolver;
+mod socialfetch;
 mod socialkit;
 mod ytdlp_repair;
 
@@ -3319,6 +3321,7 @@ async fn download_clip(
     hubspot_url: Option<String>,
     evil0ctal_api_url: Option<String>,
     download_providers: Option<String>,
+    socialfetch_api_key: Option<String>,
 ) -> Result<(), String> {
     let clips_dir = PathBuf::from(&root_folder)
         .join(&project_name)
@@ -3358,221 +3361,261 @@ async fn download_clip(
         },
     );
 
-    // Fast path: download from HubSpot CDN if available (already uploaded by another user)
-    if let Some(ref hs_url) = hubspot_url {
-        if !hs_url.is_empty() {
-            download_log::debug(
-                &app,
-                "hubspot",
-                Some(&clip_id),
-                format!("attempting HubSpot CDN fast path: {hs_url}"),
-            );
-            let _ = fs::create_dir_all(&clips_dir);
-            let dest = clips_dir.join(format!("{}_hubspot.mp4", &clip_id));
-            let client = reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(180))
-                .build()
-                .map_err(|e| e.to_string())?;
-
-            match client.get(hs_url).send().await {
-                Ok(resp) if resp.status().is_success() => {
-                    let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
-                    if let Err(e) = fs::write(&dest, &bytes) {
-                        download_log::error_detailed(
-                            &app,
-                            "hubspot",
-                            Some(&clip_id),
-                            "HubSpot CDN succeeded but writing local file failed",
-                            format!("dest={}, error={}", dest.display(), e),
-                        );
-                    } else {
-                        let rel_path = format!("clips/{}_hubspot.mp4", &clip_id);
-                        let project_dir = PathBuf::from(&root_folder).join(&project_name);
-                        let local_duration =
-                            probe_duration(&project_dir.join(&rel_path).to_string_lossy());
-                        download_log::info(
-                            &app,
-                            "hubspot",
-                            Some(&clip_id),
-                            format!("HubSpot CDN succeeded ({} bytes)", bytes.len()),
-                        );
-                        let _ = app.emit(
-                            "download-progress",
-                            DownloadProgress {
-                                clip_id,
-                                status: "complete".into(),
-                                progress: Some(100.0),
-                                local_file: Some(rel_path),
-                                local_duration,
-                                error: None,
-                            },
-                        );
-                        return Ok(());
-                    }
-                }
-                Ok(resp) => {
-                    let status = resp.status();
-                    let headers = resp.headers().clone();
-                    let body = resp.text().await.unwrap_or_default();
-                    let detail = format!(
-                        "url={}\nstatus={}\ncontent-type={}\ncontent-length={}\nbody={}",
-                        hs_url,
-                        status,
-                        headers
-                            .get("content-type")
-                            .and_then(|v| v.to_str().ok())
-                            .unwrap_or(""),
-                        headers
-                            .get("content-length")
-                            .and_then(|v| v.to_str().ok())
-                            .unwrap_or(""),
-                        body.chars().take(500).collect::<String>()
-                    );
-                    download_log::error_detailed(
-                        &app,
-                        "hubspot",
-                        Some(&clip_id),
-                        format!(
-                            "HubSpot CDN returned HTTP {}; falling back to providers",
-                            status
-                        ),
-                        detail,
-                    );
-                    eprintln!("[download_clip] HubSpot CDN HTTP {} for {}", status, clip_id);
-                }
-                Err(e) => {
-                    download_log::error_detailed(
-                        &app,
-                        "hubspot",
-                        Some(&clip_id),
-                        format!("HubSpot CDN unreachable ({e}); falling back to providers"),
-                        format!("url={hs_url}\nerror={e}"),
-                    );
-                    eprintln!("[download_clip] HubSpot CDN unreachable for {}: {}", clip_id, e);
-                }
-            }
-        }
-    }
-
-    // Provider cascade: try each configured provider in order
+    // Build the cascade. Order matters and must match the previous behaviour:
+    //   1. HubSpot CDN fast path (when a `hubspot_url` is on the clip)
+    //   2. Configured providers (`evil0ctal`, `ytdlp`, …) in user-selected order.
+    //
+    // Each step returns `StepOutcome::Ok(())` on success and writes its file
+    // to `{clips_dir}/{clipId}_{provider}.mp4`. `find_downloaded_file` keys
+    // off the `{clipId}_` prefix so all providers must respect it.
     let providers = providers_for_url(&url, &download_providers);
     download_log::debug(
         &app,
-        "cascade",
+        "download",
         Some(&clip_id),
         format!("provider cascade order: {:?}", providers),
     );
-    let mut errors: Vec<String> = Vec::new();
 
+    let mut steps: Vec<cascade::Step<'_, ()>> = Vec::with_capacity(providers.len() + 1);
+
+    // Step 1: HubSpot CDN fast path.
+    let hs_clip_id = clip_id.clone();
+    let hs_url_owned = hubspot_url.clone();
+    let hs_clips_dir = clips_dir.clone();
+    let hs_app = app.clone();
+    steps.push(cascade::Step::new("hubspot_cdn", async move {
+        run_hubspot_cdn_step(&hs_app, &hs_clip_id, hs_url_owned, &hs_clips_dir).await
+    }));
+
+    // Steps 2+: configured download providers, in order.
     for provider in &providers {
-        download_log::debug(
-            &app,
-            "cascade",
-            Some(&clip_id),
-            format!("trying provider '{}'", provider),
-        );
-        let result = match provider.as_str() {
+        match provider.as_str() {
             "evil0ctal" => {
-                let base_url = evil0ctal_api_url.as_deref().unwrap_or("");
-                if base_url.is_empty() {
-                    download_log::warn(
-                        &app,
-                        "evil0ctal",
-                        Some(&clip_id),
-                        "skipped: no API URL configured in Settings",
-                    );
-                    eprintln!("[download_clip] evil0ctal provider skipped: no API URL configured");
-                    errors.push(format!(
-                        "{}: not configured (set API URL in Settings)",
-                        provider
-                    ));
-                    continue;
-                }
-                run_evil0ctal_download(&app, &clip_id, base_url, &url, &clips_dir).await
+                let app2 = app.clone();
+                let clip_id2 = clip_id.clone();
+                let url2 = url.clone();
+                let clips_dir2 = clips_dir.clone();
+                let api_url = evil0ctal_api_url.clone();
+                steps.push(cascade::Step::new("evil0ctal", async move {
+                    let base_url = api_url.as_deref().unwrap_or("").trim();
+                    if base_url.is_empty() {
+                        return cascade::StepOutcome::Skip(
+                            "no API URL configured in Settings".to_string(),
+                        );
+                    }
+                    match run_evil0ctal_download(&app2, &clip_id2, base_url, &url2, &clips_dir2)
+                        .await
+                    {
+                        Ok(()) => cascade::StepOutcome::Ok(()),
+                        Err(e) => cascade::StepOutcome::Err(e),
+                    }
+                }));
+            }
+            "socialfetch" => {
+                let app2 = app.clone();
+                let clip_id2 = clip_id.clone();
+                let url2 = url.clone();
+                let clips_dir2 = clips_dir.clone();
+                let key = socialfetch_api_key.clone().unwrap_or_default();
+                steps.push(cascade::Step::new("socialfetch", async move {
+                    socialfetch::download_media_step(
+                        &app2,
+                        &clip_id2,
+                        &url2,
+                        &key,
+                        &clips_dir2,
+                    )
+                    .await
+                }));
             }
             _ => {
-                run_ytdlp_with_cookie_cascade(
-                    &app,
-                    &url,
-                    &clips_dir,
-                    &clip_id,
-                    &cookies_browser,
-                    &cookies_file,
-                )
-                .await
-            }
-        };
-
-        match result {
-            Ok(()) => {
-                let local_file = find_downloaded_file(&clips_dir, &clip_id);
-                let project_dir = PathBuf::from(&root_folder).join(&project_name);
-                let local_duration = local_file.as_ref().and_then(|rel| {
-                    let abs = project_dir.join(rel);
-                    probe_duration(&abs.to_string_lossy())
-                });
-                download_log::info(
-                    &app,
-                    "download",
-                    Some(&clip_id),
-                    format!(
-                        "complete via '{}' (file={:?}, duration={:?})",
-                        provider, local_file, local_duration
-                    ),
-                );
-                let _ = app.emit(
-                    "download-progress",
-                    DownloadProgress {
-                        clip_id,
-                        status: "complete".into(),
-                        progress: Some(100.0),
-                        local_file,
-                        local_duration,
-                        error: None,
-                    },
-                );
-                return Ok(());
-            }
-            Err(e) => {
-                download_log::warn(
-                    &app,
-                    "cascade",
-                    Some(&clip_id),
-                    format!("provider '{}' failed: {}", provider, e),
-                );
-                eprintln!(
-                    "[download_clip] provider '{}' failed for {}: {}",
-                    provider, clip_id, e
-                );
-                errors.push(format!("{}: {}", provider, e));
+                let app2 = app.clone();
+                let clip_id2 = clip_id.clone();
+                let url2 = url.clone();
+                let clips_dir2 = clips_dir.clone();
+                let cb = cookies_browser.clone();
+                let cf = cookies_file.clone();
+                steps.push(cascade::Step::new("ytdlp", async move {
+                    match run_ytdlp_with_cookie_cascade(
+                        &app2, &url2, &clips_dir2, &clip_id2, &cb, &cf,
+                    )
+                    .await
+                    {
+                        Ok(()) => cascade::StepOutcome::Ok(()),
+                        Err(e) => cascade::StepOutcome::Err(e),
+                    }
+                }));
             }
         }
     }
 
-    let friendly = if errors.len() == 1 {
-        errors.into_iter().next().unwrap()
-    } else {
-        errors.join(" | ")
+    match cascade::run(&app, "download", Some(&clip_id), steps).await {
+        Ok(((), winner)) => {
+            let local_file = find_downloaded_file(&clips_dir, &clip_id);
+            let project_dir = PathBuf::from(&root_folder).join(&project_name);
+            let local_duration = local_file.as_ref().and_then(|rel| {
+                let abs = project_dir.join(rel);
+                probe_duration(&abs.to_string_lossy())
+            });
+            download_log::info(
+                &app,
+                "download",
+                Some(&clip_id),
+                format!(
+                    "complete via '{}' (file={:?}, duration={:?})",
+                    winner, local_file, local_duration
+                ),
+            );
+            let _ = app.emit(
+                "download-progress",
+                DownloadProgress {
+                    clip_id,
+                    status: "complete".into(),
+                    progress: Some(100.0),
+                    local_file,
+                    local_duration,
+                    error: None,
+                },
+            );
+            Ok(())
+        }
+        Err(attempts) => {
+            // Keep the user-facing error format identical to the previous
+            // implementation: "<provider>: <reason>" joined by " | ", and
+            // exclude pure skips (they don't tell the user anything new).
+            let failures: Vec<String> = attempts
+                .iter()
+                .filter(|a| a.outcome == "failed")
+                .map(|a| format!("{}: {}", a.step, a.reason))
+                .collect();
+            let friendly = if failures.is_empty() {
+                // Everything was skipped — say so plainly instead of returning
+                // an empty string.
+                "No download providers were applicable for this clip.".to_string()
+            } else if failures.len() == 1 {
+                failures.into_iter().next().unwrap()
+            } else {
+                failures.join(" | ")
+            };
+            download_log::error_detailed(
+                &app,
+                "download",
+                Some(&clip_id),
+                format!("all providers exhausted for {url}"),
+                friendly.clone(),
+            );
+            let _ = app.emit(
+                "download-progress",
+                DownloadProgress {
+                    clip_id,
+                    status: "failed".into(),
+                    progress: None,
+                    local_file: None,
+                    local_duration: None,
+                    error: Some(friendly.clone()),
+                },
+            );
+            Err(friendly)
+        }
+    }
+}
+
+/// HubSpot CDN fast-path step. Returns `Skip` when no `hubspot_url` is on the
+/// clip, `Ok` on a successful download, and `Err` for HTTP / write failures.
+async fn run_hubspot_cdn_step(
+    app: &AppHandle,
+    clip_id: &str,
+    hubspot_url: Option<String>,
+    clips_dir: &Path,
+) -> cascade::StepOutcome<()> {
+    let hs_url = match hubspot_url.as_deref() {
+        Some(u) if !u.is_empty() => u,
+        _ => return cascade::StepOutcome::Skip("no HubSpot CDN url on clip".to_string()),
     };
-    download_log::error_detailed(
-        &app,
-        "download",
-        Some(&clip_id),
-        format!("all providers exhausted for {url}"),
-        friendly.clone(),
+
+    download_log::debug(
+        app,
+        "hubspot",
+        Some(clip_id),
+        format!("attempting HubSpot CDN fast path: {hs_url}"),
     );
-    let _ = app.emit(
-        "download-progress",
-        DownloadProgress {
-            clip_id,
-            status: "failed".into(),
-            progress: None,
-            local_file: None,
-            local_duration: None,
-            error: Some(friendly.clone()),
-        },
-    );
-    Err(friendly)
+    let _ = fs::create_dir_all(clips_dir);
+    let dest = clips_dir.join(format!("{}_hubspot.mp4", clip_id));
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(180))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return cascade::StepOutcome::Err(format!("HTTP client: {e}")),
+    };
+
+    match client.get(hs_url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            let bytes = match resp.bytes().await {
+                Ok(b) => b,
+                Err(e) => return cascade::StepOutcome::Err(format!("body read: {e}")),
+            };
+            if let Err(e) = fs::write(&dest, &bytes) {
+                download_log::error_detailed(
+                    app,
+                    "hubspot",
+                    Some(clip_id),
+                    "HubSpot CDN succeeded but writing local file failed",
+                    format!("dest={}, error={}", dest.display(), e),
+                );
+                return cascade::StepOutcome::Err(format!("write {}: {e}", dest.display()));
+            }
+            download_log::info(
+                app,
+                "hubspot",
+                Some(clip_id),
+                format!("HubSpot CDN succeeded ({} bytes)", bytes.len()),
+            );
+            cascade::StepOutcome::Ok(())
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            let headers = resp.headers().clone();
+            let body = resp.text().await.unwrap_or_default();
+            let detail = format!(
+                "url={}\nstatus={}\ncontent-type={}\ncontent-length={}\nbody={}",
+                hs_url,
+                status,
+                headers
+                    .get("content-type")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or(""),
+                headers
+                    .get("content-length")
+                    .and_then(|v| v.to_str().ok())
+                    .unwrap_or(""),
+                body.chars().take(500).collect::<String>()
+            );
+            download_log::error_detailed(
+                app,
+                "hubspot",
+                Some(clip_id),
+                format!(
+                    "HubSpot CDN returned HTTP {}; falling back to providers",
+                    status
+                ),
+                detail,
+            );
+            eprintln!("[download_clip] HubSpot CDN HTTP {} for {}", status, clip_id);
+            cascade::StepOutcome::Err(format!("HTTP {}", status))
+        }
+        Err(e) => {
+            download_log::error_detailed(
+                app,
+                "hubspot",
+                Some(clip_id),
+                format!("HubSpot CDN unreachable ({e}); falling back to providers"),
+                format!("url={hs_url}\nerror={e}"),
+            );
+            eprintln!("[download_clip] HubSpot CDN unreachable for {}: {}", clip_id, e);
+            cascade::StepOutcome::Err(format!("unreachable: {e}"))
+        }
+    }
 }
 
 /// Run yt-dlp with the cookie retry cascade. Returns Ok(()) on success.
@@ -5835,6 +5878,11 @@ async fn create_creator_from_enrichment(
 }
 
 /// Resolve a clip URL to an author profile. Tier-0: HubSpot `sk_*` when fresh. Live: cascade.
+///
+/// On failure the error string is a JSON-encoded
+/// [`resolver::ResolveCreatorError`] so the frontend can `JSON.parse` it and
+/// render a smart message based on the per-step `attempts` audit log. The
+/// frontend's classifier (Phase D) keys on `code` and `attempts[].reason`.
 #[tauri::command]
 async fn resolve_creator_from_clip_url(
     app: tauri::AppHandle,
@@ -5842,6 +5890,7 @@ async fn resolve_creator_from_clip_url(
     clip_id: String,
     clip_url: String,
     socialkit_api_key: Option<String>,
+    socialfetch_api_key: Option<String>,
     cookies_browser: Option<String>,
     cookies_file: Option<String>,
     force_live: Option<bool>,
@@ -5852,12 +5901,13 @@ async fn resolve_creator_from_clip_url(
         &clip_id,
         &clip_url,
         socialkit_api_key.as_deref(),
+        socialfetch_api_key.as_deref(),
         &cookies_browser,
         &cookies_file,
         force_live.unwrap_or(false),
     )
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_json_string())
 }
 
 /// Update multiple properties on an External Clip in one call

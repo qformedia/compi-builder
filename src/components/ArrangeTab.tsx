@@ -389,6 +389,7 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
         force,
         evil0ctalApiUrl: settings.evil0ctalApiUrl || null,
         downloadProviders: JSON.stringify(settings.downloadProviders ?? DEFAULT_DOWNLOAD_PROVIDERS),
+        socialfetchApiKey: settings.socialfetchApiKey || null,
       });
     } catch { /* handled via event listener */ }
   }, [project, settings, updateClipField]);

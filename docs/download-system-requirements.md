@@ -8,13 +8,34 @@ up-to-date when the functionality changes.
 
 ## 1. Overview
 
-CompiFlow downloads video clips via a **provider cascade** system. Each
-platform has an ordered list of download providers to try. The primary
-provider is **yt-dlp** (bundled as a Tauri sidecar binary). For Chinese
-platforms (Douyin, Kuaishou, Bilibili), an optional **Evil0ctal API**
-provider is tried first, falling back to yt-dlp. Downloads are triggered
-from the frontend, executed in Rust, and progress is reported back via
-Tauri events.
+CompiFlow downloads video clips via a **provider cascade** system, built
+on the shared [`cascade`](../src-tauri/src/cascade.rs) module also used by
+the creator-resolution pipeline (see
+[`resolver.rs`](../src-tauri/src/resolver.rs)). Each platform has an
+ordered list of download providers to try. The primary provider is
+**yt-dlp** (bundled as a Tauri sidecar binary). For Chinese platforms
+(Douyin, Kuaishou, Bilibili), an optional **Evil0ctal API** provider is
+tried first, falling back to yt-dlp. For TikTok and Instagram, an
+optional **SocialFetch API** is registered as a last-resort step. The
+**HubSpot CDN** fast path runs before the provider cascade when the clip
+already has an `originalClip` URL. Downloads are triggered from the
+frontend, executed in Rust, and progress is reported back via Tauri
+events.
+
+### Cascade semantics
+
+The `cascade::run` runner distinguishes:
+
+- `Skip(reason)` — step was not applicable (no API key, wrong platform,
+  no `hubspotUrl` on clip, …). Logged at debug only, never blamed in the
+  user-facing error message.
+- `Err(reason)` — step ran and failed. Recorded in the user-facing
+  failure list.
+- `Ok(value)` — first success short-circuits the cascade.
+
+Both pipelines (creator resolution and download) use the same module so
+the breadcrumbs in the Downloads Log come out consistently and the
+"never bill on a Skip" contract holds in one place.
 
 ## 2. Supported Platforms
 
@@ -30,35 +51,58 @@ Both platforms must produce identical, playable MP4 output.
 
 ```
 Frontend invoke("download_clip", { rootFolder, projectName, clipId, url,
-    cookiesBrowser, cookiesFile, hubspotUrl, evil0ctalApiUrl, downloadProviders })
+    cookiesBrowser, cookiesFile, hubspotUrl, evil0ctalApiUrl,
+    downloadProviders, socialfetchApiKey })
     │
     ▼
 Rust: download_clip()
     ├─ emit download-progress { status: "downloading", progress: 0 }
-    ├─ (Optional) Fast path: HubSpot CDN if hubspot_url available
-    ├─ Resolve provider cascade: providers_for_url(url, downloadProviders)
-    │     e.g. Douyin → ["evil0ctal", "ytdlp"], YouTube → ["ytdlp"]
-    ├─ For each provider in order:
-    │     ├─ "evil0ctal" → run_evil0ctal_download()
-    │     │     ├─ GET {apiUrl}/api/hybrid/video_data?url={url}&minimal=true
-    │     │     ├─ Extract no-watermark video URL from response
-    │     │     └─ Download video to {clips_dir}/{clipId}_evil0ctal.mp4
-    │     └─ "ytdlp" → run_ytdlp_with_cookie_cascade()
-    │           ├─ cookie retry cascade:
-    │           │     1. Try with browser cookies (if configured)
-    │           │     2. Try with cookies file (if configured and step 1 failed)
-    │           │     3. Try without any cookies (if previous steps failed)
-    │           └─ run_ytdlp_download()
-    │                 ├─ run_ytdlp() → try sidecar first, fallback to system yt-dlp
-    │                 └─ yt-dlp args: -f {format} --merge-output-format mp4 ...
-    ├─ On first provider success:
+    ├─ Build cascade steps (cascade::Step<'_, ()>):
+    │     1. "hubspot_cdn"    Skip if no hubspot_url, else GET → {clipId}_hubspot.mp4
+    │     2..N. providers_for_url(url, downloadProviders), e.g.
+    │         Douyin → ["evil0ctal", "ytdlp"]
+    │         TikTok → ["ytdlp", "socialfetch"]
+    │         Instagram → ["ytdlp", "socialfetch"]
+    │         YouTube → ["ytdlp"]
+    │     where each provider maps to a step:
+    │         ─ "evil0ctal" → run_evil0ctal_download()
+    │             ├─ GET {apiUrl}/api/download?url={url}&prefix=false&with_watermark=false
+    │             ├─ Skip if no evil0ctalApiUrl configured
+    │             └─ Save to {clips_dir}/{clipId}_evil0ctal.mp4
+    │         ─ "ytdlp" → run_ytdlp_with_cookie_cascade()
+    │             ├─ cookie retry cascade:
+    │             │     1. Try with browser cookies (if configured)
+    │             │     2. Try with cookies file (if configured and step 1 failed)
+    │             │     3. Try without any cookies (if previous steps failed)
+    │             └─ run_ytdlp_download()
+    │                   ├─ run_ytdlp() → try sidecar first, fallback to system yt-dlp
+    │                   └─ yt-dlp args: -f {format} --merge-output-format mp4 ...
+    │         ─ "socialfetch" → socialfetch::download_media_step()
+    │             ├─ Skip if no socialfetchApiKey configured
+    │             ├─ Skip on YouTube / Douyin / Kuaishou / Bilibili / Pinterest /
+    │             │    Xiaohongshu (SocialFetch only supports IG + TikTok download)
+    │             ├─ GET https://api.socialfetch.dev/v1/{instagram/posts|tiktok/videos}
+    │             │   ?url={url}&downloadMedia=true (x-api-key header)
+    │             ├─ Extract media URL from response (defensive across schema variants)
+    │             └─ GET media URL → {clips_dir}/{clipId}_socialfetch.mp4
+    ├─ cascade::run runs steps in order, short-circuiting on first Ok.
+    ├─ On first step Ok:
     │     ├─ find_downloaded_file() → scan clips_dir for {clipId}_*
     │     ├─ probe_duration() → read MP4 headers (mp4 crate)
     │     └─ emit download-progress { status: "complete", localFile, localDuration }
-    └─ On all providers failed:
-          ├─ Aggregate error messages from each provider
+    └─ On all-steps-failed:
+          ├─ Aggregate failed (NOT skipped) attempts as "<step>: <reason>" | …
           └─ emit download-progress { status: "failed", error }
 ```
+
+### Provider table
+
+| Provider | Platforms | API key needed | Cost | Skip reasons |
+|----------|-----------|----------------|------|--------------|
+| `hubspot_cdn` | any (clip with `originalClip`) | n/a (HubSpot token) | free | no `hubspotUrl` on clip |
+| `evil0ctal` | Douyin, Kuaishou, Bilibili | self-hosted URL | free (self-hosted) | no `evil0ctalApiUrl` |
+| `ytdlp` | all | n/a | free | always runs (can fail per-platform) |
+| `socialfetch` | TikTok, Instagram (+ YouTube for resolve only) | `socialfetchApiKey` | 11 credits / download | no key, or platform unsupported |
 
 ## 4. yt-dlp Binary Resolution
 
