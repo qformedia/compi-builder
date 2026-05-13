@@ -168,6 +168,14 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
   const [expandedSession, setExpandedSession] = useState<string | null>(null);
   const historyLoaded = useRef(false);
 
+  // Monotonic "session token". Bumped at every point that starts a fresh
+  // entries session (`continueAfterCompliance`, `handleReset`). Long-running
+  // async loops in this file snapshot it once and short-circuit before each
+  // `setEntries`/progress write or further RPC if the ref has moved on,
+  // preventing a previous batch's loop from stomping the current entries
+  // (see bug: 21-clip IG batch resolve-phase flip).
+  const runIdRef = useRef(0);
+
   interface LatestClip {
     id: string;
     link: string;
@@ -251,6 +259,10 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
   }, [loadLatestClips]);
 
   const continueAfterCompliance = useCallback(async (urlText: string) => {
+    // New session — invalidate any in-flight resolve/create/metrics loop
+    // from the previous batch so it can't write back into our entries.
+    runIdRef.current += 1;
+
     const parsed: ParsedEntry[] = await invoke("parse_clip_urls", { raw: urlText });
     if (parsed.length === 0) return;
 
@@ -385,15 +397,25 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
   };
 
   const resolveHandlesAndCreators = async (items: ClipEntry[]) => {
+    // Snapshot the session token. If a new batch starts (handleReset /
+    // continueAfterCompliance bump runIdRef), we silently abandon every
+    // remaining iteration and skip every state write — otherwise the
+    // stale loop would overwrite the new batch's entries with this one's.
+    const myRun = runIdRef.current;
+    const isStale = () => runIdRef.current !== myRun;
+
     const updated = [...items];
+    if (isStale()) return;
     setEntries([...updated]);
 
     // Resolve Instagram handles only for non-existing clips
     for (let i = 0; i < updated.length; i++) {
+      if (isStale()) return;
       const entry = updated[i];
       if (entry.existingClipId) continue;
       if (entry.platform === "instagram" && !entry.handle) {
         updated[i] = { ...updated[i], creatorStatus: "resolving" };
+        if (isStale()) return;
         setEntries([...updated]);
 
         try {
@@ -431,6 +453,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
         } catch {
           updated[i] = { ...updated[i], creatorStatus: "failed" };
         }
+        if (isStale()) return;
         setEntries([...updated]);
       }
     }
@@ -449,6 +472,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
     }
 
     for (const platform of Object.keys(byPlatform)) {
+      if (isStale()) return;
       const { indices, profileUrls } = byPlatform[platform];
       // Deduplicate profile URLs for lookup
       const uniqueUrls = [...new Set(profileUrls)];
@@ -498,6 +522,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
           }
         }
       }
+      if (isStale()) return;
       setEntries([...updated]);
     }
   };
@@ -519,7 +544,9 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
     setEntries(updated);
     setEditingIndex(null);
 
-    // Re-lookup this single creator
+    // Re-lookup this single creator. Snapshot the session token so a
+    // late lookup from a previous batch can't write into a new session.
+    const myRun = runIdRef.current;
     (async () => {
       try {
         const result: {
@@ -534,6 +561,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
           platform,
           profileUrls: [profileUrl],
         });
+        if (runIdRef.current !== myRun) return;
         const lookup = result.results[0];
         const reUpdated = [...entries];
         reUpdated[index] = {
@@ -581,6 +609,11 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
   };
 
   const runCreateAll = async (ownerId: string) => {
+    // Snapshot the session token; if it moves we abandon the loop and
+    // never call fetchMetadataForCreated for an abandoned batch.
+    const myRun = runIdRef.current;
+    const isStale = () => runIdRef.current !== myRun;
+
     setCreating(true);
     setPhase("creating");
     const updated = [...entries];
@@ -598,6 +631,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
     }
 
     for (let i = 0; i < updated.length; i++) {
+      if (isStale()) return;
       const entry = updated[i];
       try {
         let creatorId = entry.profileUrl ? creatorMap.get(entry.profileUrl) : null;
@@ -653,6 +687,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
         };
       }
 
+      if (isStale()) return;
       setCreateProgress({ current: i + 1, total });
       setEntries([...updated]);
 
@@ -662,27 +697,45 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
       }
     }
 
+    if (isStale()) return;
     setCreating(false);
     setPhase("done");
 
-    // Async metadata fetch for all created clips
-    fetchMetadataForCreated(updated);
+    // Async metadata fetch for all created clips. Skip when stale — the
+    // user moved on and the metadata loop would otherwise stomp the new
+    // batch's entries with this one's `updated` array.
+    if (!isStale()) {
+      fetchMetadataForCreated(updated);
+    }
   };
 
   const fetchMetadataForCreated = async (items: ClipEntry[]) => {
+    // Snapshot the session token. Every entries write is also routed
+    // through a clipId-keyed functional update (defense-in-depth): even
+    // if a stale callback slips past the guard, it can only touch the
+    // entries whose clipId still matches, never replace the whole array.
+    const myRun = runIdRef.current;
+    const isStale = () => runIdRef.current !== myRun;
+
     setMetricsFetching(true);
     const updated = [...items];
     const eligible = updated.filter((e) => e.clipId && e.created && !e.existingClipId);
+    if (isStale()) return;
     setMetricsProgress({ current: 0, total: eligible.length });
     let processed = 0;
 
     for (let i = 0; i < updated.length; i++) {
+      if (isStale()) return;
       const entry = updated[i];
       if (!entry.clipId || !entry.created) continue;
       if (entry.existingClipId) continue;
 
+      const targetClipId = entry.clipId;
       updated[i] = { ...updated[i], metricStatus: "fetching" };
-      setEntries([...updated]);
+      if (isStale()) return;
+      setEntries((prev) =>
+        prev.map((e) => (e.clipId === targetClipId ? { ...e, metricStatus: "fetching" } : e)),
+      );
 
       try {
         let metrics: {
@@ -774,10 +827,15 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
       }
 
       processed++;
+      if (isStale()) return;
       setMetricsProgress({ current: processed, total: eligible.length });
-      setEntries([...updated]);
+      const patch = updated[i];
+      setEntries((prev) =>
+        prev.map((e) => (e.clipId === targetClipId ? { ...e, ...patch } : e)),
+      );
     }
 
+    if (isStale()) return;
     setMetricsFetching(false);
 
     // Persist session to local history
@@ -811,6 +869,10 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
         };
       });
 
+    // Only persist the session and refresh "Latest" cards when this run
+    // is still the active one. An abandoned batch silently drops its
+    // session record so it doesn't add a phantom row to "Recent Sessions".
+    if (isStale()) return;
     if (sessionClips.length > 0) {
       saveSession({
         id: String(Date.now()),
@@ -825,6 +887,10 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
   };
 
   const handleReset = () => {
+    // Invalidate any in-flight loop before clearing state, otherwise its
+    // next `setEntries([...updated])` would re-populate the cleared list
+    // with the previous batch.
+    runIdRef.current += 1;
     setRawUrls("");
     setEntries([]);
     setPhase("input");
