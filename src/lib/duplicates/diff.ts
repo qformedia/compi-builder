@@ -46,6 +46,11 @@ export const CREATOR_PROPERTY_LABELS: Record<string, string> = {
   hubspot_owner_id: "Owner",
   license_type: "License Type",
   license_checked: "License Checked",
+  license_file: "License File",
+  traceability_file: "Traceability File",
+  available_channels: "Available Channels",
+  available_platforms: "Available Platforms",
+  date_granted: "Date Granted",
   // Profile URLs (in-scope for duplicate detection)
   instagram: "Instagram",
   secondary_instagram: "Secondary Instagram",
@@ -103,7 +108,37 @@ export const ASSOCIATION_ROLLUP_LABELS: Record<string, string> = {
   num_of_video_projects: "Num of Video Projects",
 };
 
-const SKIP_KEYS = new Set<string>(ASSOCIATION_ROLLUP_KEYS);
+/**
+ * License-related property keys, in the display order used by the
+ * "License Information" card on the Duplicates detail and Merge History
+ * pages. `status` is intentionally first because it's the highest-signal
+ * field when triaging a duplicate (e.g. Granted vs. Declined). The rest
+ * follow the order of HubSpot's own License Information property card so
+ * a reviewer who is used to that layout can scan it without re-orienting.
+ *
+ * Used in two places:
+ *   - As the row order for the License Information card.
+ *   - As `SKIP_KEYS` membership so these properties don't show up again
+ *     in the bucketed Property diff below the card. The dedicated card
+ *     is the canonical surface for these fields; rendering them twice
+ *     just clutters the page.
+ */
+export const LICENSE_INFO_KEYS = [
+  "status",
+  "license_type",
+  "license_checked",
+  "license_file",
+  "traceability_file",
+  "available_channels",
+  "available_platforms",
+  "date_granted",
+  "special_requests",
+] as const;
+
+const SKIP_KEYS = new Set<string>([
+  ...ASSOCIATION_ROLLUP_KEYS,
+  ...LICENSE_INFO_KEYS,
+]);
 
 const BUCKET_ORDER: Record<PropDiffBucket, number> = {
   mismatch: 0,
@@ -156,4 +191,88 @@ export function sortPropertiesForDiff(
     return x.label.localeCompare(y.label);
   });
   return rows;
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Native-merge preview
+//
+// HubSpot's `POST /crm/v3/objects/{id}/merge` endpoint merges the secondary
+// (loser) into the primary (winner) using a deterministic rule:
+//
+//   - For every property, keep the primary's value if it's non-empty.
+//   - Otherwise fall back to the secondary's value.
+//   - Conflicting non-empty values: primary always wins.
+//
+// `predictMergedProperties` reproduces that rule locally so the Duplicates
+// detail view can show an "A Merged" / "B Merged" preview column that
+// matches what HubSpot will produce, *before* the irreversible call. Stay
+// faithful to the rule — any deviation here means the preview lies.
+//
+// Rollup counts (`num_of_*`) are calculated server-side from the actual
+// associations after merge; we predict them as the simple sum because
+// every association from the loser is transferred to the winner. This is
+// an upper bound (HubSpot would deduplicate a record associated to both
+// sides, which is rare) but good enough for the preview signal.
+// ──────────────────────────────────────────────────────────────────────────
+
+/**
+ * Predict the property map of the post-merge winner record.
+ *
+ * Returns `winner[key] || loser[key]` for every key in the union of the
+ * two input maps. Whitespace-only values count as empty (matches the
+ * existing `normalize` used by `sortPropertiesForDiff`, so the preview
+ * stays consistent with the diff buckets).
+ */
+export function predictMergedProperties(
+  winner: Record<string, string>,
+  loser: Record<string, string>,
+): Record<string, string> {
+  const out: Record<string, string> = {};
+  const keys = new Set<string>();
+  for (const k of Object.keys(winner)) keys.add(k);
+  for (const k of Object.keys(loser)) keys.add(k);
+  for (const key of keys) {
+    const w = normalize(winner[key]);
+    const l = normalize(loser[key]);
+    out[key] = w !== "" ? w : l;
+  }
+  return out;
+}
+
+/**
+ * Predict the post-merge value for a single rollup key. Inputs are the
+ * raw HubSpot strings ("0" / "" / "5"); the output is the numeric sum
+ * rendered back as a string so the rollup table stays string-typed.
+ */
+export function predictMergedAssociationRollup(
+  winnerValue: string | undefined,
+  loserValue: string | undefined,
+): string {
+  const w = parseRollup(winnerValue);
+  const l = parseRollup(loserValue);
+  return String(w + l);
+}
+
+/**
+ * Convenience wrapper: build the predicted-rollup map for every key in
+ * `ASSOCIATION_ROLLUP_KEYS`. Useful when wiring the preview column into
+ * the existing rollup table.
+ */
+export function predictMergedAssociationRollups(
+  winnerProps: Record<string, string>,
+  loserProps: Record<string, string>,
+): Record<(typeof ASSOCIATION_ROLLUP_KEYS)[number], string> {
+  const out = {} as Record<(typeof ASSOCIATION_ROLLUP_KEYS)[number], string>;
+  for (const key of ASSOCIATION_ROLLUP_KEYS) {
+    out[key] = predictMergedAssociationRollup(winnerProps[key], loserProps[key]);
+  }
+  return out;
+}
+
+function parseRollup(value: string | undefined): number {
+  if (value == null) return 0;
+  const trimmed = String(value).trim();
+  if (!trimmed) return 0;
+  const n = Number(trimmed);
+  return Number.isFinite(n) ? n : 0;
 }

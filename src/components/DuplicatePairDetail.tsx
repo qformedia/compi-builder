@@ -15,11 +15,14 @@
  * v1: read-only. No "Mark resolved" / "Mark not-a-duplicate" buttons yet.
  */
 
-import React, { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   ArrowLeft,
+  Check,
   ExternalLink,
+  GitMerge,
+  Loader2,
   Users,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
@@ -33,18 +36,42 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
+import { HubSpotIcon } from "@/components/ClipCard";
 import {
   CREATOR_PROPERTY_LABELS,
   sortPropertiesForDiff,
+  predictMergedProperties,
+  predictMergedAssociationRollup,
   ASSOCIATION_ROLLUP_KEYS,
   ASSOCIATION_ROLLUP_LABELS,
   type PropDiff,
   type PropDiffBucket,
 } from "@/lib/duplicates/diff";
 import type { DuplicatePair } from "@/lib/duplicates/find-pairs";
-import type { PresenceEntry } from "@/lib/duplicates/supabase";
+import {
+  describeSupabaseError,
+  recordMergeResolution,
+  type PresenceEntry,
+} from "@/lib/duplicates/supabase";
 import { hubspotClipUrl, hubspotCreatorUrl, hubspotVideoProjectUrl } from "@/lib/hubspot-urls";
+import {
+  AssociatedRecordsSection,
+  LicenseInfoCard,
+  PropValueCell,
+  StatusPill,
+  formatDisplayValue,
+  type AssociatedRecord,
+  type HubspotFileInfo,
+} from "@/components/duplicate-pair-view-primitives";
 
 interface CreatorRecord {
   id: string;
@@ -59,16 +86,21 @@ interface Props {
   pair: DuplicatePair;
   token: string;
   /** Local viewer's presence name; passed in only so we can sanity-check the
-   *  list of other viewers (the parent already filters self out). */
+   *  list of other viewers (the parent already filters self out). Also used
+   *  as the actor name when persisting a merge to the audit log. */
   localUser: string;
   otherViewers: PresenceEntry[];
+  /** When set, the pair has already been merged in HubSpot during this
+   *  session and the value is the surviving record's id. The detail view
+   *  switches into a read-only mode: the "Pick winner & merge" card is
+   *  replaced by an "Already merged" status card pointing at this record so
+   *  the user can sanity-check the merged data. */
+  resolvedSurvivingRid?: string | null;
   onBack: () => void;
-}
-
-interface AssociatedRecord {
-  id: string;
-  name: string;
-  [key: string]: string;
+  /** Called after a successful HubSpot merge. The parent is responsible for
+   *  refreshing the creators export (the loser is now archived) and
+   *  navigating back to the list. */
+  onMergeSuccess?: (winnerRecordId: string, loserRecordId: string) => void;
 }
 
 interface CreatorAssociations {
@@ -116,47 +148,33 @@ const BUCKET_HEADER_CLASS: Record<PropDiffBucket, string> = {
   equal: "text-muted-foreground",
 };
 
-// Color legend for the HubSpot creator `status` enum. Values must match the
-// canonical labels in the HubSpot property definition (see
-// `docs/hs-properties/hubspot-properties-export-creators-2026-04-01.csv`).
-// Tailwind utilities are picked to read like HubSpot's own dropdown swatches:
-// muted neutral for the cold-start states, warm amber/orange once outreach
-// begins, teal/emerald for the win states, rose for the negative outcomes,
-// and dark slate for the terminal "do not retry" buckets.
-const STATUS_BADGE_CLASS: Record<string, string> = {
-  "To Contact": "bg-slate-100 text-slate-700 ring-slate-300",
-  "Contacted": "bg-orange-100 text-orange-800 ring-orange-300",
-  "Connected": "bg-teal-100 text-teal-800 ring-teal-300",
-  "Granted": "bg-emerald-100 text-emerald-800 ring-emerald-300",
-  "Declined": "bg-rose-100 text-rose-800 ring-rose-300",
-  "Uncontactable": "bg-rose-100 text-rose-800 ring-rose-300",
-  "Not Existing Anymore": "bg-slate-700 text-slate-50 ring-slate-700",
-  "Discarded to Acquire": "bg-slate-700 text-slate-50 ring-slate-700",
-};
-
-const STATUS_DOT_CLASS: Record<string, string> = {
-  "To Contact": "bg-slate-400",
-  "Contacted": "bg-orange-500",
-  "Connected": "bg-teal-500",
-  "Granted": "bg-emerald-500",
-  "Declined": "bg-rose-500",
-  "Uncontactable": "bg-rose-500",
-  "Not Existing Anymore": "bg-slate-300",
-  "Discarded to Acquire": "bg-slate-300",
-};
-
 export function DuplicatePairDetail({
   pair,
   token,
   localUser,
   otherViewers,
+  resolvedSurvivingRid = null,
   onBack,
+  onMergeSuccess,
 }: Props) {
+  const isAlreadyMerged = !!resolvedSurvivingRid;
   const [props, setProps] = useState<{ a: Record<string, string>; b: Record<string, string> } | null>(
     null,
   );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  // ── Merge state ─────────────────────────────────────────────────────────
+  // `winnerSide` drives the optional 3rd "Merged" preview column across the
+  // Status / Associations / Property cards and unlocks the Merge button. The
+  // confirmation dialog is the gate before any HubSpot write happens.
+  const [winnerSide, setWinnerSide] = useState<"a" | "b" | null>(null);
+  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [merging, setMerging] = useState(false);
+  const [mergeError, setMergeError] = useState<string | null>(null);
+  // Non-fatal: HubSpot succeeded but Supabase audit didn't. Surface as a
+  // warning banner instead of treating the merge as failed.
+  const [mergeWarning, setMergeWarning] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -249,6 +267,56 @@ export function DuplicatePairDetail({
     };
   }, [pair.a.rid, pair.b.rid, token]);
 
+  // ── Resolve HubSpot file ids → filenames for the License Information
+  // chips. Lazy / best-effort: fires only when the underlying license_file
+  // or traceability_file values change, and a failure leaves
+  // `fileNamesById` empty so the chips fall back to showing the id. ────
+  const [fileNamesById, setFileNamesById] = useState<Map<string, HubspotFileInfo>>(
+    new Map(),
+  );
+  const fileIds = useMemo<string[]>(() => {
+    if (!props) return [];
+    const out = new Set<string>();
+    for (const side of [props.a, props.b]) {
+      for (const key of ["license_file", "traceability_file"] as const) {
+        const raw = (side[key] ?? "").trim();
+        if (!raw) continue;
+        for (const tok of raw.split(/[;,\s]+/)) {
+          const t = tok.trim();
+          if (t) out.add(t);
+        }
+      }
+    }
+    return Array.from(out).sort();
+  }, [props]);
+  // Stable cache key so the effect re-runs only when the *set* of ids
+  // changes, not on every render that produces a new array reference.
+  const fileIdsKey = fileIds.join(",");
+  useEffect(() => {
+    if (!token || fileIds.length === 0) {
+      setFileNamesById(new Map());
+      return;
+    }
+    let cancelled = false;
+    void (async () => {
+      try {
+        const res = await invoke<Record<string, HubspotFileInfo>>(
+          "fetch_hubspot_files_batch",
+          { token, fileIds },
+        );
+        if (cancelled) return;
+        setFileNamesById(new Map(Object.entries(res)));
+      } catch {
+        // Silent: chip falls back to the raw id, which is still a
+        // working link into HubSpot via the file-preview URL.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [token, fileIdsKey]);
+
   const diff = useMemo<PropDiff[]>(() => {
     if (!props) return [];
     return sortPropertiesForDiff(props.a, props.b);
@@ -275,6 +343,103 @@ export function DuplicatePairDetail({
 
   const aName = pair.a.name || pair.a.rid;
   const bName = pair.b.name || pair.b.rid;
+
+  // ── Merge derived state ────────────────────────────────────────────────
+  // Resolve which sides correspond to winner/loser once `winnerSide` is set,
+  // so every consumer of "the predicted merge" reads from the same source
+  // of truth (no place where one section computes winner=A and another
+  // computes winner=B).
+  const winnerRid = winnerSide === "a" ? pair.a.rid : winnerSide === "b" ? pair.b.rid : null;
+  const loserRid = winnerSide === "a" ? pair.b.rid : winnerSide === "b" ? pair.a.rid : null;
+  const winnerName = winnerSide === "a" ? aName : winnerSide === "b" ? bName : "";
+  const loserName = winnerSide === "a" ? bName : winnerSide === "b" ? aName : "";
+
+  const mergedProps = useMemo<Record<string, string> | null>(() => {
+    if (!props || !winnerSide) return null;
+    const winner = winnerSide === "a" ? props.a : props.b;
+    const loser = winnerSide === "a" ? props.b : props.a;
+    return predictMergedProperties(winner, loser);
+  }, [props, winnerSide]);
+
+  /** Header label for the predicted-merge column ("A Merged" / "B Merged"). */
+  const mergedColumnLabel = winnerSide
+    ? `${winnerSide.toUpperCase()} Merged`
+    : null;
+
+  // ── Merge action handler ───────────────────────────────────────────────
+  // Strict ordering: HubSpot merge first, then Supabase audit. If HubSpot
+  // fails we surface the error and never write to Supabase. If HubSpot
+  // succeeds but Supabase fails we still treat the operation as a success
+  // for the user (the irreversible write already happened) but warn so they
+  // can manually re-run the audit if needed.
+  async function handleMergeConfirm() {
+    if (!winnerRid || !loserRid) return;
+    setMerging(true);
+    setMergeError(null);
+    setMergeWarning(null);
+    try {
+      await invoke("merge_creators", {
+        token,
+        winnerId: winnerRid,
+        loserId: loserRid,
+      });
+    } catch (err) {
+      setMergeError(err instanceof Error ? err.message : String(err));
+      setMerging(false);
+      return;
+    }
+
+    try {
+      // Capture the full pre-merge state so the History view can render an
+      // A/B/Predicted-merged comparison later. Both `props` and `assocData`
+      // are guaranteed non-null here because the Merge button is disabled
+      // until both fetches complete (the loading branch above the merge
+      // card is mutually exclusive). Associations are still wrapped in a
+      // null fallback because the associations fetch can fail
+      // independently and we'd rather record the property snapshot on a
+      // best-effort basis than skip the snapshot entirely.
+      const winnerProps = winnerSide === "a" ? props!.a : props!.b;
+      const loserProps = winnerSide === "a" ? props!.b : props!.a;
+      const winnerAssoc = winnerSide === "a" ? assocData?.a ?? null : assocData?.b ?? null;
+      const loserAssoc = winnerSide === "a" ? assocData?.b ?? null : assocData?.a ?? null;
+      await recordMergeResolution({
+        pairKey: pair.pairKey,
+        winnerRecordId: winnerRid,
+        loserRecordId: loserRid,
+        actor: localUser,
+        snapshot: {
+          network: pair.network,
+          canonicalUrl: pair.canonicalUrl,
+          winnerName: winnerSide === "a" ? aName : bName,
+          loserName: winnerSide === "a" ? bName : aName,
+          winnerProps,
+          loserProps,
+          winnerAssociations: winnerAssoc
+            ? {
+                videoProjects: winnerAssoc.videoProjects ?? [],
+                externalClips: winnerAssoc.externalClips ?? [],
+              }
+            : null,
+          loserAssociations: loserAssoc
+            ? {
+                videoProjects: loserAssoc.videoProjects ?? [],
+                externalClips: loserAssoc.externalClips ?? [],
+              }
+            : null,
+          ownersById: Object.fromEntries(ownersById),
+        },
+      });
+    } catch (err) {
+      setMergeWarning(
+        `Merge succeeded in HubSpot, but couldn't record the audit row: ${describeSupabaseError(err)}. ` +
+          "The pair may briefly reappear until the next refresh, and the merge may not show up in History.",
+      );
+    }
+
+    setConfirmOpen(false);
+    setMerging(false);
+    onMergeSuccess?.(winnerRid, loserRid);
+  }
 
   return (
     <div className="h-full overflow-auto">
@@ -320,11 +485,27 @@ export function DuplicatePairDetail({
             </div>
             <div className="rounded-md bg-muted/40 px-3 py-2 text-xs">
               <span className="font-medium">{aName}</span>
+              <button
+                type="button"
+                onClick={() => void openUrl(hubspotCreatorUrl(pair.a.rid))}
+                className="ml-1 inline-flex text-muted-foreground hover:text-orange-500"
+                title="Open in HubSpot"
+              >
+                <HubSpotIcon className="h-3 w-3" />
+              </button>
               {pair.a.columns.length > 0 && (
                 <> · <span className="text-muted-foreground">{pair.a.columns.join(", ")}</span></>
               )}
               <span className="mx-2 text-muted-foreground">==</span>
               <span className="font-medium">{bName}</span>
+              <button
+                type="button"
+                onClick={() => void openUrl(hubspotCreatorUrl(pair.b.rid))}
+                className="ml-1 inline-flex text-muted-foreground hover:text-orange-500"
+                title="Open in HubSpot"
+              >
+                <HubSpotIcon className="h-3 w-3" />
+              </button>
               {pair.b.columns.length > 0 && (
                 <> · <span className="text-muted-foreground">{pair.b.columns.join(", ")}</span></>
               )}
@@ -332,56 +513,31 @@ export function DuplicatePairDetail({
           </CardContent>
         </Card>
 
-        {/* Creator statuses card — surfaced above Associations because the
-            status pair is the single most decision-driving signal when
-            triaging a duplicate (e.g. Granted vs. Declined). */}
+        {/* License Information card — surfaced above Associations because
+            the licensing state (status, license file, traceability file,
+            granted date, etc.) is the single most decision-driving signal
+            when triaging a duplicate. Mirrors HubSpot's own License
+            Information property card so the reviewer sees the same
+            grouping they're already used to. */}
         <Card>
           <CardHeader className="gap-1.5">
-            <CardTitle className="text-base">Creator statuses</CardTitle>
+            <CardTitle className="text-base">License Information</CardTitle>
             <CardDescription className="text-xs">
-              Current HubSpot status for each creator. Different statuses are highlighted.
+              Current HubSpot license fields for each creator. Differing
+              non-empty values are highlighted.
             </CardDescription>
           </CardHeader>
           <CardContent>
-            {props ? (
-              (() => {
-                const statusA = (props.a.status ?? "").trim();
-                const statusB = (props.b.status ?? "").trim();
-                const differs = !!statusA && !!statusB && statusA !== statusB;
-                return (
-                  <div className="rounded-md border">
-                    <div className="grid grid-cols-[minmax(160px,200px)_1fr_1fr] items-center gap-3 border-b bg-muted/40 px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                      <span>Status</span>
-                      <span>{aName}</span>
-                      <span>{bName}</span>
-                    </div>
-                    <div
-                      className={cn(
-                        "grid grid-cols-[minmax(160px,200px)_1fr_1fr] items-center gap-3 px-4 py-2 text-xs",
-                        differs && "bg-amber-50/40",
-                      )}
-                    >
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium">Status</span>
-                        {differs && (
-                          <span className="rounded-sm bg-amber-100 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-700">
-                            Differs
-                          </span>
-                        )}
-                      </div>
-                      <div>
-                        <StatusPill value={statusA} />
-                      </div>
-                      <div>
-                        <StatusPill value={statusB} />
-                      </div>
-                    </div>
-                  </div>
-                );
-              })()
-            ) : (
-              <div className="h-12 animate-pulse rounded-md bg-muted/60" />
-            )}
+            <LicenseInfoCard
+              propsA={props?.a ?? {}}
+              propsB={props?.b ?? {}}
+              mergedProps={mergedProps}
+              nameA={aName}
+              nameB={bName}
+              mergedColumnLabel={mergedColumnLabel}
+              loading={!props}
+              fileNamesById={fileNamesById}
+            />
           </CardContent>
         </Card>
 
@@ -396,39 +552,66 @@ export function DuplicatePairDetail({
           <CardContent className="space-y-4">
             {/* Counts table */}
             {props ? (
-              <div className="rounded-md border">
-                <div className="grid grid-cols-[minmax(160px,200px)_1fr_1fr] items-center gap-3 border-b bg-muted/40 px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-                  <span>Count</span>
-                  <span>{aName}</span>
-                  <span>{bName}</span>
-                </div>
-                <ul className="divide-y">
-                  {ASSOCIATION_ROLLUP_KEYS.map((key) => {
-                    const valA = props.a[key] ?? "0";
-                    const valB = props.b[key] ?? "0";
-                    const differs = valA !== valB;
-                    return (
-                      <li
-                        key={key}
-                        className={cn(
-                          "grid grid-cols-[minmax(160px,200px)_1fr_1fr] items-center gap-3 px-4 py-1.5 text-xs",
-                          differs && "bg-amber-50/40",
-                        )}
-                      >
-                        <span className="font-medium">
-                          {ASSOCIATION_ROLLUP_LABELS[key] ?? key}
-                        </span>
-                        <span className={cn(differs && "font-semibold text-amber-700")}>
-                          {valA || "0"}
-                        </span>
-                        <span className={cn(differs && "font-semibold text-amber-700")}>
-                          {valB || "0"}
-                        </span>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </div>
+              (() => {
+                const headerGrid = winnerSide
+                  ? "grid-cols-[minmax(160px,200px)_1fr_1fr_1fr]"
+                  : "grid-cols-[minmax(160px,200px)_1fr_1fr]";
+                return (
+                  <div className="rounded-md border">
+                    <div
+                      className={cn(
+                        "grid items-center gap-3 border-b bg-muted/40 px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground",
+                        headerGrid,
+                      )}
+                    >
+                      <span>Count</span>
+                      <span>{aName}</span>
+                      <span>{bName}</span>
+                      {winnerSide && (
+                        <span className="text-emerald-700">{mergedColumnLabel}</span>
+                      )}
+                    </div>
+                    <ul className="divide-y">
+                      {ASSOCIATION_ROLLUP_KEYS.map((key) => {
+                        const valA = props.a[key] ?? "0";
+                        const valB = props.b[key] ?? "0";
+                        const differs = valA !== valB;
+                        const mergedVal = winnerSide
+                          ? predictMergedAssociationRollup(
+                              winnerSide === "a" ? valA : valB,
+                              winnerSide === "a" ? valB : valA,
+                            )
+                          : null;
+                        return (
+                          <li
+                            key={key}
+                            className={cn(
+                              "grid items-center gap-3 px-4 py-1.5 text-xs",
+                              headerGrid,
+                              differs && "bg-amber-50/40",
+                            )}
+                          >
+                            <span className="font-medium">
+                              {ASSOCIATION_ROLLUP_LABELS[key] ?? key}
+                            </span>
+                            <span className={cn(differs && "font-semibold text-amber-700")}>
+                              {valA || "0"}
+                            </span>
+                            <span className={cn(differs && "font-semibold text-amber-700")}>
+                              {valB || "0"}
+                            </span>
+                            {winnerSide && mergedVal !== null && (
+                              <span className="font-semibold text-emerald-700">
+                                {mergedVal}
+                              </span>
+                            )}
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  </div>
+                );
+              })()
             ) : (
               <div className="h-24 animate-pulse rounded-md bg-muted/60" />
             )}
@@ -451,6 +634,8 @@ export function DuplicatePairDetail({
                   title="Video Projects"
                   recordsA={assocData.a?.videoProjects ?? []}
                   recordsB={assocData.b?.videoProjects ?? []}
+                  winnerSide={winnerSide}
+                  mergedColumnLabel={mergedColumnLabel}
                   renderChips={(r) => {
                     const tag = r.tag as string | undefined;
                     const status = r.status as string | undefined;
@@ -471,6 +656,8 @@ export function DuplicatePairDetail({
                   title="External Clips"
                   recordsA={assocData.a?.externalClips ?? []}
                   recordsB={assocData.b?.externalClips ?? []}
+                  winnerSide={winnerSide}
+                  mergedColumnLabel={mergedColumnLabel}
                   renderChips={(r) => {
                     const score = r.score as string | undefined;
                     return (
@@ -503,10 +690,36 @@ export function DuplicatePairDetail({
         ) : (
           <Card className="overflow-hidden p-0">
             <CardHeader className="gap-1.5 px-4 py-3">
-              <div className="grid grid-cols-[minmax(160px,200px)_1fr_1fr] items-center gap-3 text-sm">
+              <div
+                className={cn(
+                  "grid items-center gap-3 text-sm",
+                  winnerSide
+                    ? "grid-cols-[minmax(160px,200px)_1fr_1fr_1fr]"
+                    : "grid-cols-[minmax(160px,200px)_1fr_1fr]",
+                )}
+              >
                 <CardTitle className="text-sm">Property</CardTitle>
                 <CreatorHeader name={aName} rid={pair.a.rid} sideLabel="A" />
                 <CreatorHeader name={bName} rid={pair.b.rid} sideLabel="B" />
+                {winnerSide && (
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-1.5">
+                      <Badge
+                        variant="outline"
+                        className="h-5 border-emerald-300 bg-emerald-50 px-1.5 text-[10px] text-emerald-700"
+                      >
+                        <Check className="mr-0.5 h-3 w-3" />
+                        {mergedColumnLabel}
+                      </Badge>
+                      <span className="truncate text-sm font-medium text-emerald-700">
+                        Predicted merged record
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-muted-foreground">
+                      Winner wins on conflict; empty winner fields filled from loser
+                    </div>
+                  </div>
+                )}
               </div>
             </CardHeader>
             <CardContent className="p-0">
@@ -532,17 +745,43 @@ export function DuplicatePairDetail({
                       {rows.map((row) => {
                         const displayA = formatDisplayValue(row.key, row.valueA, ownersById);
                         const displayB = formatDisplayValue(row.key, row.valueB, ownersById);
+                        const mergedRaw = mergedProps?.[row.key] ?? "";
+                        const displayMerged = formatDisplayValue(row.key, mergedRaw, ownersById);
+                        // Highlight the merged cell when the predicted value
+                        // came from the loser (i.e. winner's field was empty).
+                        // That's the only case where the merged record gains
+                        // information the winner alone wouldn't have, and it's
+                        // the most useful thing to draw the reviewer's eye to.
+                        const winnerRaw = winnerSide
+                          ? winnerSide === "a"
+                            ? row.valueA
+                            : row.valueB
+                          : "";
+                        const filledFromLoser =
+                          !!winnerSide && !winnerRaw.trim() && !!mergedRaw.trim();
                         return (
                           <li
                             key={row.key}
                             className={cn(
-                              "grid grid-cols-[minmax(160px,200px)_1fr_1fr] items-start gap-3 px-4 py-2 text-xs",
+                              "grid items-start gap-3 px-4 py-2 text-xs",
+                              winnerSide
+                                ? "grid-cols-[minmax(160px,200px)_1fr_1fr_1fr]"
+                                : "grid-cols-[minmax(160px,200px)_1fr_1fr]",
                               BUCKET_ROW_CLASS[row.bucket],
                             )}
                           >
                             <div className="font-medium text-foreground">{row.label}</div>
                             <PropValueCell value={displayA} rawValue={row.valueA} propKey={row.key} />
                             <PropValueCell value={displayB} rawValue={row.valueB} propKey={row.key} />
+                            {winnerSide && (
+                              <div className={cn(filledFromLoser && "rounded-sm bg-emerald-50/70 px-1.5 py-0.5")}>
+                                <PropValueCell
+                                  value={displayMerged}
+                                  rawValue={mergedRaw}
+                                  propKey={row.key}
+                                />
+                              </div>
+                            )}
                           </li>
                         );
                       })}
@@ -559,6 +798,101 @@ export function DuplicatePairDetail({
           </Card>
         )}
 
+        {/* Pick winner + merge action / Already-merged status.
+            This is the only write surface on the page. We deliberately put
+            it BELOW the comparison cards so the reviewer scrolls through
+            all the differences before deciding. When the pair was already
+            merged in this session, this slot becomes a read-only status
+            card pointing at the surviving record instead. */}
+        {props && isAlreadyMerged ? (
+          <Card className="border-emerald-300 bg-emerald-50/40">
+            <CardHeader className="gap-1.5">
+              <CardTitle className="flex items-center gap-2 text-base text-emerald-900">
+                <Check className="h-4 w-4 text-emerald-600" />
+                This pair has already been merged
+              </CardTitle>
+              <CardDescription className="text-xs text-emerald-900/80">
+                Merge actions are disabled. The data above reflects what's currently
+                in HubSpot — the archived side may show as empty since archived
+                records aren't returned by the API.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex items-center justify-end">
+              <Button
+                variant="outline"
+                size="sm"
+                className="cursor-pointer border-emerald-400 text-emerald-800 hover:bg-emerald-100/60"
+                onClick={() =>
+                  resolvedSurvivingRid &&
+                  void openUrl(hubspotCreatorUrl(resolvedSurvivingRid))
+                }
+              >
+                <ExternalLink className="mr-1.5 h-4 w-4" />
+                View merged record in HubSpot
+              </Button>
+            </CardContent>
+          </Card>
+        ) : props ? (
+          <Card>
+            <CardHeader className="gap-1.5">
+              <CardTitle className="text-base">Pick winner & merge</CardTitle>
+              <CardDescription className="text-xs">
+                Select which record survives. The other record will be archived in HubSpot
+                and its associations transferred to the winner. This cannot be undone.
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-3">
+              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                <WinnerCard
+                  side="a"
+                  name={aName}
+                  rid={pair.a.rid}
+                  status={(props.a.status ?? "").trim()}
+                  selected={winnerSide === "a"}
+                  otherSelected={winnerSide === "b"}
+                  onSelect={() => setWinnerSide("a")}
+                />
+                <WinnerCard
+                  side="b"
+                  name={bName}
+                  rid={pair.b.rid}
+                  status={(props.b.status ?? "").trim()}
+                  selected={winnerSide === "b"}
+                  otherSelected={winnerSide === "a"}
+                  onSelect={() => setWinnerSide("b")}
+                />
+              </div>
+
+              {mergeError && (
+                <div className="flex flex-wrap items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+                  <span className="min-w-0 break-words">{mergeError}</span>
+                </div>
+              )}
+
+              {mergeWarning && (
+                <div className="flex flex-wrap items-start gap-2 rounded-md border border-amber-300 bg-amber-50/70 px-3 py-2 text-xs text-amber-800">
+                  <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+                  <span className="min-w-0 break-words">{mergeWarning}</span>
+                </div>
+              )}
+
+              <div className="flex items-center justify-end gap-2">
+                <Button
+                  variant="default"
+                  size="sm"
+                  className="cursor-pointer"
+                  disabled={!winnerSide || merging}
+                  onClick={() => setConfirmOpen(true)}
+                >
+                  <GitMerge className="mr-1.5 h-4 w-4" />
+                  {winnerSide ? `Merge into ${winnerSide.toUpperCase()}` : "Merge"}
+                </Button>
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
+
         {/* Other viewers footer */}
         {displayedViewers.length > 0 && (
           <div className="flex flex-wrap items-center gap-2 rounded-md border bg-emerald-50/40 px-3 py-2 text-xs text-emerald-800">
@@ -572,97 +906,165 @@ export function DuplicatePairDetail({
             ))}
           </div>
         )}
+
+        {/* Confirmation modal — last chance to bail before the irreversible
+            HubSpot call. We disable the close button while merging is in
+            flight so the user can't end up with a "did it succeed?" race. */}
+        <Dialog
+          open={confirmOpen}
+          onOpenChange={(open) => {
+            if (!open && merging) return;
+            setConfirmOpen(open);
+            if (!open) setMergeError(null);
+          }}
+        >
+          <DialogContent showCloseButton={!merging}>
+            <DialogHeader>
+              <DialogTitle>Merge duplicate creators?</DialogTitle>
+              <DialogDescription>
+                {winnerSide ? (
+                  <>
+                    All data from <span className="font-medium text-foreground">{loserName}</span>{" "}
+                    will be merged into{" "}
+                    <span className="font-medium text-foreground">{winnerName}</span>.
+                  </>
+                ) : (
+                  "Pick a winner first."
+                )}
+              </DialogDescription>
+            </DialogHeader>
+            <ul className="space-y-1.5 text-xs text-muted-foreground">
+              <li>
+                <span className="font-medium text-foreground">Conflicting field values:</span>{" "}
+                kept from {winnerName || "the winner"}.
+              </li>
+              <li>
+                <span className="font-medium text-foreground">Empty winner fields:</span>{" "}
+                filled from {loserName || "the loser"}.
+              </li>
+              <li>
+                <span className="font-medium text-foreground">Create date:</span>{" "}
+                the older create date is kept, regardless of which record wins.
+              </li>
+              <li>
+                <span className="font-medium text-foreground">All associations</span> (Contacts,
+                External Clips, Video Projects, Send Link Actions, Social Interactions, Public
+                Video Projects) move to {winnerName || "the winner"}.
+              </li>
+              <li>
+                <span className="font-medium text-foreground">{loserName || "The loser"}</span>{" "}
+                will be archived in HubSpot. <span className="font-medium">This cannot be undone.</span>
+              </li>
+            </ul>
+            {mergeError && (
+              <div className="flex flex-wrap items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+                <span className="min-w-0 break-words">{mergeError}</span>
+              </div>
+            )}
+            <DialogFooter>
+              <Button
+                variant="outline"
+                size="sm"
+                className="cursor-pointer"
+                disabled={merging}
+                onClick={() => setConfirmOpen(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="destructive"
+                size="sm"
+                className="cursor-pointer"
+                disabled={!winnerSide || merging}
+                onClick={() => void handleMergeConfirm()}
+              >
+                {merging ? (
+                  <>
+                    <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                    Merging…
+                  </>
+                ) : (
+                  <>
+                    <GitMerge className="mr-1.5 h-4 w-4" />
+                    Merge now
+                  </>
+                )}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     </div>
   );
 }
 
-function AssociatedRecordsSection({
-  title,
-  recordsA,
-  recordsB,
-  renderChips,
-  buildUrl,
+/** Single radio-style card in the winner picker. Selected card gets a
+ *  visually strong border + Winner badge; the unselected sibling fades to
+ *  muted with a "Will be archived" badge so the reviewer always sees the
+ *  consequence of their choice. */
+function WinnerCard({
+  side,
+  name,
+  rid,
+  status,
+  selected,
+  otherSelected,
+  onSelect,
 }: {
-  title: string;
-  recordsA: AssociatedRecord[];
-  recordsB: AssociatedRecord[];
-  renderChips: (r: AssociatedRecord) => React.ReactNode;
-  buildUrl: (r: AssociatedRecord) => string;
+  side: "a" | "b";
+  name: string;
+  rid: string;
+  status: string;
+  selected: boolean;
+  otherSelected: boolean;
+  onSelect: () => void;
 }) {
-  const bothEmpty = recordsA.length === 0 && recordsB.length === 0;
   return (
-    <div className="rounded-md border">
-      <div className="flex items-center gap-2 border-b bg-muted/40 px-4 py-1.5">
-        <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-          {title}
-        </span>
-        <span className="text-[11px] text-muted-foreground">
-          ({recordsA.length} / {recordsB.length})
-        </span>
-      </div>
-      {bothEmpty ? (
-        <div className="px-4 py-3 text-xs text-muted-foreground">No associated records.</div>
-      ) : (
-        <div className="grid grid-cols-[minmax(160px,200px)_1fr_1fr] gap-3">
-          {/* Empty spacer column */}
-          <div />
-          <div className="divide-y border-l">
-            {recordsA.length === 0 ? (
-              <div className="px-3 py-2 text-xs text-muted-foreground">—</div>
-            ) : (
-              recordsA.map((r) => (
-                <AssociatedRecordRow
-                  key={r.id}
-                  record={r}
-                  renderChips={renderChips}
-                  buildUrl={buildUrl}
-                />
-              ))
-            )}
-          </div>
-          <div className="divide-y border-l">
-            {recordsB.length === 0 ? (
-              <div className="px-3 py-2 text-xs text-muted-foreground">—</div>
-            ) : (
-              recordsB.map((r) => (
-                <AssociatedRecordRow
-                  key={r.id}
-                  record={r}
-                  renderChips={renderChips}
-                  buildUrl={buildUrl}
-                />
-              ))
-            )}
-          </div>
-        </div>
+    <button
+      type="button"
+      onClick={onSelect}
+      aria-pressed={selected}
+      className={cn(
+        "flex w-full flex-col items-start gap-2 rounded-md border p-3 text-left transition-colors",
+        "hover:bg-muted/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+        selected && "border-emerald-400 bg-emerald-50/40 ring-1 ring-emerald-200",
+        otherSelected && "opacity-60",
       )}
-    </div>
-  );
-}
-
-function AssociatedRecordRow({
-  record,
-  renderChips,
-  buildUrl,
-}: {
-  record: AssociatedRecord;
-  renderChips: (r: AssociatedRecord) => React.ReactNode;
-  buildUrl: (r: AssociatedRecord) => string;
-}) {
-  return (
-    <div className="flex items-center gap-1.5 px-3 py-1.5 text-xs">
-      <span className="min-w-0 truncate font-medium">{record.name || record.link || "Unnamed"}</span>
-      {renderChips(record)}
-      <button
-        type="button"
-        onClick={() => void openUrl(buildUrl(record))}
-        className="ml-auto flex-shrink-0 text-muted-foreground hover:text-foreground"
-        title="Open in HubSpot"
-      >
-        <ExternalLink className="h-3 w-3" />
-      </button>
-    </div>
+    >
+      <div className="flex w-full items-center gap-2">
+        <Badge variant="outline" className="h-5 px-1.5 text-[10px]">
+          {side.toUpperCase()}
+        </Badge>
+        <span className="min-w-0 flex-1 truncate text-sm font-medium">{name}</span>
+        {selected && (
+          <Badge className="h-5 bg-emerald-500 px-1.5 text-[10px] text-white hover:bg-emerald-500">
+            <Check className="mr-0.5 h-3 w-3" />
+            Winner
+          </Badge>
+        )}
+        {otherSelected && (
+          <Badge variant="outline" className="h-5 border-rose-300 px-1.5 text-[10px] text-rose-700">
+            Will be archived
+          </Badge>
+        )}
+      </div>
+      <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+        <span>id {rid}</span>
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            void openUrl(hubspotCreatorUrl(rid));
+          }}
+          className="inline-flex items-center gap-0.5 text-muted-foreground hover:text-foreground"
+          title="Open in HubSpot"
+        >
+          <ExternalLink className="h-3 w-3" />
+        </button>
+      </div>
+      {status && <StatusPill value={status} />}
+    </button>
   );
 }
 
@@ -696,81 +1098,6 @@ function CreatorHeader({
   );
 }
 
-function StatusPill({ value }: { value: string }) {
-  const trimmed = value?.trim() ?? "";
-  if (!trimmed) {
-    return (
-      <span className="inline-flex items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground ring-1 ring-inset ring-border">
-        <span className="inline-block h-1.5 w-1.5 rounded-full bg-muted-foreground/40" />
-        —
-      </span>
-    );
-  }
-  const badgeClass =
-    STATUS_BADGE_CLASS[trimmed] ?? "bg-muted text-muted-foreground ring-border";
-  const dotClass = STATUS_DOT_CLASS[trimmed] ?? "bg-muted-foreground/40";
-  return (
-    <span
-      className={cn(
-        "inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset",
-        badgeClass,
-      )}
-    >
-      <span className={cn("inline-block h-1.5 w-1.5 rounded-full", dotClass)} />
-      {trimmed}
-    </span>
-  );
-}
-
-function PropValueCell({
-  value,
-  rawValue,
-  propKey,
-}: {
-  value: string;
-  /** The unformatted value as returned by HubSpot. Used for URL detection and
-   *  the `openUrl` target so that an owner-name override (where `value` is a
-   *  human label and `rawValue` is the numeric id) doesn't break the click. */
-  rawValue?: string;
-  propKey: string;
-}) {
-  if (!value) return <span className="text-muted-foreground">—</span>;
-  const linkTarget = rawValue ?? value;
-  const isUrl = /^https?:\/\//i.test(linkTarget);
-  if (isUrl) {
-    return (
-      <button
-        type="button"
-        onClick={() => void openUrl(linkTarget)}
-        className="inline-flex items-start gap-1 break-all text-left text-primary hover:underline"
-      >
-        <span className="break-all">{value}</span>
-        <ExternalLink className="mt-0.5 h-3 w-3 flex-shrink-0" />
-      </button>
-    );
-  }
-  const isDateProp = propKey === "date_found" || propKey === "hs_createdate" || propKey === "hs_lastmodifieddate";
-  const display = isDateProp ? formatWithDaysAgo(value) : value;
-  return <span className="break-words text-foreground">{display}</span>;
-}
-
-/** Map a HubSpot property value to the string we actually want to show in the
- *  diff table. Currently only resolves `hubspot_owner_id` → owner name, but
- *  this is the natural extension point if other id-typed properties surface
- *  later (e.g. associated record ids). Falls through to the raw value when no
- *  override applies or the lookup misses. */
-function formatDisplayValue(
-  propKey: string,
-  value: string,
-  ownersById: Map<string, string>,
-): string {
-  if (!value) return value;
-  if (propKey === "hubspot_owner_id") {
-    return ownersById.get(value) ?? value;
-  }
-  return value;
-}
-
 function normalizeProps(props: Record<string, string | null>): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(props)) {
@@ -780,15 +1107,6 @@ function normalizeProps(props: Record<string, string | null>): Record<string, st
 }
 
 /** Map detector source codes to short user-facing chips on the why-card. */
-
-function formatWithDaysAgo(value: string): string {
-  const d = new Date(value);
-  if (Number.isNaN(d.getTime())) return value;
-  const days = Math.floor((Date.now() - d.getTime()) / (1000 * 60 * 60 * 24));
-  const ago = days === 0 ? "today" : days === 1 ? "1 day ago" : `${days} days ago`;
-  return `(${ago}) ${value}`;
-}
-
 function humanizeSource(s: string): string {
   switch (s) {
     case "canonical_collision":

@@ -144,6 +144,283 @@ function isMissingTableError(err: unknown): boolean {
 }
 
 /**
+ * Record a successful HubSpot merge for a duplicate pair.
+ *
+ * This is called AFTER the HubSpot merge endpoint has returned 2xx, so it's
+ * doing two things:
+ *
+ *   1. Upserts the canonical state row in `duplicate_pair_resolutions` to
+ *      `status='resolved'` with the winner id, who did it, and when. The
+ *      table CHECK constraint requires `record_id_a < record_id_b` (the
+ *      same canonical ordering as `pairKey`); we sort the inputs here so
+ *      callers can pass the winner/loser pair in any order.
+ *   2. Appends an immutable audit row to `duplicate_pair_events` with the
+ *      winner/loser pair captured in the payload. The event_type 'merged'
+ *      is enabled in the schema (see migration 20260512100000).
+ *
+ * The two writes are not in a transaction — Supabase's PostgREST surface
+ * doesn't expose one and the merge has already happened anyway. We do the
+ * audit insert first because if anything fails it's the safer half to
+ * lose: the resolutions row is recoverable from the event log, but a
+ * resolutions row without an event would silently lose attribution.
+ *
+ * Either failure surfaces to the caller with `describeSupabaseError` —
+ * the UI treats a Supabase failure as a non-blocking warning since the
+ * HubSpot side already succeeded.
+ */
+/** Lightweight associated-record shape mirroring the JSON returned by the
+ *  Rust `fetch_creator_associations_batch` command. Carried into snapshots
+ *  so the Merge History view can reconstruct the Associations card without
+ *  touching HubSpot. */
+export interface SnapshotAssociatedRecord {
+  id: string;
+  name?: string;
+  [key: string]: string | undefined;
+}
+
+export interface SnapshotAssociations {
+  videoProjects: SnapshotAssociatedRecord[];
+  externalClips: SnapshotAssociatedRecord[];
+}
+
+export interface MergeSnapshotPayload {
+  network: string;
+  canonicalUrl: string;
+  winnerName: string;
+  loserName: string;
+  winnerProps: Record<string, string>;
+  loserProps: Record<string, string>;
+  winnerAssociations: SnapshotAssociations | null;
+  loserAssociations: SnapshotAssociations | null;
+  /** Owner-id -> display-name map captured at merge time. Frozen here so the
+   *  diff renders the same human label in the History view even if the
+   *  owner is later renamed or deactivated in HubSpot. */
+  ownersById: Record<string, string>;
+}
+
+export interface RecordMergeResolutionArgs {
+  pairKey: string;
+  winnerRecordId: string;
+  loserRecordId: string;
+  actor: string;
+  /** Full pre-merge snapshot used by the History view. Required so we never
+   *  end up with a "merged" event that has no archaeological row to back
+   *  it. */
+  snapshot: MergeSnapshotPayload;
+}
+
+export async function recordMergeResolution(
+  args: RecordMergeResolutionArgs,
+): Promise<void> {
+  const client = getClient();
+  const now = new Date().toISOString();
+
+  // Sort to match the table CHECK (record_id_a < record_id_b) and the
+  // pairKey shape `${min}:${max}`. Callers pass winner/loser semantics;
+  // we don't assume one is alphabetically smaller than the other.
+  const [recordIdA, recordIdB] =
+    args.winnerRecordId < args.loserRecordId
+      ? [args.winnerRecordId, args.loserRecordId]
+      : [args.loserRecordId, args.winnerRecordId];
+
+  const { error: eventErr } = await client.from("duplicate_pair_events").insert({
+    pair_key: args.pairKey,
+    actor: args.actor || null,
+    event_type: "merged",
+    payload: {
+      winner_record_id: args.winnerRecordId,
+      loser_record_id: args.loserRecordId,
+    },
+  });
+  if (eventErr) throw eventErr;
+
+  const { error: resErr } = await client
+    .from("duplicate_pair_resolutions")
+    .upsert(
+      {
+        pair_key: args.pairKey,
+        record_id_a: recordIdA,
+        record_id_b: recordIdB,
+        status: "resolved",
+        resolved_by: args.actor || null,
+        resolved_at: now,
+        resolution_notes: "Merged via Duplicates page",
+        winner_record_id: args.winnerRecordId,
+      },
+      { onConflict: "pair_key" },
+    );
+  if (resErr) throw resErr;
+
+  // Snapshot insert is last so a snapshot-table failure (e.g. migration not
+  // applied yet on the user's Supabase project) never blocks the audit row
+  // or the resolutions upsert above. The caller surfaces the error as a
+  // non-blocking warning the same way it already does for the other two.
+  const { error: snapErr } = await client
+    .from("duplicate_merge_snapshots")
+    .insert({
+      pair_key: args.pairKey,
+      merged_at: now,
+      actor: args.actor || null,
+      record_id_a: recordIdA,
+      record_id_b: recordIdB,
+      winner_record_id: args.winnerRecordId,
+      loser_record_id: args.loserRecordId,
+      winner_name: args.snapshot.winnerName || null,
+      loser_name: args.snapshot.loserName || null,
+      network: args.snapshot.network || null,
+      canonical_url: args.snapshot.canonicalUrl || null,
+      winner_props: args.snapshot.winnerProps,
+      loser_props: args.snapshot.loserProps,
+      winner_associations: args.snapshot.winnerAssociations,
+      loser_associations: args.snapshot.loserAssociations,
+      owners_by_id: args.snapshot.ownersById,
+    });
+  if (snapErr) throw snapErr;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Merge history (snapshots)
+// ──────────────────────────────────────────────────────────────────────
+
+/** Lightweight row shape used by the Merge History list view. Excludes the
+ *  heavy props/associations/owners JSON columns. */
+export interface MergeSnapshotSummary {
+  id: string;
+  pairKey: string;
+  mergedAt: Date;
+  actor: string | null;
+  winnerRecordId: string;
+  loserRecordId: string;
+  winnerName: string | null;
+  loserName: string | null;
+  network: string | null;
+  canonicalUrl: string | null;
+}
+
+/** Full snapshot row including the property bags + associations + owners
+ *  map. Returned by `fetchMergeSnapshot` for the detail view. */
+export interface MergeSnapshot extends MergeSnapshotSummary {
+  recordIdA: string;
+  recordIdB: string;
+  winnerProps: Record<string, string>;
+  loserProps: Record<string, string>;
+  winnerAssociations: SnapshotAssociations | null;
+  loserAssociations: SnapshotAssociations | null;
+  ownersById: Record<string, string>;
+}
+
+interface MergeSnapshotSummaryRow {
+  id: string;
+  pair_key: string;
+  merged_at: string;
+  actor: string | null;
+  winner_record_id: string;
+  loser_record_id: string;
+  winner_name: string | null;
+  loser_name: string | null;
+  network: string | null;
+  canonical_url: string | null;
+}
+
+interface MergeSnapshotRow extends MergeSnapshotSummaryRow {
+  record_id_a: string;
+  record_id_b: string;
+  winner_props: Record<string, string> | null;
+  loser_props: Record<string, string> | null;
+  winner_associations: SnapshotAssociations | null;
+  loser_associations: SnapshotAssociations | null;
+  owners_by_id: Record<string, string> | null;
+}
+
+const MERGE_SNAPSHOT_SUMMARY_COLUMNS =
+  "id, pair_key, merged_at, actor, winner_record_id, loser_record_id, winner_name, loser_name, network, canonical_url";
+
+const MERGE_SNAPSHOT_FULL_COLUMNS =
+  `${MERGE_SNAPSHOT_SUMMARY_COLUMNS}, record_id_a, record_id_b, winner_props, loser_props, winner_associations, loser_associations, owners_by_id`;
+
+function mapSnapshotSummary(r: MergeSnapshotSummaryRow): MergeSnapshotSummary {
+  return {
+    id: r.id,
+    pairKey: r.pair_key,
+    mergedAt: new Date(r.merged_at),
+    actor: r.actor,
+    winnerRecordId: r.winner_record_id,
+    loserRecordId: r.loser_record_id,
+    winnerName: r.winner_name,
+    loserName: r.loser_name,
+    network: r.network,
+    canonicalUrl: r.canonical_url,
+  };
+}
+
+function mapSnapshot(r: MergeSnapshotRow): MergeSnapshot {
+  return {
+    ...mapSnapshotSummary(r),
+    recordIdA: r.record_id_a,
+    recordIdB: r.record_id_b,
+    winnerProps: r.winner_props ?? {},
+    loserProps: r.loser_props ?? {},
+    winnerAssociations: r.winner_associations,
+    loserAssociations: r.loser_associations,
+    ownersById: r.owners_by_id ?? {},
+  };
+}
+
+/**
+ * List recent merge snapshots, newest first. The table's `merged_at desc`
+ * index makes this cheap. Returns an empty list (with a console warning)
+ * when the snapshots table doesn't exist yet — keeps the History view
+ * functional during the rollout window before the migration is applied.
+ */
+export async function fetchMergeHistory(
+  opts: { limit?: number } = {},
+): Promise<MergeSnapshotSummary[]> {
+  const limit = opts.limit ?? 100;
+  const client = getClient();
+  const { data, error } = await client
+    .from("duplicate_merge_snapshots")
+    .select(MERGE_SNAPSHOT_SUMMARY_COLUMNS)
+    .order("merged_at", { ascending: false })
+    .limit(limit);
+  if (error) {
+    if (isMissingTableError(error)) {
+      console.warn(
+        "[duplicates] duplicate_merge_snapshots table not found; treating history as empty. " +
+          "Apply the migration to enable the Merge History view.",
+      );
+      return [];
+    }
+    throw error;
+  }
+  return (data ?? []).map((row) => mapSnapshotSummary(row as MergeSnapshotSummaryRow));
+}
+
+/** Fetch a single snapshot by id, including the heavy property/association/
+ *  owner JSON columns the detail view needs. Returns `null` when the row
+ *  isn't found (e.g. the user follows a stale link). */
+export async function fetchMergeSnapshot(
+  id: string,
+): Promise<MergeSnapshot | null> {
+  const client = getClient();
+  const { data, error } = await client
+    .from("duplicate_merge_snapshots")
+    .select(MERGE_SNAPSHOT_FULL_COLUMNS)
+    .eq("id", id)
+    .maybeSingle();
+  if (error) {
+    if (isMissingTableError(error)) {
+      console.warn(
+        "[duplicates] duplicate_merge_snapshots table not found while loading snapshot.",
+      );
+      return null;
+    }
+    throw error;
+  }
+  if (!data) return null;
+  return mapSnapshot(data as MergeSnapshotRow);
+}
+
+/**
  * Read the current resolution row for the given pair keys.
  *
  * Returns a Map keyed by `pairKey` so callers can do an O(1) lookup per

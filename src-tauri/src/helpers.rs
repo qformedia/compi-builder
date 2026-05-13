@@ -802,8 +802,16 @@ pub(crate) fn full_creator_properties() -> &'static [&'static str] {
         "category",
         "tags",
         "hubspot_owner_id",
+        // License info — surfaced as a dedicated card on the Duplicates
+        // detail page (see LICENSE_INFO_KEYS in src/lib/duplicates/diff.ts).
+        // All of these come from the HubSpot `license_information` group.
         "license_type",
         "license_checked",
+        "license_file",
+        "traceability_file",
+        "available_channels",
+        "available_platforms",
+        "date_granted",
         // Profile URLs (the 5 in-scope columns + cross-network extras)
         "instagram",
         "secondary_instagram",
@@ -844,6 +852,50 @@ pub(crate) fn full_creator_properties() -> &'static [&'static str] {
         "num_of_social_interactions",
         "num_of_video_projects",
     ]
+}
+
+// ── Native HubSpot merge ────────────────────────────────────────────────────
+
+/// Validate the inputs for a HubSpot merge call. Returns the trimmed
+/// `(winner, loser)` tuple on success, or a user-facing error message.
+///
+/// Centralised so the Tauri command and any future callers (e.g. a CLI
+/// repair tool) share the same guardrails — the merge endpoint is
+/// irreversible, so we want both ids non-empty and clearly distinct
+/// before any network traffic happens.
+pub(crate) fn validate_merge_ids(
+    winner: &str,
+    loser: &str,
+) -> Result<(String, String), String> {
+    let w = winner.trim().to_string();
+    let l = loser.trim().to_string();
+    if w.is_empty() || l.is_empty() {
+        return Err("Winner and loser ids must both be non-empty".to_string());
+    }
+    if w == l {
+        return Err("Winner and loser must be different records".to_string());
+    }
+    Ok((w, l))
+}
+
+/// Build the HubSpot v3 merge endpoint URL for the given custom-object id
+/// (e.g. `2-191972671` for Creators). Pulled out so the Tauri command body
+/// stays a thin glue layer and the URL shape is unit-testable.
+pub(crate) fn hubspot_merge_url(object_type_id: &str) -> String {
+    format!(
+        "https://api.hubapi.com/crm/v3/objects/{}/merge",
+        object_type_id
+    )
+}
+
+/// Build the merge request body. HubSpot expects camelCase keys —
+/// `primaryObjectId` is the winner that survives, `objectIdToMerge` is
+/// the loser that gets archived and redirected.
+pub(crate) fn hubspot_merge_body(winner_id: &str, loser_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "primaryObjectId": winner_id,
+        "objectIdToMerge": loser_id,
+    })
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -1937,5 +1989,58 @@ mod tests {
                 "platform {platform} maps to `{prop}` which is not in full_creator_properties()"
             );
         }
+    }
+
+    // ── HubSpot merge helpers ────────────────────────────────────────────
+
+    #[test]
+    fn validate_merge_ids_accepts_distinct_ids() {
+        let (w, l) = validate_merge_ids("12345", "67890").expect("should accept distinct ids");
+        assert_eq!(w, "12345");
+        assert_eq!(l, "67890");
+    }
+
+    #[test]
+    fn validate_merge_ids_trims_whitespace() {
+        let (w, l) = validate_merge_ids("  12345  ", "\t67890\n").expect("should trim");
+        assert_eq!(w, "12345");
+        assert_eq!(l, "67890");
+    }
+
+    #[test]
+    fn validate_merge_ids_rejects_empty() {
+        assert!(validate_merge_ids("", "67890").is_err());
+        assert!(validate_merge_ids("12345", "").is_err());
+        assert!(validate_merge_ids("   ", "67890").is_err());
+        assert!(validate_merge_ids("12345", "\t").is_err());
+    }
+
+    #[test]
+    fn validate_merge_ids_rejects_same_id_after_trim() {
+        // Defence against a UI bug that swaps both sides to the same record —
+        // HubSpot would 400 anyway but we'd rather fail fast with a clearer
+        // message before the network call.
+        assert!(validate_merge_ids("12345", "12345").is_err());
+        assert!(validate_merge_ids(" 12345 ", "12345").is_err());
+    }
+
+    #[test]
+    fn hubspot_merge_url_builds_creators_endpoint() {
+        // The constant in lib.rs is the canonical id; we only spot-check the
+        // shape here so a typo in the path component shows up as a test fail.
+        assert_eq!(
+            hubspot_merge_url("2-191972671"),
+            "https://api.hubapi.com/crm/v3/objects/2-191972671/merge",
+        );
+    }
+
+    #[test]
+    fn hubspot_merge_body_has_camelcase_keys() {
+        let body = hubspot_merge_body("12345", "67890");
+        // HubSpot's documented contract — the keys are camelCase, not snake.
+        assert_eq!(body["primaryObjectId"], "12345");
+        assert_eq!(body["objectIdToMerge"], "67890");
+        // Nothing else should leak into the body or HubSpot may reject it.
+        assert_eq!(body.as_object().map(|o| o.len()), Some(2));
     }
 }

@@ -4467,6 +4467,104 @@ async fn list_owners(token: String) -> Result<serde_json::Value, String> {
     Ok(serde_json::json!(owners))
 }
 
+/// Batch-resolve HubSpot file ids to friendly file names.
+///
+/// HubSpot file-picker properties (e.g. `license_file`, `traceability_file`
+/// on the Creator object) store opaque numeric file ids. The Duplicates
+/// detail and Merge History views display these as clickable chips, but
+/// the raw id is meaningless to a human reviewer — we'd rather show
+/// `signed_license_alex.pdf` than `351950702785`.
+///
+/// HubSpot's Files v3 API has no documented batch-read endpoint, so we
+/// loop sequentially. In practice the License Information card has at
+/// most ~4 ids visible at once (one or two file fields per side), so the
+/// extra round-trips are not worth the futures-crate dependency that a
+/// `join_all`-style parallel fetch would require.
+///
+/// Returns a `{ "<file-id>": { "name": "...", "extension": "...",
+/// "url": "..." } }` map. Missing / archived ids are silently dropped
+/// from the map so the frontend can fall back to rendering the raw id.
+/// Network and 401-style errors propagate so the UI can show them once
+/// instead of N times.
+#[tauri::command]
+async fn fetch_hubspot_files_batch(
+    token: String,
+    file_ids: Vec<String>,
+) -> Result<serde_json::Value, String> {
+    if file_ids.is_empty() {
+        return Ok(serde_json::json!({}));
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let mut out = serde_json::Map::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for raw_id in file_ids {
+        let id = raw_id.trim();
+        if id.is_empty() || !seen.insert(id.to_string()) {
+            // Dedupe on the fly so the same id present on both sides of
+            // a pair isn't fetched twice.
+            continue;
+        }
+        let url = format!("https://api.hubapi.com/files/v3/files/{}", id);
+        let res = client
+            .get(&url)
+            .bearer_auth(&token)
+            .send()
+            .await
+            .map_err(|e| format!("HubSpot file lookup failed for {id}: {e}"))?;
+
+        let status = res.status();
+        if status == reqwest::StatusCode::NOT_FOUND {
+            // Archived/deleted file — skip without failing the batch so
+            // sibling lookups still come back. Frontend falls back to id.
+            continue;
+        }
+        if !status.is_success() {
+            let text = res.text().await.unwrap_or_default();
+            return Err(format!(
+                "HubSpot file lookup error for {id} ({}): {}",
+                status, text
+            ));
+        }
+
+        let json: serde_json::Value = res
+            .json()
+            .await
+            .map_err(|e| format!("Failed to parse HubSpot file {id}: {e}"))?;
+
+        let name = json
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let extension = json
+            .get("extension")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let file_url = json
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+
+        out.insert(
+            id.to_string(),
+            serde_json::json!({
+                "name": name,
+                "extension": extension,
+                "url": file_url,
+            }),
+        );
+    }
+
+    Ok(serde_json::Value::Object(out))
+}
+
 /// Search for an existing External Clip by its link URL. Returns the clip ID if found.
 #[tauri::command]
 async fn find_clip_by_link(token: String, link: String) -> Result<serde_json::Value, String> {
@@ -5981,6 +6079,56 @@ async fn update_creator_properties(
     Ok(())
 }
 
+/// Merge two Creator records using HubSpot's native merge endpoint.
+///
+/// The winner (`primaryObjectId`) keeps its property values for any field
+/// where it is non-empty; empty winner fields are filled from the loser
+/// (`objectIdToMerge`). Every association on the loser (Contacts, External
+/// Clips, Public Video Projects, Send Link Actions, Social Interactions,
+/// Video Projects) is transferred to the winner atomically. The loser is
+/// then archived in HubSpot and any incoming requests for it redirect to
+/// the winner. The whole operation is irreversible.
+///
+/// We surface the HubSpot response body verbatim on non-2xx so missing
+/// scope errors (`crm.objects.custom.write`) reach the user as actionable
+/// text rather than the generic "HubSpot error" wrapper.
+#[tauri::command]
+async fn merge_creators(
+    token: String,
+    winner_id: String,
+    loser_id: String,
+) -> Result<serde_json::Value, String> {
+    let (winner, loser) = helpers::validate_merge_ids(&winner_id, &loser_id)?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    let url = helpers::hubspot_merge_url(CREATORS_OBJECT_ID);
+    let body = helpers::hubspot_merge_body(&winner, &loser);
+
+    let res = client
+        .post(&url)
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Merge creators request failed: {e}"))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("HubSpot merge error ({}): {}", status, text));
+    }
+
+    let json: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse HubSpot merge response: {e}"))?;
+    Ok(json)
+}
+
 /// Fetch latest clips filtered by found_in and link pattern (instagram/tiktok)
 #[tauri::command]
 async fn search_latest_clips_by_platform(
@@ -6591,6 +6739,7 @@ pub fn run() {
             create_creator,
             resolve_owner_id,
             list_owners,
+            fetch_hubspot_files_batch,
             find_clip_by_link,
             create_external_clip,
             resolve_creator_from_clip_url,
@@ -6608,6 +6757,7 @@ pub fn run() {
             search_clips_missing_metrics,
             update_clip_properties,
             update_creator_properties,
+            merge_creators,
             search_latest_clips_by_platform,
             save_text_file,
             hubspot_export_all_creators_start,
