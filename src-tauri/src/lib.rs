@@ -23,8 +23,8 @@ use helpers::{
     build_filter_groups, detect_platform, extract_instagram_caption_from_html,
     extract_instagram_shortcode, extract_instagram_username_from_html, extract_meta_content_text,
     find_downloaded_file, find_file_by_id, format_selection_for_url, friendly_download_error,
-    parse_social_urls, probe_duration, providers_for_url, remove_existing_clip_files, strip_prefix,
-    SocialPlatform,
+    parse_social_urls, pick_ig_handle_from_ytdlp, probe_duration, providers_for_url,
+    remove_existing_clip_files, strip_prefix, SocialPlatform,
 };
 
 use chrono::Utc;
@@ -4031,11 +4031,9 @@ async fn resolve_instagram_info(
     instagram_delay().await;
 
     if let Ok(json) = result {
-        let handle = json
-            .get("uploader_id")
-            .and_then(|v| v.as_str())
-            .or_else(|| json.get("uploader").and_then(|v| v.as_str()))
-            .map(String::from);
+        // yt-dlp's IG `uploader_id` is the numeric pk (e.g. `65486544502`) —
+        // see helpers::pick_ig_handle_from_ytdlp for the full reasoning.
+        let handle = pick_ig_handle_from_ytdlp(&json);
         let display_name = json
             .get("channel")
             .and_then(|v| v.as_str())

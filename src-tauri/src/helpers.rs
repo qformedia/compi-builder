@@ -547,10 +547,18 @@ pub(crate) fn extract_instagram_shortcode(url: &str) -> Option<String> {
 /// Extract a username from Instagram embed/oEmbed HTML.
 /// Looks for profile links like `href="/username/"` or `instagram.com/username/`
 ///
+/// Anchored to a real `instagram.com` domain boundary so substrings inside
+/// `cdninstagram.com/v/...` thumbnail URLs cannot leak through as handles.
 /// Filters out Instagram-reserved path tokens (system pages, CDN asset paths
 /// like `rsrc.php`, etc.) so we never claim those as a creator handle.
 pub(crate) fn extract_instagram_username_from_html(html: &str) -> Option<String> {
-    let re = regex::Regex::new(r#"instagram\.com/([a-zA-Z0-9._]+)/?"#).ok()?;
+    // The leading `(?:^|//|[^a-zA-Z0-9.-])` requires a domain boundary before
+    // `instagram.com` — otherwise `cdninstagram.com/v/...` would match and
+    // we'd return `v` as the handle.
+    let re = regex::Regex::new(
+        r#"(?:^|//|[^a-zA-Z0-9.-])(?:www\.)?instagram\.com/([a-zA-Z0-9._]+)"#,
+    )
+    .ok()?;
     for caps in re.captures_iter(html) {
         let candidate = caps.get(1)?.as_str();
         if is_valid_instagram_handle_candidate(candidate) {
@@ -558,6 +566,58 @@ pub(crate) fn extract_instagram_username_from_html(html: &str) -> Option<String>
         }
     }
     None
+}
+
+/// Parse the username out of a canonical Instagram profile URL.
+///
+/// Used by SocialKit recovery and as a defensive helper anywhere we need to
+/// extract a handle from an `authorLink`-style URL. Only accepts strict
+/// `instagram.com/<handle>` shapes; rejects anything that doesn't look like
+/// a valid handle (numeric pk values, reserved paths, CDN segments).
+pub(crate) fn username_from_ig_profile_url(link: &str) -> Option<String> {
+    let re = regex::Regex::new(
+        r#"^https?://(?:www\.)?instagram\.com/([a-zA-Z0-9._]+)/?"#,
+    )
+    .ok()?;
+    let caps = re.captures(link.trim())?;
+    let candidate = caps.get(1)?.as_str();
+    if is_valid_instagram_handle_candidate(candidate) {
+        Some(candidate.to_string())
+    } else {
+        None
+    }
+}
+
+/// Pick a real Instagram handle from a yt-dlp `--dump-json` payload.
+///
+/// yt-dlp's Instagram extractor sets `channel = user_info['username']` (the
+/// real handle) and `uploader_id = user_info['pk']` (the numeric Instagram
+/// internal ID). Reading `uploader_id` first — which the code used to do —
+/// produced creators like `@65486544502` for any clip that fell through to
+/// the yt-dlp strategy.
+///
+/// Order:
+/// 1. `channel` — yt-dlp's username field for IG.
+/// 2. `uploader_id` — only when not all-digits (TikTok-style legacy posts
+///    sometimes have a username here; modern IG entries do not).
+/// 3. `uploader` — display name fallback. Not ideal as a handle but better
+///    than the numeric pk and still surfaces something reviewable in the UI.
+pub(crate) fn pick_ig_handle_from_ytdlp(j: &serde_json::Value) -> Option<String> {
+    let pick = |key: &str| {
+        j.get(key)
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+    if let Some(s) = pick("channel") {
+        return Some(s.to_string());
+    }
+    if let Some(s) = pick("uploader_id") {
+        if !s.chars().all(|c| c.is_ascii_digit()) {
+            return Some(s.to_string());
+        }
+    }
+    pick("uploader").map(String::from)
 }
 
 /// Reject Instagram path tokens that can never be valid usernames.
@@ -615,6 +675,17 @@ fn is_valid_instagram_handle_candidate(candidate: &str) -> bool {
         return false;
     }
     if candidate.starts_with("reel") {
+        return false;
+    }
+    // Single-letter tokens like `v`, `t`, `s` only appear in CDN paths
+    // (`scontent.cdninstagram.com/v/...`). Real IG handles are ≥ 2 chars.
+    if candidate.len() == 1 {
+        return false;
+    }
+    // All-digit candidates with length ≥ 6 are Instagram `pk` (internal user
+    // ID) values that leak in via SocialKit fallbacks or embed-page JSON
+    // blobs. Real numeric-only IG handles are rare and well below 6 digits.
+    if candidate.len() >= 6 && candidate.chars().all(|c| c.is_ascii_digit()) {
         return false;
     }
     true
@@ -1589,6 +1660,131 @@ mod tests {
             extract_instagram_username_from_html(html),
             Some("julie.strings".into())
         );
+    }
+
+    #[test]
+    fn ig_username_skips_cdninstagram_v_path() {
+        // The old unanchored regex matched `instagram.com/v/...` inside
+        // `cdninstagram.com/v/...` thumbnail URLs and returned `v` as the
+        // handle, producing `https://www.instagram.com/v/` artist links.
+        let html = r#"<img src="https://scontent.cdninstagram.com/v/t51.29350-15/abc.jpg">"#;
+        assert_eq!(extract_instagram_username_from_html(html), None);
+    }
+
+    #[test]
+    fn ig_username_picks_real_handle_over_cdninstagram() {
+        let html = r#"<img src="https://scontent.cdninstagram.com/v/t51.29350-15/abc.jpg">
+                      <a href="https://www.instagram.com/realartist/">Profile</a>"#;
+        assert_eq!(
+            extract_instagram_username_from_html(html),
+            Some("realartist".into())
+        );
+    }
+
+    #[test]
+    fn ig_username_rejects_numeric_pk_handle() {
+        // 11-digit Instagram `pk` values leak in via embed-page JSON blobs
+        // and must never be returned as a handle.
+        let html = r#"<a href="https://www.instagram.com/65486544502/">X</a>"#;
+        assert_eq!(extract_instagram_username_from_html(html), None);
+    }
+
+    #[test]
+    fn ig_username_picks_real_handle_over_numeric_pk() {
+        let html = r#"<a href="https://www.instagram.com/65486544502/">Numeric</a>
+                      <a href="https://www.instagram.com/realartist/">Real</a>"#;
+        assert_eq!(
+            extract_instagram_username_from_html(html),
+            Some("realartist".into())
+        );
+    }
+
+    // ── username_from_ig_profile_url ─────────────────────────────────────
+
+    #[test]
+    fn ig_profile_url_extracts_username() {
+        assert_eq!(
+            username_from_ig_profile_url("https://www.instagram.com/yuumi_cat9/"),
+            Some("yuumi_cat9".into())
+        );
+        assert_eq!(
+            username_from_ig_profile_url("https://instagram.com/julie.strings"),
+            Some("julie.strings".into())
+        );
+    }
+
+    #[test]
+    fn ig_profile_url_rejects_numeric_pk() {
+        assert_eq!(
+            username_from_ig_profile_url("https://www.instagram.com/65486544502/"),
+            None
+        );
+    }
+
+    #[test]
+    fn ig_profile_url_rejects_non_instagram_host() {
+        assert_eq!(
+            username_from_ig_profile_url("https://scontent.cdninstagram.com/v/t51/abc.jpg"),
+            None
+        );
+    }
+
+    #[test]
+    fn ig_profile_url_rejects_reserved_path() {
+        assert_eq!(
+            username_from_ig_profile_url("https://www.instagram.com/reel/ABC123/"),
+            None
+        );
+    }
+
+    // ── pick_ig_handle_from_ytdlp ────────────────────────────────────────
+
+    #[test]
+    fn ytdlp_ig_prefers_channel_over_numeric_uploader_id() {
+        // yt-dlp's IG extractor sets `channel` to the username and
+        // `uploader_id` to the numeric `pk`. We must read `channel`.
+        let json = serde_json::json!({
+            "channel": "realuser",
+            "uploader_id": "65486544502",
+            "uploader": "Real User",
+        });
+        assert_eq!(pick_ig_handle_from_ytdlp(&json), Some("realuser".into()));
+    }
+
+    #[test]
+    fn ytdlp_ig_skips_numeric_uploader_id_when_channel_missing() {
+        let json = serde_json::json!({
+            "uploader_id": "65486544502",
+            "uploader": "Real User",
+        });
+        // Falls through past the all-digit `uploader_id` to `uploader`.
+        assert_eq!(pick_ig_handle_from_ytdlp(&json), Some("Real User".into()));
+    }
+
+    #[test]
+    fn ytdlp_ig_accepts_string_uploader_id_when_channel_missing() {
+        // Legacy / non-IG-API extractor paths still surface a string handle
+        // in `uploader_id`. Accept it when it's clearly not a numeric pk.
+        let json = serde_json::json!({
+            "uploader_id": "naomipq",
+            "uploader": "Naomi",
+        });
+        assert_eq!(pick_ig_handle_from_ytdlp(&json), Some("naomipq".into()));
+    }
+
+    #[test]
+    fn ytdlp_ig_returns_none_when_all_fields_missing() {
+        let json = serde_json::json!({});
+        assert_eq!(pick_ig_handle_from_ytdlp(&json), None);
+    }
+
+    #[test]
+    fn ytdlp_ig_ignores_empty_channel() {
+        let json = serde_json::json!({
+            "channel": "   ",
+            "uploader_id": "naomipq",
+        });
+        assert_eq!(pick_ig_handle_from_ytdlp(&json), Some("naomipq".into()));
     }
 
     // ── extract_hashtags ─────────────────────────────────────────────────
