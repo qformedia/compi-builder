@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Button } from "@/components/ui/button";
@@ -12,6 +12,12 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { FolderOpen, FileText, Loader2, CheckCircle } from "lucide-react";
+import {
+  listExcludedOwners,
+  excludeOwner,
+  unexcludeOwner,
+  isSupabaseConfigured,
+} from "@/lib/supabase";
 import type { AppSettings } from "@/types";
 
 declare const __APP_VERSION__: string;
@@ -54,10 +60,84 @@ export function SettingsPage({ settings, onSave, onCheckUpdate }: Props) {
   const [emailError, setEmailError] = useState<string | null>(null);
   const [saved, setSaved] = useState(false);
 
+  // Excluded owners state
+  const [hsOwners, setHsOwners] = useState<Array<{ id: string; email: string; firstName: string; lastName: string }>>([]);
+  const [excludedIds, setExcludedIds] = useState<Set<string>>(new Set());
+  const [ownersLoading, setOwnersLoading] = useState(false);
+  const [ownersError, setOwnersError] = useState<string | null>(null);
+  const [excludeToggling, setExcludeToggling] = useState<string | null>(null);
+
   useEffect(() => {
     setDraft(settings);
     setEmailError(null);
   }, [settings]);
+
+  const loadOwnerData = useCallback(async (token: string) => {
+    if (!token.trim()) return;
+    setOwnersLoading(true);
+    setOwnersError(null);
+    // Owners and excludes are loaded independently so a missing/empty
+    // hs_excluded_owners table (e.g. migration not yet applied) doesn't
+    // hide the owners list.
+    try {
+      const owners = await invoke<Array<{ id: string; email: string; firstName: string; lastName: string }>>(
+        "list_owners",
+        { token },
+      );
+      owners.sort((a, b) => {
+        const nameA = `${a.firstName} ${a.lastName}`.trim().toLowerCase();
+        const nameB = `${b.firstName} ${b.lastName}`.trim().toLowerCase();
+        return nameA.localeCompare(nameB);
+      });
+      setHsOwners(owners);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setOwnersError(msg || "Failed to load HubSpot owners");
+      setHsOwners([]);
+    } finally {
+      setOwnersLoading(false);
+    }
+
+    try {
+      const excluded = await listExcludedOwners();
+      setExcludedIds(new Set(excluded.map((e) => e.ownerId)));
+    } catch {
+      setExcludedIds(new Set());
+    }
+  }, []);
+
+  useEffect(() => {
+    loadOwnerData(draft.hubspotToken);
+  }, [draft.hubspotToken, loadOwnerData]);
+
+  const handleToggleExclude = async (
+    owner: { id: string; email: string; firstName: string; lastName: string },
+    exclude: boolean,
+  ) => {
+    setExcludeToggling(owner.id);
+    try {
+      if (exclude) {
+        const displayName = [owner.firstName, owner.lastName].filter(Boolean).join(" ") || undefined;
+        await excludeOwner({
+          ownerId: owner.id,
+          email: owner.email || undefined,
+          displayName,
+        });
+        setExcludedIds((prev) => new Set(prev).add(owner.id));
+      } else {
+        await unexcludeOwner(owner.id);
+        setExcludedIds((prev) => {
+          const next = new Set(prev);
+          next.delete(owner.id);
+          return next;
+        });
+      }
+    } catch {
+      // Silently fail — will retry on next toggle or reload
+    } finally {
+      setExcludeToggling(null);
+    }
+  };
 
   const handleSave = async () => {
     const emailChanged = draft.ownerEmail.trim() !== settings.ownerEmail;
@@ -341,6 +421,82 @@ export function SettingsPage({ settings, onSave, onCheckUpdate }: Props) {
                 extension.
               </p>
             </div>
+
+            {/* Excluded Owners */}
+            <details className="group/excluded">
+              <summary className="cursor-pointer text-xs font-medium text-muted-foreground hover:text-foreground">
+                Excluded owners
+              </summary>
+              <div className="mt-2 grid gap-2">
+                <p className="text-xs text-muted-foreground">
+                  Toggle off any HubSpot user you want hidden from the Create &gt; Owner dropdown
+                  (e.g. ex-teammates, pending invites). Synced across all CompiFlow installs.
+                </p>
+                {!draft.hubspotToken.trim() ? (
+                  <p className="text-xs text-muted-foreground italic">
+                    Add a HubSpot token above to manage owner visibility.
+                  </p>
+                ) : !isSupabaseConfigured ? (
+                  <p className="text-xs text-muted-foreground italic">
+                    Supabase is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY to
+                    manage owner visibility.
+                  </p>
+                ) : ownersLoading ? (
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                    Loading owners...
+                  </div>
+                ) : ownersError ? (
+                  <p className="text-xs text-destructive">
+                    Couldn't load HubSpot owners — {ownersError}
+                  </p>
+                ) : hsOwners.length === 0 ? (
+                  <p className="text-xs text-muted-foreground italic">
+                    No HubSpot owners returned. Check your token has the required scopes.
+                  </p>
+                ) : (
+                  <div className="max-h-72 overflow-y-auto rounded-md border divide-y">
+                    {hsOwners.map((o) => {
+                      const name = [o.firstName, o.lastName].filter(Boolean).join(" ") || o.email || o.id;
+                      const isExcluded = excludedIds.has(o.id);
+                      const isVisible = !isExcluded;
+                      const toggling = excludeToggling === o.id;
+                      return (
+                        <div
+                          key={o.id}
+                          className="flex items-center gap-3 px-3 py-2 text-xs hover:bg-muted/40"
+                        >
+                          <div className="flex-1 min-w-0">
+                            <div className="truncate font-medium text-foreground">{name}</div>
+                            {o.email && (
+                              <div className="truncate text-muted-foreground">{o.email}</div>
+                            )}
+                          </div>
+                          {toggling && <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />}
+                          <button
+                            type="button"
+                            role="switch"
+                            aria-checked={isVisible}
+                            aria-label={`${name} ${isVisible ? "visible" : "hidden"} in Create dropdown`}
+                            disabled={toggling}
+                            onClick={() => handleToggleExclude(o, isVisible)}
+                            className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none disabled:opacity-50 ${
+                              isVisible ? "bg-primary" : "bg-muted-foreground/30"
+                            }`}
+                          >
+                            <span
+                              className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
+                                isVisible ? "translate-x-4" : "translate-x-0"
+                              }`}
+                            />
+                          </button>
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </div>
+            </details>
           </div>
         </details>
 

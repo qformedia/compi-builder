@@ -164,3 +164,61 @@ export async function recordCreatorsExport(
   if (error) throw error;
 }
 
+/* ------------------------------------------------------------------ */
+/* Excluded HubSpot owners (Create > Owner dropdown filter)           */
+/* ------------------------------------------------------------------ */
+
+export interface ExcludedOwner {
+  ownerId: string;
+  email: string | null;
+  displayName: string | null;
+  note: string | null;
+  excludedBy: string | null;
+}
+
+/** Returns the current exclude list, or `[]` if Supabase is not configured. */
+export async function listExcludedOwners(): Promise<ExcludedOwner[]> {
+  if (!isSupabaseConfigured) return [];
+  const client = createSupabaseClient();
+  const { data, error } = await client
+    .from("hs_excluded_owners")
+    .select("owner_id, email, display_name, note, excluded_by")
+    .order("display_name", { ascending: true });
+  if (error) throw error;
+  return (data ?? []).map((r) => ({
+    ownerId: r.owner_id as string,
+    email: (r.email as string) ?? null,
+    displayName: (r.display_name as string) ?? null,
+    note: (r.note as string) ?? null,
+    excludedBy: (r.excluded_by as string) ?? null,
+  }));
+}
+
+export async function excludeOwner(o: {
+  ownerId: string;
+  email?: string;
+  displayName?: string;
+  excludedBy?: string;
+}): Promise<void> {
+  const client = createSupabaseClient();
+  const { error } = await client.from("hs_excluded_owners").upsert(
+    {
+      owner_id: o.ownerId,
+      email: o.email ?? null,
+      display_name: o.displayName ?? null,
+      excluded_by: o.excludedBy ?? null,
+    },
+    { onConflict: "owner_id" },
+  );
+  if (error) throw error;
+}
+
+export async function unexcludeOwner(ownerId: string): Promise<void> {
+  const client = createSupabaseClient();
+  const { error } = await client
+    .from("hs_excluded_owners")
+    .delete()
+    .eq("owner_id", ownerId);
+  if (error) throw error;
+}
+

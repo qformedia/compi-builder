@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { saveSession, getSessions, type ClipSessionRecord } from "@/lib/clip-sessions";
 import { checkAllUrls, type UrlComplianceResult } from "@/lib/url-compliance";
+import { listExcludedOwners } from "@/lib/supabase";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Input } from "@/components/ui/input";
@@ -212,9 +213,13 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
 
   useEffect(() => {
     if (!token) return;
-    invoke<Array<{ id: string; email: string; firstName: string; lastName: string }>>("list_owners", { token })
-      .then(setOwners)
-      .catch(() => {});
+    Promise.all([
+      invoke<Array<{ id: string; email: string; firstName: string; lastName: string }>>("list_owners", { token }),
+      listExcludedOwners().catch(() => []),
+    ]).then(([all, excluded]) => {
+      const excludedIds = new Set(excluded.map((e) => e.ownerId));
+      setOwners(all.filter((o) => !excludedIds.has(o.id)));
+    }).catch(() => {});
   }, [token]);
 
   useEffect(() => {
