@@ -5,17 +5,27 @@ The latest release is at the top.
 
 <!-- changelog-entries -->
 
-## v1.2.0 - 2026-05-07
+## v2.0.0 - 2026-05-13
 
 ### What's new
 
-- New "Ask MiniMiki" button in the header opens a chat with our team's Telegram assistant, with the current page, project, and a screenshot of the active window already attached so you don't have to re-explain what you were doing. Hold Shift while clicking to skip the screenshot.
-- MiniMiki guides bug reports and feature ideas through a quick conversation in Telegram and sends a clean summary to Miquel for review, with one-tap Approve or Reject buttons in his admin chat.
-- The existing "Share Feedback" form stays in place during the trial, so you can use whichever feels easier — both end up in the same place.
+- New **Duplicates** page scans HubSpot creators for the same social URL across Instagram, TikTok, YouTube, Bilibili, Douyin, Xiaohongshu, and Kuaishou and lets the team review and merge each pair side-by-side, with associations, resolved owner names, and live presence showing who else is on the same record.
+- New **License Information** card on every duplicate pair shows status, license type, license checked, license file, traceability file, available channels, available platforms, date granted, and special requests in one HubSpot-style table. License and traceability file ids are clickable, open the file in HubSpot, and display the friendly filename instead of the raw id.
+- New **Merge history** tab keeps an immutable A/B comparison of every merge done from the app, so you can audit a past merge even after HubSpot archives the loser side.
+- **Data Integrity** has a new check that flags creators whose profile URLs don't match the team's strict format rules, plus a manual refresh and a fix for clips that previously kept reappearing after being resolved.
+- **Settings** lets you maintain an exclude list of HubSpot owners that should not appear in the Create-owner dropdown, synced across the team.
+- **Latest Clips** in the sidebar now sorts by HubSpot create date and offers a one-click copy of the clip link.
+
+### What got better
+
+- Merging a duplicate no longer reloads the full creators list — resolved pairs stay visible under "Resolved this session", are clickable to reopen for review, and Refresh is the only thing that re-runs the scan.
+- The merge confirmation dialog spells out HubSpot's "older create date wins" rule so reviewers aren't surprised by the merged record's create date.
+- Creator suggestions skip dead Instagram links, General Search no longer overwrites later results with stale earlier batches, and numeric Instagram primary keys are no longer mistaken for handles.
 
 ### Behind the scenes
 
-- New conversation, message, and handoff tables back the assistant; admin notifications now include the chat transcript and approval buttons.
+- Unified clip-resolution cascade with a SocialFetch fallback and friendlier messages when a provider is rate-limited or unreachable.
+- New Supabase tables back duplicate resolutions, merge snapshots, and the owner exclude list — read/write open to the team, updates and deletes blocked so the audit history stays immutable.
 
 ## v1.1.0 - 2026-05-05
 
