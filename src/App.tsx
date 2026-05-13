@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { Clock, Film, CheckCircle, Loader2, Sparkles, RefreshCw, X, RulerDimensionLine, AlertTriangle, Search, ListOrdered, MessageSquarePlus, Globe, Tags, ShieldAlert, ArrowRight, ScrollText, Bot } from "lucide-react";
+import { Clock, Film, CheckCircle, Loader2, Sparkles, RefreshCw, X, RulerDimensionLine, AlertTriangle, Search, ListOrdered, MessageSquarePlus, Globe, Tags, ShieldAlert, ArrowRight, ScrollText /* , Bot — re-enable with the hidden MiniMiki button below */ } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { HubSpotIcon } from "@/components/ClipCard";
 import { fetchVideoProjectClips } from "@/lib/hubspot";
@@ -289,32 +289,32 @@ function App() {
     return () => { cancelled = true; };
   }, [checkForUpdates]);
 
-  // Open MiniMiki on Telegram. Uploads a screenshot + page/project context
-  // unless Shift is held. Falls back to a context-less deep link if the
-  // handoff fails (e.g. Supabase not configured, screen-recording perm).
-  const openMiniMiki = useCallback(async (event: React.MouseEvent) => {
-    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL ?? "";
-    const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY ?? "";
-    const botUsername = import.meta.env.VITE_MINIMIKI_BOT_USERNAME ?? "minimiki_bot";
-    const includeScreenshot = !event.shiftKey;
-    try {
-      const url = await invoke<string>("prepare_minimiki_handoff", {
-        supabaseUrl,
-        supabaseAnonKey,
-        botUsername,
-        context: {
-          appVersion: __APP_VERSION__,
-          page: activePage,
-          projectName: project?.name,
-        },
-        includeScreenshot,
-      });
-      await openUrl(url);
-    } catch (err) {
-      console.error("MiniMiki handoff failed; opening bot directly:", err);
-      await openUrl(`https://t.me/${botUsername}`);
-    }
-  }, [activePage, project]);
+  // MiniMiki handoff is temporarily hidden — see the commented-out
+  // toolbar button below. Re-enable by uncommenting the `Bot` import,
+  // this `openMiniMiki` callback, and the JSX block in one go.
+  // const openMiniMiki = useCallback(async (event: React.MouseEvent) => {
+  //   const supabaseUrl = import.meta.env.VITE_SUPABASE_URL ?? "";
+  //   const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY ?? "";
+  //   const botUsername = import.meta.env.VITE_MINIMIKI_BOT_USERNAME ?? "minimiki_bot";
+  //   const includeScreenshot = !event.shiftKey;
+  //   try {
+  //     const url = await invoke<string>("prepare_minimiki_handoff", {
+  //       supabaseUrl,
+  //       supabaseAnonKey,
+  //       botUsername,
+  //       context: {
+  //         appVersion: __APP_VERSION__,
+  //         page: activePage,
+  //         projectName: project?.name,
+  //       },
+  //       includeScreenshot,
+  //     });
+  //     await openUrl(url);
+  //   } catch (err) {
+  //     console.error("MiniMiki handoff failed; opening bot directly:", err);
+  //     await openUrl(`https://t.me/${botUsername}`);
+  //   }
+  // }, [activePage, project]);
 
   // ── Download-progress listener (moved from ProjectTab) ──────────────────
   interface DownloadProgress {
@@ -1241,14 +1241,15 @@ function App() {
               Project: {project.name}
             </span>
           )}
-          <Button
+          {/* MiniMiki button temporarily hidden */}
+          {/* <Button
             variant="ghost"
             size="icon"
             onClick={openMiniMiki}
             title="Ask MiniMiki on Telegram (Shift-click for no screenshot)"
           >
             <Bot className="h-5 w-5" />
-          </Button>
+          </Button> */}
           <Button
             variant="ghost"
             size="icon"
