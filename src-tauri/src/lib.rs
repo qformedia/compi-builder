@@ -6003,10 +6003,10 @@ async fn search_latest_clips_by_platform(
             ]
         }],
         "properties": [
-            "link", "creator_name", "date_found", "createdate", "fetched_social_thumbnail",
+            "link", "creator_name", "date_found", "hs_createdate", "fetched_social_thumbnail",
             "social_media_caption", "likes", "plays", "comments", "shares", "found_in"
         ],
-        "sorts": [{ "propertyName": "createdate", "direction": "DESCENDING" }],
+        "sorts": [{ "propertyName": "hs_createdate", "direction": "DESCENDING" }],
         "limit": 1
     });
 

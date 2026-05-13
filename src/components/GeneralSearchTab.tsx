@@ -40,6 +40,8 @@ import {
   Instagram,
   Music2,
   Clipboard,
+  ClipboardCheck,
+  Copy,
   ArrowRight,
   AlertTriangle,
   Download,
@@ -191,6 +193,20 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
   const [latestInsta, setLatestInsta] = useState<LatestClip | null>(null);
   const [latestTiktok, setLatestTiktok] = useState<LatestClip | null>(null);
   const [latestLoading, setLatestLoading] = useState(false);
+  const [copiedLatestLabel, setCopiedLatestLabel] = useState<string | null>(null);
+
+  const copyLatestLink = useCallback(async (link: string, label: string) => {
+    try {
+      await navigator.clipboard.writeText(link);
+      setCopiedLatestLabel(label);
+      setTimeout(
+        () => setCopiedLatestLabel((cur) => (cur === label ? null : cur)),
+        2000,
+      );
+    } catch {
+      // Clipboard writes can fail in some webview contexts; silently ignore.
+    }
+  }, []);
 
   const token = settings.hubspotToken;
 
@@ -229,7 +245,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
         id: r.id,
         link: p.link ?? "",
         creatorName: p.creator_name ?? null,
-        createDate: p.createdate ?? null,
+        createDate: p.hs_createdate ?? null,
         dateFound: p.date_found ?? null,
         thumbnail: p.fetched_social_thumbnail ?? null,
         caption: p.social_media_caption ?? null,
@@ -1011,10 +1027,9 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
                     { clip: latestTiktok, label: "TikTok", icon: <Music2 className="h-3.5 w-3.5 text-cyan-500" /> },
                   ].map(({ clip, label, icon }) =>
                     clip ? (
-                      <button
+                      <div
                         key={label}
-                        onClick={() => openUrl(clip.link)}
-                        className="flex gap-2.5 rounded-md border p-2 cursor-pointer hover:bg-muted/50 transition-colors text-left"
+                        className="flex gap-2.5 rounded-md border p-2 text-left"
                       >
                         <div className="w-14 h-14 rounded bg-muted flex-shrink-0 overflow-hidden flex items-center justify-center">
                           {clip.thumbnail ? (
@@ -1031,17 +1046,43 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
                           {clip.creatorName && (
                             <p className="text-[11px] text-muted-foreground truncate">{clip.creatorName}</p>
                           )}
-                          {(clip.createDate ?? clip.dateFound) && (
+                          {clip.createDate && (
                             <p className="text-[10px] text-muted-foreground">
-                              {new Date(clip.createDate ?? clip.dateFound ?? "").toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
+                              {new Date(clip.createDate).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
                             </p>
                           )}
                           <div className="flex gap-2 text-[10px] text-muted-foreground">
                             {clip.likes && <span>{Number(clip.likes).toLocaleString()} likes</span>}
                             {clip.views && <span>{Number(clip.views).toLocaleString()} views</span>}
                           </div>
+                          <div className="flex items-center gap-1 pt-0.5 min-w-0">
+                            <button
+                              type="button"
+                              onClick={() => openUrl(clip.link)}
+                              className="text-muted-foreground hover:text-foreground cursor-pointer flex-shrink-0"
+                              title="Open in browser"
+                            >
+                              <ExternalLink className="h-3 w-3" />
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => void copyLatestLink(clip.link, label)}
+                              className="text-muted-foreground hover:text-foreground cursor-pointer flex-shrink-0"
+                              title={copiedLatestLabel === label ? "Copied" : "Copy link"}
+                            >
+                              {copiedLatestLabel === label
+                                ? <ClipboardCheck className="h-3 w-3 text-green-600" />
+                                : <Copy className="h-3 w-3" />}
+                            </button>
+                            <span
+                              className="text-[10px] text-muted-foreground truncate min-w-0"
+                              title={clip.link}
+                            >
+                              {clip.link}
+                            </span>
+                          </div>
                         </div>
-                      </button>
+                      </div>
                     ) : (
                       <div key={label} className="flex items-center gap-2 rounded-md border border-dashed p-3 text-xs text-muted-foreground">
                         {icon}
