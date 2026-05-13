@@ -116,6 +116,35 @@ const BUCKET_HEADER_CLASS: Record<PropDiffBucket, string> = {
   equal: "text-muted-foreground",
 };
 
+// Color legend for the HubSpot creator `status` enum. Values must match the
+// canonical labels in the HubSpot property definition (see
+// `docs/hs-properties/hubspot-properties-export-creators-2026-04-01.csv`).
+// Tailwind utilities are picked to read like HubSpot's own dropdown swatches:
+// muted neutral for the cold-start states, warm amber/orange once outreach
+// begins, teal/emerald for the win states, rose for the negative outcomes,
+// and dark slate for the terminal "do not retry" buckets.
+const STATUS_BADGE_CLASS: Record<string, string> = {
+  "To Contact": "bg-slate-100 text-slate-700 ring-slate-300",
+  "Contacted": "bg-orange-100 text-orange-800 ring-orange-300",
+  "Connected": "bg-teal-100 text-teal-800 ring-teal-300",
+  "Granted": "bg-emerald-100 text-emerald-800 ring-emerald-300",
+  "Declined": "bg-rose-100 text-rose-800 ring-rose-300",
+  "Uncontactable": "bg-rose-100 text-rose-800 ring-rose-300",
+  "Not Existing Anymore": "bg-slate-700 text-slate-50 ring-slate-700",
+  "Discarded to Acquire": "bg-slate-700 text-slate-50 ring-slate-700",
+};
+
+const STATUS_DOT_CLASS: Record<string, string> = {
+  "To Contact": "bg-slate-400",
+  "Contacted": "bg-orange-500",
+  "Connected": "bg-teal-500",
+  "Granted": "bg-emerald-500",
+  "Declined": "bg-rose-500",
+  "Uncontactable": "bg-rose-500",
+  "Not Existing Anymore": "bg-slate-300",
+  "Discarded to Acquire": "bg-slate-300",
+};
+
 export function DuplicatePairDetail({
   pair,
   token,
@@ -300,6 +329,59 @@ export function DuplicatePairDetail({
                 <> · <span className="text-muted-foreground">{pair.b.columns.join(", ")}</span></>
               )}
             </div>
+          </CardContent>
+        </Card>
+
+        {/* Creator statuses card — surfaced above Associations because the
+            status pair is the single most decision-driving signal when
+            triaging a duplicate (e.g. Granted vs. Declined). */}
+        <Card>
+          <CardHeader className="gap-1.5">
+            <CardTitle className="text-base">Creator statuses</CardTitle>
+            <CardDescription className="text-xs">
+              Current HubSpot status for each creator. Different statuses are highlighted.
+            </CardDescription>
+          </CardHeader>
+          <CardContent>
+            {props ? (
+              (() => {
+                const statusA = (props.a.status ?? "").trim();
+                const statusB = (props.b.status ?? "").trim();
+                const differs = !!statusA && !!statusB && statusA !== statusB;
+                return (
+                  <div className="rounded-md border">
+                    <div className="grid grid-cols-[minmax(160px,200px)_1fr_1fr] items-center gap-3 border-b bg-muted/40 px-4 py-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                      <span>Status</span>
+                      <span>{aName}</span>
+                      <span>{bName}</span>
+                    </div>
+                    <div
+                      className={cn(
+                        "grid grid-cols-[minmax(160px,200px)_1fr_1fr] items-center gap-3 px-4 py-2 text-xs",
+                        differs && "bg-amber-50/40",
+                      )}
+                    >
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium">Status</span>
+                        {differs && (
+                          <span className="rounded-sm bg-amber-100 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-amber-700">
+                            Differs
+                          </span>
+                        )}
+                      </div>
+                      <div>
+                        <StatusPill value={statusA} />
+                      </div>
+                      <div>
+                        <StatusPill value={statusB} />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()
+            ) : (
+              <div className="h-12 animate-pulse rounded-md bg-muted/60" />
+            )}
           </CardContent>
         </Card>
 
@@ -611,6 +693,32 @@ function CreatorHeader({
       </div>
       <div className="text-[11px] text-muted-foreground">id {rid}</div>
     </div>
+  );
+}
+
+function StatusPill({ value }: { value: string }) {
+  const trimmed = value?.trim() ?? "";
+  if (!trimmed) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 text-xs font-medium text-muted-foreground ring-1 ring-inset ring-border">
+        <span className="inline-block h-1.5 w-1.5 rounded-full bg-muted-foreground/40" />
+        —
+      </span>
+    );
+  }
+  const badgeClass =
+    STATUS_BADGE_CLASS[trimmed] ?? "bg-muted text-muted-foreground ring-border";
+  const dotClass = STATUS_DOT_CLASS[trimmed] ?? "bg-muted-foreground/40";
+  return (
+    <span
+      className={cn(
+        "inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs font-medium ring-1 ring-inset",
+        badgeClass,
+      )}
+    >
+      <span className={cn("inline-block h-1.5 w-1.5 rounded-full", dotClass)} />
+      {trimmed}
+    </span>
   );
 }
 
