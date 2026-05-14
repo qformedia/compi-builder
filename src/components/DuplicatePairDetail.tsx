@@ -12,7 +12,20 @@
  * call. We just consume the resulting `otherViewers` prop here. The local
  * viewer is excluded by the parent so the footer never shows your own name.
  *
- * v1: read-only. No "Mark resolved" / "Mark not-a-duplicate" buttons yet.
+ * v2 adds two manual resolution writes alongside the in-app merge:
+ *
+ *   - "Not a duplicate"              — flips the pair to `dismissed`;
+ *                                       both records stay independent.
+ *   - "Reopen"                       — undoes a prior dismiss/merge so
+ *                                       the pair returns to the pending
+ *                                       list. Only shown when the pair
+ *                                       has an existing non-`pending`
+ *                                       resolution row.
+ *
+ * The writes hit `duplicate_pair_events` (audit log) followed by
+ * `duplicate_pair_resolutions` (upsert). See
+ * [src/lib/duplicates/resolve.ts](../lib/duplicates/resolve.ts) for the
+ * exact shape and the rationale for the ordering.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -20,10 +33,13 @@ import {
   AlertTriangle,
   ArrowLeft,
   Check,
+  CheckCircle2,
   ExternalLink,
   GitMerge,
   Loader2,
+  RotateCcw,
   Users,
+  XCircle,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -60,8 +76,20 @@ import type { DuplicatePair } from "@/lib/duplicates/find-pairs";
 import {
   describeSupabaseError,
   recordMergeResolution,
+  type DuplicatePairStatus,
   type PresenceEntry,
 } from "@/lib/duplicates/supabase";
+import {
+  canonicalSortedPair,
+  markDismissed,
+  reopen,
+} from "@/lib/duplicates/resolve";
+import {
+  formatReassignmentSummary,
+  isAssociationLimitError,
+  type MergeReassignResult,
+  type Reassignment,
+} from "@/lib/duplicates/merge-errors";
 import { hubspotClipUrl, hubspotCreatorUrl, hubspotVideoProjectUrl } from "@/lib/hubspot-urls";
 import {
   AssociatedRecordsSection,
@@ -96,11 +124,27 @@ interface Props {
    *  replaced by an "Already merged" status card pointing at this record so
    *  the user can sanity-check the merged data. */
   resolvedSurvivingRid?: string | null;
+  /** Persisted resolution status from `duplicate_pair_resolutions`. Drives
+   *  the Reopen / Already-resolved banner. Independent from
+   *  `resolvedSurvivingRid` which reflects session-merged state. */
+  existingResolutionStatus?: DuplicatePairStatus | null;
   onBack: () => void;
   /** Called after a successful HubSpot merge. The parent is responsible for
    *  refreshing the creators export (the loser is now archived) and
    *  navigating back to the list. */
   onMergeSuccess?: (winnerRecordId: string, loserRecordId: string) => void;
+  /**
+   * Called after a successful manual resolution write (Mark resolved,
+   * Not a duplicate, Reopen). The parent should optimistically update
+   * its `resolutions` map and session-tracking sets so the pair moves
+   * out of (or back into) the pending list without forcing a Supabase
+   * refetch.
+   */
+  onManualResolution?: (event: {
+    status: "dismissed" | "reopened";
+    winnerRecordId: string | null;
+    notes: string | null;
+  }) => void;
 }
 
 interface CreatorAssociations {
@@ -154,10 +198,15 @@ export function DuplicatePairDetail({
   localUser,
   otherViewers,
   resolvedSurvivingRid = null,
+  existingResolutionStatus = null,
   onBack,
   onMergeSuccess,
+  onManualResolution,
 }: Props) {
   const isAlreadyMerged = !!resolvedSurvivingRid;
+  const isPersistedResolved =
+    existingResolutionStatus === "resolved" ||
+    existingResolutionStatus === "dismissed";
   const [props, setProps] = useState<{ a: Record<string, string>; b: Record<string, string> } | null>(
     null,
   );
@@ -175,6 +224,37 @@ export function DuplicatePairDetail({
   // Non-fatal: HubSpot succeeded but Supabase audit didn't. Surface as a
   // warning banner instead of treating the merge as failed.
   const [mergeWarning, setMergeWarning] = useState<string | null>(null);
+
+  // ── Two-phase merge state ──────────────────────────────────────────────
+  // The "direct" phase tries the regular HubSpot merge endpoint. The
+  // "fallback" phase kicks in only when HubSpot rejects the direct call
+  // with the documented "Association configuration limits are exceeded"
+  // error — we then call `merge_creators_with_reassign` which pre-swaps
+  // the constrained associations from loser to winner before retrying
+  // the merge. The `fallback-success` phase keeps the dialog open with
+  // a success banner explaining what we did, since the user otherwise
+  // gets navigated away the instant `onMergeSuccess` fires.
+  type MergePhase = "idle" | "direct" | "fallback" | "fallback-success";
+  const [mergePhase, setMergePhase] = useState<MergePhase>("idle");
+  const [mergeReassignments, setMergeReassignments] = useState<Reassignment[] | null>(
+    null,
+  );
+  // Captured at the moment the merge succeeds so the "Done" button on
+  // the fallback-success state still has the right ids even if winnerSide
+  // is somehow cleared mid-flight (defence-in-depth — the picker is
+  // disabled while merging so this shouldn't happen, but losing track
+  // would be a silent UX bug).
+  const [completedWinnerRid, setCompletedWinnerRid] = useState<string | null>(null);
+  const [completedLoserRid, setCompletedLoserRid] = useState<string | null>(null);
+
+  // ── Manual resolution state (Not a duplicate / Reopen) ─────────────────
+  // Independent in-flight flags so opening one dialog while another is
+  // mid-write doesn't show a confusing combined "saving…" state.
+  type ManualResolutionKind = "dismissed" | "reopened";
+  const [manualKind, setManualKind] = useState<ManualResolutionKind | null>(null);
+  const [manualNotes, setManualNotes] = useState("");
+  const [manualSaving, setManualSaving] = useState(false);
+  const [manualError, setManualError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -377,14 +457,24 @@ export function DuplicatePairDetail({
     setMerging(true);
     setMergeError(null);
     setMergeWarning(null);
-    // HubSpot's merge endpoint may return a different primary id than the
-    // one we sent (it picks the canonical surviving record id, which can
-    // differ from `primaryObjectId` when there have been prior merges
-    // touching either side). We persist *that* id into the snapshot and
-    // resolution row so the History view's live-winner fetch hits a
-    // record that actually exists in HubSpot. Falling back to `winnerRid`
-    // keeps the prior behaviour for the common case where the API
-    // response shape doesn't expose an id.
+    setMergeReassignments(null);
+    setMergePhase("direct");
+
+    // ── Phase 1: try the standard HubSpot merge ──────────────────────
+    // This handles ~99% of merges. The only documented failure mode
+    // we're prepared to recover from is the "association configuration
+    // limits exceeded" rejection — every other error bubbles straight
+    // up to the user.
+    //
+    // We capture the `id` from HubSpot's merge response and use IT as
+    // the canonical surviving record id (instead of trusting the
+    // `winnerId` we sent). HubSpot can return a different id when the
+    // primary record has been involved in past merges and HubSpot
+    // resolves to its canonical id — in that case the input id is
+    // archived and any subsequent live read against it returns no row.
+    // Trusting the response keeps the snapshot pointing at a record
+    // we can actually fetch later.
+    let reassignments: Reassignment[] = [];
     let actualWinnerRid = winnerRid;
     try {
       const directRes = await invoke<unknown>("merge_creators", {
@@ -394,9 +484,35 @@ export function DuplicatePairDetail({
       });
       actualWinnerRid = extractMergedRecordId(directRes) ?? winnerRid;
     } catch (err) {
-      setMergeError(err instanceof Error ? err.message : String(err));
-      setMerging(false);
-      return;
+      const message = err instanceof Error ? err.message : String(err);
+      if (!isAssociationLimitError(message)) {
+        setMergeError(message);
+        setMerging(false);
+        setMergePhase("idle");
+        return;
+      }
+      // ── Phase 2: workaround merge with pre-reassignment ──────────
+      // HubSpot's merge engine rejected this pair because of an
+      // admin-configured per-record cap (the in-engine merge would
+      // briefly double-associate each loser-attached record). Fall
+      // back to the Tauri command that probes the cap configuration,
+      // pre-swaps the affected associations onto the winner, and then
+      // retries the merge.
+      setMergePhase("fallback");
+      try {
+        const result = await invoke<MergeReassignResult>(
+          "merge_creators_with_reassign",
+          { token, winnerId: winnerRid, loserId: loserRid },
+        );
+        reassignments = result.reassignments ?? [];
+        actualWinnerRid =
+          extractMergedRecordId(result.mergeResponse) ?? winnerRid;
+      } catch (err2) {
+        setMergeError(err2 instanceof Error ? err2.message : String(err2));
+        setMerging(false);
+        setMergePhase("idle");
+        return;
+      }
     }
     if (actualWinnerRid !== winnerRid) {
       console.info(
@@ -405,15 +521,16 @@ export function DuplicatePairDetail({
       );
     }
 
+    // ── Audit log (non-fatal) ─────────────────────────────────────────
+    // Capture the full pre-merge state so the History view can render an
+    // A/B/Predicted-merged comparison later. Both `props` and `assocData`
+    // are guaranteed non-null here because the Merge button is disabled
+    // until both fetches complete (the loading branch above the merge
+    // card is mutually exclusive). Associations are still wrapped in a
+    // null fallback because the associations fetch can fail
+    // independently and we'd rather record the property snapshot on a
+    // best-effort basis than skip the snapshot entirely.
     try {
-      // Capture the full pre-merge state so the History view can render an
-      // A/B/Predicted-merged comparison later. Both `props` and `assocData`
-      // are guaranteed non-null here because the Merge button is disabled
-      // until both fetches complete (the loading branch above the merge
-      // card is mutually exclusive). Associations are still wrapped in a
-      // null fallback because the associations fetch can fail
-      // independently and we'd rather record the property snapshot on a
-      // best-effort basis than skip the snapshot entirely.
       const winnerProps = winnerSide === "a" ? props!.a : props!.b;
       const loserProps = winnerSide === "a" ? props!.b : props!.a;
       const winnerAssoc = winnerSide === "a" ? assocData?.a ?? null : assocData?.b ?? null;
@@ -444,6 +561,10 @@ export function DuplicatePairDetail({
             : null,
           ownersById: Object.fromEntries(ownersById),
         },
+        // Only set when the workaround actually moved something — keeps
+        // the audit row identical to today's shape for the common case
+        // where the regular merge succeeded.
+        reassignments: reassignments.length > 0 ? reassignments : undefined,
       });
     } catch (err) {
       setMergeWarning(
@@ -452,9 +573,90 @@ export function DuplicatePairDetail({
       );
     }
 
+    // ── Resolve the dialog ────────────────────────────────────────────
+    // Direct success: same behaviour as before — close the dialog and
+    // let the parent navigate back. Fallback success: we keep the dialog
+    // open on a "merged with reassignment" confirmation panel so the
+    // user can read what happened. The captured ids drive the "Done"
+    // button so it doesn't depend on the still-mounted picker state.
+    if (reassignments.length > 0) {
+      setMergeReassignments(reassignments);
+      setCompletedWinnerRid(actualWinnerRid);
+      setCompletedLoserRid(loserRid);
+      setMergePhase("fallback-success");
+      setMerging(false);
+    } else {
+      setConfirmOpen(false);
+      setMerging(false);
+      setMergePhase("idle");
+      onMergeSuccess?.(actualWinnerRid, loserRid);
+    }
+  }
+
+  /**
+   * Closes the success-with-reassignment panel and lets the parent
+   * navigate back. Wired to the "Done" button on the
+   * `mergePhase === "fallback-success"` branch of the dialog.
+   */
+  function handleFallbackSuccessAck() {
+    const w = completedWinnerRid;
+    const l = completedLoserRid;
     setConfirmOpen(false);
-    setMerging(false);
-    onMergeSuccess?.(actualWinnerRid, loserRid);
+    setMergePhase("idle");
+    setMergeReassignments(null);
+    setCompletedWinnerRid(null);
+    setCompletedLoserRid(null);
+    if (w && l) onMergeSuccess?.(w, l);
+  }
+
+  /** Open the manual-resolution dialog (Not a duplicate / Reopen). */
+  function openManualDialog(kind: ManualResolutionKind) {
+    setManualKind(kind);
+    setManualNotes("");
+    setManualError(null);
+  }
+
+  function closeManualDialog() {
+    if (manualSaving) return;
+    setManualKind(null);
+    setManualError(null);
+  }
+
+  async function handleManualResolutionConfirm() {
+    if (!manualKind) return;
+    setManualSaving(true);
+    setManualError(null);
+    const [recordIdA, recordIdB] = canonicalSortedPair(pair.a.rid, pair.b.rid);
+    const baseArgs = {
+      pairKey: pair.pairKey,
+      recordIdA,
+      recordIdB,
+      actor: localUser,
+      notes: manualNotes.trim() || undefined,
+    } as const;
+
+    try {
+      if (manualKind === "dismissed") {
+        await markDismissed(baseArgs);
+        onManualResolution?.({
+          status: "dismissed",
+          winnerRecordId: null,
+          notes: baseArgs.notes ?? null,
+        });
+      } else {
+        await reopen(baseArgs);
+        onManualResolution?.({
+          status: "reopened",
+          winnerRecordId: null,
+          notes: baseArgs.notes ?? null,
+        });
+      }
+      setManualKind(null);
+    } catch (err) {
+      setManualError(describeSupabaseError(err));
+    } finally {
+      setManualSaving(false);
+    }
   }
 
   return (
@@ -893,12 +1095,23 @@ export function DuplicatePairDetail({
                 </div>
               )}
 
-              <div className="flex items-center justify-end gap-2">
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="cursor-pointer text-muted-foreground hover:text-foreground"
+                  disabled={merging || manualSaving}
+                  onClick={() => openManualDialog("dismissed")}
+                  title="Mark this pair as not a duplicate — both records stay independent"
+                >
+                  <XCircle className="mr-1.5 h-4 w-4" />
+                  Not a duplicate
+                </Button>
                 <Button
                   variant="default"
                   size="sm"
                   className="cursor-pointer"
-                  disabled={!winnerSide || merging}
+                  disabled={!winnerSide || merging || manualSaving}
                   onClick={() => setConfirmOpen(true)}
                 >
                   <GitMerge className="mr-1.5 h-4 w-4" />
@@ -908,6 +1121,122 @@ export function DuplicatePairDetail({
             </CardContent>
           </Card>
         ) : null}
+
+        {/* Persisted-resolution banner. Surfaces when the pair already has
+            a `duplicate_pair_resolutions` row in Supabase but the user is
+            looking at it anyway (e.g. via the Reopen flow, or because we
+            re-opened the detail from a deep-link before the list filtered
+            it out). The Reopen button is the recovery path. */}
+        {isPersistedResolved && !isAlreadyMerged && (
+          <Card className="border-amber-300 bg-amber-50/40">
+            <CardHeader className="gap-1.5">
+              <CardTitle className="flex items-center gap-2 text-base text-amber-900">
+                {existingResolutionStatus === "dismissed" ? (
+                  <XCircle className="h-4 w-4 text-amber-600" />
+                ) : (
+                  <CheckCircle2 className="h-4 w-4 text-emerald-600" />
+                )}
+                {existingResolutionStatus === "dismissed"
+                  ? "This pair is marked as not a duplicate"
+                  : "This pair is already resolved"}
+              </CardTitle>
+              <CardDescription className="text-xs text-amber-900/80">
+                {existingResolutionStatus === "dismissed"
+                  ? "It's hidden from the pending list. Reopen if you've changed your mind."
+                  : "It's hidden from the pending list. Reopen to bring it back for another review."}
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="flex items-center justify-end">
+              <Button
+                variant="outline"
+                size="sm"
+                className="cursor-pointer"
+                disabled={manualSaving}
+                onClick={() => openManualDialog("reopened")}
+              >
+                <RotateCcw className="mr-1.5 h-4 w-4" />
+                Reopen pair
+              </Button>
+            </CardContent>
+          </Card>
+        )}
+
+        {/* Manual resolution confirmation dialog. Shared across the three
+            kinds (resolved / dismissed / reopened) with kind-specific
+            wording so we don't ship three near-identical dialogs. */}
+        <Dialog
+          open={manualKind !== null}
+          onOpenChange={(open) => {
+            if (!open) closeManualDialog();
+          }}
+        >
+          <DialogContent showCloseButton={!manualSaving}>
+            <DialogHeader>
+              <DialogTitle>
+                {manualKind === "dismissed" && "Mark this pair as not a duplicate?"}
+                {manualKind === "reopened" && "Reopen this pair?"}
+              </DialogTitle>
+              <DialogDescription>
+                {manualKind === "dismissed" &&
+                  "Both creators stay as separate records. The pair will stop appearing in the pending list."}
+                {manualKind === "reopened" &&
+                  "Brings the pair back into the pending list so you (or a teammate) can review it again."}
+              </DialogDescription>
+            </DialogHeader>
+
+            <label className="flex flex-col gap-1.5 text-xs">
+              <span className="text-muted-foreground">Notes (optional)</span>
+              <textarea
+                className="min-h-[72px] w-full rounded-md border bg-background px-2 py-1.5 text-xs"
+                value={manualNotes}
+                onChange={(e) => setManualNotes(e.target.value)}
+                placeholder={
+                  manualKind === "dismissed"
+                    ? "Why aren't these a duplicate? (e.g. siblings with similar handles)"
+                    : "Optional context for the audit log"
+                }
+                disabled={manualSaving}
+              />
+            </label>
+
+            {manualError && (
+              <div className="flex flex-wrap items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+                <span className="min-w-0 break-words">{manualError}</span>
+              </div>
+            )}
+
+            <DialogFooter>
+              <Button
+                variant="outline"
+                size="sm"
+                className="cursor-pointer"
+                disabled={manualSaving}
+                onClick={closeManualDialog}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="default"
+                size="sm"
+                className="cursor-pointer"
+                disabled={manualSaving}
+                onClick={() => void handleManualResolutionConfirm()}
+              >
+                {manualSaving ? (
+                  <>
+                    <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                    Saving…
+                  </>
+                ) : manualKind === "dismissed" ? (
+                  "Mark not a duplicate"
+                ) : (
+                  "Reopen pair"
+                )}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
 
         {/* Other viewers footer */}
         {displayedViewers.length > 0 && (
@@ -925,89 +1254,169 @@ export function DuplicatePairDetail({
 
         {/* Confirmation modal — last chance to bail before the irreversible
             HubSpot call. We disable the close button while merging is in
-            flight so the user can't end up with a "did it succeed?" race. */}
+            flight so the user can't end up with a "did it succeed?" race.
+            The dialog has THREE rendered states driven by `mergePhase`:
+              - "idle" / "direct" — the standard pre-merge confirmation
+                with bullets explaining the merge semantics.
+              - "fallback" — same body, but with an inline amber banner
+                explaining that HubSpot rejected the direct merge and
+                we're working around it (the merge button is disabled).
+              - "fallback-success" — a separate "Merged with reassignment"
+                confirmation panel with a Done button that finalises the
+                navigation. Without this final confirmation the user
+                would never see WHY their merge took longer or what got
+                moved (the parent navigates away the moment we call
+                onMergeSuccess). */}
         <Dialog
           open={confirmOpen}
           onOpenChange={(open) => {
             if (!open && merging) return;
+            // While the success panel is up, dismissing via Esc / X
+            // should still trigger the same nav as the Done button so
+            // we don't get stuck in a stale "resolved" state visually.
+            if (!open && mergePhase === "fallback-success") {
+              handleFallbackSuccessAck();
+              return;
+            }
             setConfirmOpen(open);
-            if (!open) setMergeError(null);
+            if (!open) {
+              setMergeError(null);
+              setMergePhase("idle");
+            }
           }}
         >
           <DialogContent showCloseButton={!merging}>
-            <DialogHeader>
-              <DialogTitle>Merge duplicate creators?</DialogTitle>
-              <DialogDescription>
-                {winnerSide ? (
-                  <>
-                    All data from <span className="font-medium text-foreground">{loserName}</span>{" "}
-                    will be merged into{" "}
-                    <span className="font-medium text-foreground">{winnerName}</span>.
-                  </>
-                ) : (
-                  "Pick a winner first."
+            {mergePhase === "fallback-success" ? (
+              <>
+                <DialogHeader>
+                  <DialogTitle className="flex items-center gap-2">
+                    <Check className="h-4 w-4 text-emerald-600" />
+                    Merged — with reassignment
+                  </DialogTitle>
+                  <DialogDescription>
+                    HubSpot's standard merge couldn't handle this pair directly because of
+                    an admin-configured association cap on the Creators object. CompiFlow
+                    worked around it by reassigning the affected records to{" "}
+                    <span className="font-medium text-foreground">{winnerName}</span>{" "}
+                    before merging.
+                  </DialogDescription>
+                </DialogHeader>
+                <div className="rounded-md border border-emerald-300 bg-emerald-50/60 px-3 py-2 text-sm text-emerald-900">
+                  {formatReassignmentSummary(mergeReassignments ?? []) ??
+                    "Merge completed."}
+                </div>
+                {mergeWarning && (
+                  <div className="flex flex-wrap items-start gap-2 rounded-md border border-amber-300 bg-amber-50/70 px-3 py-2 text-xs text-amber-800">
+                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+                    <span className="min-w-0 break-words">{mergeWarning}</span>
+                  </div>
                 )}
-              </DialogDescription>
-            </DialogHeader>
-            <ul className="space-y-1.5 text-xs text-muted-foreground">
-              <li>
-                <span className="font-medium text-foreground">Conflicting field values:</span>{" "}
-                kept from {winnerName || "the winner"}.
-              </li>
-              <li>
-                <span className="font-medium text-foreground">Empty winner fields:</span>{" "}
-                filled from {loserName || "the loser"}.
-              </li>
-              <li>
-                <span className="font-medium text-foreground">Create date:</span>{" "}
-                the older create date is kept, regardless of which record wins.
-              </li>
-              <li>
-                <span className="font-medium text-foreground">All associations</span> (Contacts,
-                External Clips, Video Projects, Send Link Actions, Social Interactions, Public
-                Video Projects) move to {winnerName || "the winner"}.
-              </li>
-              <li>
-                <span className="font-medium text-foreground">{loserName || "The loser"}</span>{" "}
-                will be archived in HubSpot. <span className="font-medium">This cannot be undone.</span>
-              </li>
-            </ul>
-            {mergeError && (
-              <div className="flex flex-wrap items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
-                <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
-                <span className="min-w-0 break-words">{mergeError}</span>
-              </div>
+                <DialogFooter>
+                  <Button
+                    variant="default"
+                    size="sm"
+                    className="cursor-pointer"
+                    onClick={handleFallbackSuccessAck}
+                  >
+                    Done
+                  </Button>
+                </DialogFooter>
+              </>
+            ) : (
+              <>
+                <DialogHeader>
+                  <DialogTitle>Merge duplicate creators?</DialogTitle>
+                  <DialogDescription>
+                    {winnerSide ? (
+                      <>
+                        All data from <span className="font-medium text-foreground">{loserName}</span>{" "}
+                        will be merged into{" "}
+                        <span className="font-medium text-foreground">{winnerName}</span>.
+                      </>
+                    ) : (
+                      "Pick a winner first."
+                    )}
+                  </DialogDescription>
+                </DialogHeader>
+                <ul className="space-y-1.5 text-xs text-muted-foreground">
+                  <li>
+                    <span className="font-medium text-foreground">Conflicting field values:</span>{" "}
+                    kept from {winnerName || "the winner"}.
+                  </li>
+                  <li>
+                    <span className="font-medium text-foreground">Empty winner fields:</span>{" "}
+                    filled from {loserName || "the loser"}.
+                  </li>
+                  <li>
+                    <span className="font-medium text-foreground">Create date:</span>{" "}
+                    the older create date is kept, regardless of which record wins.
+                  </li>
+                  <li>
+                    <span className="font-medium text-foreground">All associations</span> (Contacts,
+                    External Clips, Video Projects, Send Link Actions, Social Interactions, Public
+                    Video Projects) move to {winnerName || "the winner"}.
+                  </li>
+                  <li>
+                    <span className="font-medium text-foreground">{loserName || "The loser"}</span>{" "}
+                    will be archived in HubSpot. <span className="font-medium">This cannot be undone.</span>
+                  </li>
+                </ul>
+                {mergePhase === "fallback" && (
+                  <div className="flex flex-wrap items-start gap-2 rounded-md border border-amber-300 bg-amber-50/70 px-3 py-2 text-xs text-amber-900">
+                    <Loader2 className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 animate-spin" />
+                    <span className="min-w-0 break-words">
+                      HubSpot's standard merge isn't smart enough for this pair —
+                      there's an admin-configured association cap on the Creators object
+                      (e.g. "1 Creator per External Clip") and the engine refuses to swap
+                      the loser's associations atomically. Working around it: reassigning
+                      the affected records to {winnerName || "the winner"} first, then
+                      retrying the merge…
+                    </span>
+                  </div>
+                )}
+                {mergeError && (
+                  <div className="flex flex-wrap items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+                    <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+                    <span className="min-w-0 break-words">{mergeError}</span>
+                  </div>
+                )}
+                <DialogFooter>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="cursor-pointer"
+                    disabled={merging}
+                    onClick={() => setConfirmOpen(false)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    className="cursor-pointer"
+                    disabled={!winnerSide || merging}
+                    onClick={() => void handleMergeConfirm()}
+                  >
+                    {mergePhase === "fallback" ? (
+                      <>
+                        <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                        Working around it…
+                      </>
+                    ) : merging ? (
+                      <>
+                        <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
+                        Merging…
+                      </>
+                    ) : (
+                      <>
+                        <GitMerge className="mr-1.5 h-4 w-4" />
+                        Merge now
+                      </>
+                    )}
+                  </Button>
+                </DialogFooter>
+              </>
             )}
-            <DialogFooter>
-              <Button
-                variant="outline"
-                size="sm"
-                className="cursor-pointer"
-                disabled={merging}
-                onClick={() => setConfirmOpen(false)}
-              >
-                Cancel
-              </Button>
-              <Button
-                variant="destructive"
-                size="sm"
-                className="cursor-pointer"
-                disabled={!winnerSide || merging}
-                onClick={() => void handleMergeConfirm()}
-              >
-                {merging ? (
-                  <>
-                    <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
-                    Merging…
-                  </>
-                ) : (
-                  <>
-                    <GitMerge className="mr-1.5 h-4 w-4" />
-                    Merge now
-                  </>
-                )}
-              </Button>
-            </DialogFooter>
           </DialogContent>
         </Dialog>
       </div>
@@ -1122,6 +1531,31 @@ function normalizeProps(props: Record<string, string | null>): Record<string, st
   return out;
 }
 
+/**
+ * Pull the canonical surviving record id from HubSpot's merge response.
+ *
+ * HubSpot's `crm/v3/objects/{type}/merge` endpoint returns a
+ * `SimplePublicObject` with the `id` of the merged record. That id is
+ * USUALLY the same as the `primaryObjectId` we sent, but HubSpot can
+ * resolve to a different canonical id when the primary record was
+ * involved in past merges (it carries an internal alias graph and the
+ * surviving id may be the head of that graph rather than the alias we
+ * looked up via CSV export). Trusting the response avoids writing a
+ * snapshot whose `winnerRecordId` points at an archived alias — a live
+ * fetch against that id later returns no row, which is exactly the
+ * "Surviving record returned no data" flash we hit in production.
+ *
+ * Returns `null` (and the caller falls back to the input `winnerId`)
+ * when the response shape doesn't include a string id, e.g. unexpected
+ * envelope or a parse error upstream.
+ */
+function extractMergedRecordId(response: unknown): string | null {
+  if (!response || typeof response !== "object") return null;
+  const id = (response as { id?: unknown }).id;
+  if (typeof id === "string" && id.trim().length > 0) return id.trim();
+  return null;
+}
+
 /** Map detector source codes to short user-facing chips on the why-card. */
 function humanizeSource(s: string): string {
   switch (s) {
@@ -1139,38 +1573,3 @@ function humanizeSource(s: string): string {
 // Re-export the labels constant so consumers wanting to map property keys
 // can avoid an extra import. (No-op cost; tree-shaken if unused.)
 export { CREATOR_PROPERTY_LABELS };
-
-/**
- * Extract the canonical surviving-record id from a HubSpot merge response.
- *
- * HubSpot's merge endpoint always echoes the surviving object under
- * different keys depending on which API version / object type the request
- * hit. We accept the most common shapes seen in production:
- *
- *   - `{ id: "..." }`            — modern CRM objects API.
- *   - `{ vid: 123 }`             — legacy contact merge.
- *   - `{ objectId: "..." }`      — some object-type merges.
- *   - `{ properties: { hs_object_id: "..." } }` — when the response
- *     includes the merged object's properties.
- *
- * Returns `null` when nothing recognisable is present so callers can fall
- * back to the id they originally sent.
- */
-function extractMergedRecordId(response: unknown): string | null {
-  if (!response || typeof response !== "object") return null;
-  const obj = response as Record<string, unknown>;
-  const direct = obj.id ?? obj.objectId ?? obj.vid;
-  if (direct != null) {
-    const s = String(direct).trim();
-    if (s) return s;
-  }
-  const props = obj.properties;
-  if (props && typeof props === "object") {
-    const hsId = (props as Record<string, unknown>).hs_object_id;
-    if (hsId != null) {
-      const s = String(hsId).trim();
-      if (s) return s;
-    }
-  }
-  return null;
-}

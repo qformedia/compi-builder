@@ -38,6 +38,7 @@ export interface PropDiff {
 export const CREATOR_PROPERTY_LABELS: Record<string, string> = {
   // Identity / classification
   name: "Name",
+  email: "Email",
   main_link: "Main Link",
   main_account: "Main Account",
   status: "Status",
@@ -62,15 +63,18 @@ export const CREATOR_PROPERTY_LABELS: Record<string, string> = {
   x: "X",
   web: "Web",
   other_links: "Other Links",
-  // China-network handles
+  // China-network handles (URL property + bare-handle *_id)
   from_china: "From China",
   bilibili: "Bilibili",
-  douyin_id: "Douyin",
+  douyin: "Douyin",
+  douyin_id: "Douyin ID",
   ixigua: "Ixigua",
-  kuaishou_id: "Kuaishou",
+  kuaishou: "Kuaishou",
+  kuaishou_id: "Kuaishou ID",
   weibo: "Weibo",
   wechat: "WeChat",
-  xiaohongshu_id: "Xiaohongshu",
+  xiaohongshu: "Xiaohongshu",
+  xiaohongshu_id: "Xiaohongshu ID",
   // Notes / follow-up
   notes: "Notes",
   keep_up_1: "Keep Up 1",

@@ -31,6 +31,12 @@ const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
  * time presence is touched.
  */
 let cachedClient: SupabaseClient | null = null;
+/**
+ * Internal accessor used by every write/read path in this module. Lazily
+ * builds the client so tests that mock `import.meta.env` won't pay for an
+ * eager connection. Exposed to sibling modules (`resolve.ts`) via
+ * `getDuplicatesSupabaseClient` so we keep a single WebSocket instance.
+ */
 function getClient(): SupabaseClient {
   if (!supabaseUrl || !supabaseAnonKey) {
     throw new Error(
@@ -128,6 +134,15 @@ export function describeSupabaseError(err: unknown): string {
   }
 }
 
+/**
+ * Sibling-module accessor for the cached Supabase client. Use this from
+ * other files in `src/lib/duplicates/` so the realtime socket stays a
+ * singleton (presence + reads + writes all share the same connection).
+ */
+export function getDuplicatesSupabaseClient(): SupabaseClient {
+  return getClient();
+}
+
 /** True when a Supabase error means "the table or its schema cache is missing". */
 function isMissingTableError(err: unknown): boolean {
   if (!err || typeof err !== "object") return false;
@@ -198,6 +213,20 @@ export interface MergeSnapshotPayload {
   ownersById: Record<string, string>;
 }
 
+/**
+ * Per-peer reassignment summary for the audit log when the merge needed
+ * the workaround path. Mirrors the camelCase shape produced by the Rust
+ * `merge_creators_with_reassign` command. Optional in the audit row —
+ * only set when at least one peer had records moved, so the common
+ * "regular merge succeeded" case keeps the same compact payload it has
+ * always had.
+ */
+export interface MergeReassignmentEntry {
+  objectTypeId: string;
+  objectTypeLabel: string;
+  count: number;
+}
+
 export interface RecordMergeResolutionArgs {
   pairKey: string;
   winnerRecordId: string;
@@ -207,6 +236,11 @@ export interface RecordMergeResolutionArgs {
    *  end up with a "merged" event that has no archaeological row to back
    *  it. */
   snapshot: MergeSnapshotPayload;
+  /** Set only when the workaround merge actually moved records from
+   *  loser to winner. Captured into the audit `payload` so future History
+   *  views can show "this merge needed a reassignment" without re-deriving
+   *  it. */
+  reassignments?: MergeReassignmentEntry[];
 }
 
 export async function recordMergeResolution(
@@ -223,6 +257,11 @@ export async function recordMergeResolution(
       ? [args.winnerRecordId, args.loserRecordId]
       : [args.loserRecordId, args.winnerRecordId];
 
+  const reassignments = args.reassignments ?? [];
+  const totalReassigned = reassignments.reduce(
+    (sum, r) => sum + Math.max(0, r.count),
+    0,
+  );
   const { error: eventErr } = await client.from("duplicate_pair_events").insert({
     pair_key: args.pairKey,
     actor: args.actor || null,
@@ -230,6 +269,16 @@ export async function recordMergeResolution(
     payload: {
       winner_record_id: args.winnerRecordId,
       loser_record_id: args.loserRecordId,
+      // Only include the reassignment block when the workaround actually
+      // ran. Keeps the audit JSON identical to today's shape for the
+      // ~99% of merges that didn't hit a HubSpot association cap.
+      ...(reassignments.length > 0
+        ? {
+            reassignments,
+            reassigned_total: totalReassigned,
+            merge_path: "reassign-workaround",
+          }
+        : { merge_path: "direct" }),
     },
   });
   if (eventErr) throw eventErr;

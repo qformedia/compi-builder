@@ -60,6 +60,15 @@ import type { AppSettings } from "@/types";
 interface Props {
   isActive: boolean;
   settings: AppSettings;
+  /**
+   * Cross-page deep-link from the Data Integrity Creator URL check.
+   * When set, opens the corresponding pair's side-by-side on first
+   * activation (or as soon as the analysis containing that pair is
+   * loaded). One-shot — parent should clear it via
+   * `onConsumePendingOpenPairKey` after we've taken it.
+   */
+  pendingOpenPairKey?: string | null;
+  onConsumePendingOpenPairKey?: () => void;
 }
 
 interface AnalysisResult {
@@ -85,7 +94,12 @@ function analyze(result: CreatorExportResult): AnalysisResult {
   return cachedAnalysis;
 }
 
-export function DuplicatesPage({ isActive, settings }: Props) {
+export function DuplicatesPage({
+  isActive,
+  settings,
+  pendingOpenPairKey,
+  onConsumePendingOpenPairKey,
+}: Props) {
   const token = settings.hubspotToken;
   const exportProgress = useCreatorExportProgress();
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(cachedAnalysis);
@@ -172,6 +186,18 @@ export function DuplicatesPage({ isActive, settings }: Props) {
     void loadAnalysis(false);
   }, [isActive, loadAnalysis]);
 
+  // Consume the cross-page deep-link from the Data Integrity Creator URL
+  // check. We wait until the page is active AND we have an analysis loaded
+  // — opening the detail view requires a matching pair object, so trying
+  // before the analysis exists would silently no-op. Once we've adopted
+  // the pair key, notify the parent so it doesn't re-deliver on a future
+  // re-render (one-shot navigation token).
+  useEffect(() => {
+    if (!isActive || !pendingOpenPairKey || !analysis) return;
+    setSelectedPairKey(pendingOpenPairKey);
+    onConsumePendingOpenPairKey?.();
+  }, [isActive, pendingOpenPairKey, analysis, onConsumePendingOpenPairKey]);
+
   // ────────────────────────────────────────────────
   // Merge history — fetched on demand the first time the user opens the
   // History view, then refreshed every time they re-enter it (so a merge
@@ -240,8 +266,13 @@ export function DuplicatesPage({ isActive, settings }: Props) {
   // ────────────────────────────────────────────────
   const sessionResolvedPairs = useMemo(() => {
     const all = analysis?.pairs ?? [];
-    return all.filter((p) => sessionResolvedKeys.has(p.pairKey));
-  }, [analysis, sessionResolvedKeys]);
+    const filtered = all.filter((p) => sessionResolvedKeys.has(p.pairKey));
+    return filtered.sort((a, b) => {
+      const aAt = resolutions.get(a.pairKey)?.resolvedAt?.getTime() ?? 0;
+      const bAt = resolutions.get(b.pairKey)?.resolvedAt?.getTime() ?? 0;
+      return bAt - aAt; // most recent first
+    });
+  }, [analysis, sessionResolvedKeys, resolutions]);
 
   const pendingPairs = useMemo(() => {
     const all = analysis?.pairs ?? [];
@@ -286,6 +317,7 @@ export function DuplicatesPage({ isActive, settings }: Props) {
     const resolvedSurvivingRid = sessionResolvedKeys.has(pairKey)
       ? resolutions.get(pairKey)?.winnerRecordId ?? null
       : null;
+    const existingResolutionStatus = resolutions.get(pairKey)?.status ?? null;
     // Session-merged pairs (resolved AND a winner record id is set —
     // i.e. came from the in-app merge or "Mark resolved" with a winner)
     // route through `MergeHistoryDetail` so the user sees the snapshot
@@ -324,7 +356,65 @@ export function DuplicatesPage({ isActive, settings }: Props) {
           (e) => e.user !== localUser,
         )}
         resolvedSurvivingRid={resolvedSurvivingRid}
+        existingResolutionStatus={existingResolutionStatus}
         onBack={() => setSelectedPairKey(null)}
+        onManualResolution={(event) => {
+          // Optimistic local update so the list view filters this pair
+          // out (or back in) without waiting for the next Supabase
+          // refetch. A future Refresh / page reload will replace this
+          // stub with the real persisted row.
+          setResolutions((prev) => {
+            const next = new Map(prev);
+            if (event.status === "reopened") {
+              const existing = next.get(pairKey);
+              if (existing) {
+                next.set(pairKey, {
+                  ...existing,
+                  status: "reopened",
+                  resolvedAt: null,
+                  resolutionNotes: event.notes,
+                  winnerRecordId: null,
+                  updatedAt: new Date(),
+                });
+              }
+            } else {
+              next.set(pairKey, {
+                pairKey,
+                status: event.status,
+                resolvedBy: localUser || null,
+                resolvedAt: new Date(),
+                resolutionNotes: event.notes,
+                winnerRecordId: event.winnerRecordId,
+                updatedAt: new Date(),
+              });
+            }
+            return next;
+          });
+          if (event.status === "reopened") {
+            // Move the pair back into the pending list — drop it from the
+            // session-resolved set so the list view shows it under
+            // "pending" again. Stay on the detail view so the user can
+            // continue working on it.
+            setSessionResolvedKeys((prev) => {
+              const next = new Set(prev);
+              next.delete(pairKey);
+              return next;
+            });
+          } else {
+            // dismissed: tag as session-resolved (the existing
+            // optimistic-merge code path already does this) and navigate
+            // back to the list so the user sees the updated state.
+            setSessionResolvedKeys((prev) => new Set(prev).add(pairKey));
+            setSelectedPairKey(null);
+          }
+          // Tell the Data Integrity Creator URL check to re-classify
+          // against the just-changed resolution row. Lighter than a
+          // forced HubSpot re-export — uses the existing CSV cache and
+          // only re-fetches `duplicate_pair_resolutions`.
+          window.dispatchEvent(
+            new CustomEvent("creator-urls:reclassify", { detail: "creator-urls" }),
+          );
+        }}
         onMergeSuccess={(winnerRid) => {
           // 1. Optimistically record the resolution so the row carries the
           //    surviving record id (used by the resolved-section link).
@@ -360,6 +450,12 @@ export function DuplicatesPage({ isActive, settings }: Props) {
             next.delete(pairKey);
             return next;
           });
+          // 3. Nudge the Data Integrity Creator URL check to re-classify
+          //    so a row that was in `duplicate-after-fix` because of this
+          //    pair gets promoted to `auto-fixable` (winner survived).
+          window.dispatchEvent(
+            new CustomEvent("creator-urls:reclassify", { detail: "creator-urls" }),
+          );
           // 3. Navigate back to the list. We deliberately do NOT auto-refetch
           //    the creators export — that's a slow, network-heavy operation
           //    and the user can trigger it via the Refresh button when they
