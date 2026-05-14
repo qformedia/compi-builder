@@ -101,17 +101,41 @@ interface CachedAnalysis {
 let cachedAnalysis: CachedAnalysis | null = null;
 let cachedSourceKey: string | null = null;
 
+let sessionFixedIds = new Set<string>();
+let sessionFixedVersion = 0;
+
+export function markIssuesFixed(ids: string[]) {
+  for (const id of ids) sessionFixedIds.add(id);
+  sessionFixedVersion++;
+  invalidateCreatorUrlsAnalysis();
+}
+
+export function clearSessionFixed() {
+  sessionFixedIds.clear();
+  sessionFixedVersion++;
+}
+
 function analyze(
   result: CreatorExportResult,
   resolutions: Map<string, DuplicatePairResolution>,
   resolutionsVersion: string,
 ): CachedAnalysis {
-  const key = `${result.generatedAt.toISOString()}::${result.source}::${resolutionsVersion}`;
+  const key = `${result.generatedAt.toISOString()}::${result.source}::${resolutionsVersion}::sf=${sessionFixedVersion}`;
   if (cachedAnalysis && cachedSourceKey === key) {
     return cachedAnalysis;
   }
   const rows = parseCreatorsCsvFull(result.csv);
   const { issues, counts } = classifyCreatorUrls({ creators: rows, resolutions });
+  
+  // Promote fixed-this-session items
+  for (const issue of issues) {
+    if (issue.bucket === "auto-fixable" && sessionFixedIds.has(issue.id)) {
+      issue.bucket = "fixed-this-session";
+      counts["auto-fixable"]--;
+      counts["fixed-this-session"]++;
+    }
+  }
+
   const groups = groupIssuesByBucket(issues);
   cachedAnalysis = { generatedAt: result.generatedAt, issues, counts, groups };
   cachedSourceKey = key;
@@ -177,6 +201,7 @@ async function tryAnalyze(result: CreatorExportResult): Promise<CachedAnalysis> 
 }
 
 const BUCKET_SECTIONS: { id: ClassifiedBucket; title: string; severity: Severity }[] = [
+  { id: "fixed-this-session", title: "Fixed this session", severity: "info" },
   { id: "auto-fixable", title: "Auto-fixable", severity: "warning" },
   { id: "duplicate-after-fix", title: "Becomes a duplicate after fix", severity: "warning" },
   { id: "manual", title: "Manual review", severity: "info" },
@@ -356,6 +381,9 @@ function CreatorUrlRow({
   onFixed: (id: string, summary?: string) => void;
   settings: unknown;
 }) {
+  if (item.bucket === "fixed-this-session") {
+    return <FixedThisSessionRow item={item} />;
+  }
   if (item.bucket === "auto-fixable") {
     return (
       <AutoFixableRow item={item} token={token} onFixed={onFixed} />
@@ -365,6 +393,35 @@ function CreatorUrlRow({
     return <DuplicateAfterFixRow item={item} />;
   }
   return <ManualRow item={item} />;
+}
+
+function FixedThisSessionRow({ item }: { item: ClassifiedIssue }) {
+  return (
+    <ClassifiedRowShell
+      item={item}
+      bucketLabel={
+        <Badge
+          variant="outline"
+          className="h-4 flex-shrink-0 rounded border-emerald-300 bg-emerald-50 px-1.5 text-[10px] font-normal text-emerald-700"
+        >
+          <CheckCircle2 className="mr-0.5 h-3 w-3 inline-block" />
+          Fixed
+        </Badge>
+      }
+      actions={
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="h-7 cursor-pointer px-2 text-xs"
+          onClick={() => openUrl(hubspotCreatorUrl(item.creatorId))}
+        >
+          <ExternalLink className="mr-1 h-3 w-3" />
+          HubSpot
+        </Button>
+      }
+    />
+  );
 }
 
 function AutoFixableRow({
@@ -392,6 +449,8 @@ function AutoFixableRow({
       if (outcome.kind === "applied") {
         setState({ kind: "applied" });
         onFixed(item.id, `Fixed ${CREATOR_URL_RULES[item.field].label}`);
+        markIssuesFixed([item.id]);
+        window.dispatchEvent(new CustomEvent("creator-urls:reclassify", { detail: "creator-urls" }));
       } else if (outcome.kind === "skipped") {
         setState({ kind: "skipped", reason: outcome.reason });
       } else {
@@ -410,12 +469,6 @@ function AutoFixableRow({
       item={item}
       actions={
         <>
-          {state.kind === "applied" && (
-            <span className="inline-flex items-center gap-1 text-[11px] text-emerald-700">
-              <CheckCircle2 className="h-3 w-3" />
-              Fixed
-            </span>
-          )}
           {state.kind === "skipped" && (
             <span className="max-w-[180px] truncate text-[10px] text-muted-foreground" title={state.reason}>
               Skipped: {state.reason}
@@ -589,6 +642,7 @@ function CreatorUrlsBulkActions({
     if (!token) return;
     setRefreshing(true);
     try {
+      clearSessionFixed();
       invalidateCreatorUrlsAnalysis();
       await ensureCreatorsExport({ token, force: true });
       window.dispatchEvent(new CustomEvent("creator-urls:refresh-requested"));
@@ -624,19 +678,17 @@ function CreatorUrlsBulkActions({
         onProgress: (done) => setFixProgress({ done, total: slice.length }),
       });
       setFixOutcomes(outcomes);
+      const appliedIds: string[] = [];
       for (const o of outcomes) {
-        if (o.kind === "applied") onFixed(o.issueId, "Auto-fixed URL");
+        if (o.kind === "applied") {
+          onFixed(o.issueId, "Auto-fixed URL");
+          appliedIds.push(o.issueId);
+        }
       }
-      if (outcomes.some((o) => o.kind === "applied")) {
+      if (appliedIds.length > 0) {
         setPreviouslyRan(true);
-        // Re-run analysis from a clean slate so the just-fixed rows
-        // disappear from the bucket counts without waiting for the next
-        // CSV export. We don't force a re-export — the local CSV is
-        // still the freshest signal we have until the user clicks
-        // Refresh, and re-classifying after applying writes to HubSpot
-        // is honest enough for the user to verify their work.
-        invalidateCreatorUrlsAnalysis();
-        window.dispatchEvent(new CustomEvent("creator-urls:refresh-requested"));
+        markIssuesFixed(appliedIds);
+        window.dispatchEvent(new CustomEvent("creator-urls:reclassify", { detail: "creator-urls" }));
       }
     } finally {
       setFixing(false);

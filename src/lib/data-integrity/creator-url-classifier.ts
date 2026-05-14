@@ -59,7 +59,8 @@ import {
 export type ClassifiedBucket =
   | "auto-fixable"
   | "duplicate-after-fix"
-  | "manual";
+  | "manual"
+  | "fixed-this-session";
 
 export interface ClassifiedCollision {
   creatorId: string;
@@ -391,6 +392,7 @@ export function classifyCreatorUrls(input: ClassifierInput): ClassifierResult {
   // goes first because it's the most actionable; manual last because the
   // user needs the least context to start with the easier work.
   const bucketRank: Record<ClassifiedBucket, number> = {
+    "fixed-this-session": -1,
     "auto-fixable": 0,
     "duplicate-after-fix": 1,
     manual: 2,
@@ -403,6 +405,7 @@ export function classifyCreatorUrls(input: ClassifierInput): ClassifierResult {
   });
 
   const counts: Record<ClassifiedBucket, number> = {
+    "fixed-this-session": 0,
     "auto-fixable": 0,
     "duplicate-after-fix": 0,
     manual: 0,
@@ -417,6 +420,7 @@ export function groupIssuesByBucket(
   issues: ClassifiedIssue[],
 ): Record<ClassifiedBucket, ClassifiedIssue[]> {
   const groups: Record<ClassifiedBucket, ClassifiedIssue[]> = {
+    "fixed-this-session": [],
     "auto-fixable": [],
     "duplicate-after-fix": [],
     manual: [],

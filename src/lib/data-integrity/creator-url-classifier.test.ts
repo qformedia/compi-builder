@@ -54,6 +54,7 @@ describe("classifyCreatorUrls — auto-fixable bucket", () => {
       creators: [creator("100", "alice", { Instagram: "https://instagram.com/foo/" })],
     });
     expect(counts).toEqual({
+      "fixed-this-session": 0,
       "auto-fixable": 1,
       "duplicate-after-fix": 0,
       manual: 0,
@@ -354,6 +355,7 @@ describe("classifyCreatorUrls — sort + grouping", () => {
       ],
     });
     const grouped = groupIssuesByBucket(issues);
+    expect(grouped["fixed-this-session"]).toEqual([]);
     expect(grouped["auto-fixable"].map((i) => i.creatorId)).toEqual(["200"]);
     expect(grouped.manual.map((i) => i.creatorId)).toEqual(["100"]);
     expect(grouped["duplicate-after-fix"]).toEqual([]);
