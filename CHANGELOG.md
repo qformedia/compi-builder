@@ -5,6 +5,23 @@ The latest release is at the top.
 
 <!-- changelog-entries -->
 
+## v2.1.0 - 2026-05-14
+
+### What's new
+
+- The app now prompts for your HubSpot token and other settings at startup if they are missing, ensuring you are fully set up before starting work.
+- Data Integrity can now bulk auto-fix broken creator URLs across multiple clips at once, saving time on repetitive cleanups.
+- Fixed creator URLs now stay visible in a session-scoped section, letting you review what was corrected before you refresh.
+- Duplicates now includes a manual resolution option and the ability to reopen previously resolved pairs if you need to change your mind.
+
+### What got better
+
+- Duplicates now handles the HubSpot association limit gracefully, allowing you to merge creators even when they have an unusually large number of associated records.
+
+### Behind the scenes
+
+- Duplicates now captures a snapshot of the merge pairs for the session, ensuring the audit history has a reliable record of what was merged.
+
 ## v2.0.0 - 2026-05-13
 
 ### What's new
