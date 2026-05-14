@@ -29,10 +29,11 @@ jobs:
           cache-on-failure: true
 
       - name: Install Linux system dependencies
-        # libpipewire-0.3-dev is required by the `xcap` crate (pulled in
-        # by the MiniMiki screenshot path) on Linux. Without it the
-        # Linux test job fails to compile `libspa-sys`. We don't ship
-        # Linux builds — this is just for `cargo test --lib` to compile.
+        # Tauri-only: GTK + WebKit + appindicator + RSVG. The xcap
+        # screenshot crate (which would need libpipewire / libgbm /
+        # libdrm / libxkbcommon dev headers) is excluded from Linux
+        # builds via a target-cfg in Cargo.toml, so it doesn't need to
+        # link here.
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -41,7 +42,6 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
-            libpipewire-0.3-dev \
             patchelf
 
       - name: Install dependencies

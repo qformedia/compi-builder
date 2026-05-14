@@ -40,8 +40,18 @@ tempfile = "3"
 lru = "0.12"
 chrono = { version = "0.4", default-features = false, features = ["std", "now"] }
 strsim = "0.11"
-xcap = "0.9"
 image = { version = "0.25", default-features = false, features = ["png"] }
+
+# `xcap` is only used by the MiniMiki screenshot path. CompiFlow ships
+# macOS DMG + Windows MSI only — but the release CI runs `cargo test --lib`
+# on Ubuntu to catch issues. xcap's Linux backend pulls in libpipewire +
+# libgbm + libdrm + libxkbcommon dev headers, which we'd otherwise need
+# to install on the runner just to compile a code path that never runs
+# on Linux. Limiting the dep to non-Linux keeps the Linux test job slim
+# and avoids the system-dep treadmill. See `capture_window_png` in
+# `src/minimiki.rs` for the matching cfg-gated stub on Linux.
+[target.'cfg(not(target_os = "linux"))'.dependencies]
+xcap = "0.9"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["process", "io-util", "macros", "rt", "time"] }

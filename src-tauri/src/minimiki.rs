@@ -41,6 +41,15 @@ fn new_token() -> String {
 }
 
 /// Capture the active CompiFlow window (best-effort) and return PNG bytes.
+///
+/// Implementation is gated to non-Linux targets because CompiFlow only
+/// ships macOS + Windows builds. The xcap Linux backend (Wayland +
+/// PipeWire) is not pulled in for Linux compiles — see the
+/// `[target.'cfg(not(target_os = "linux"))'.dependencies]` block in
+/// `Cargo.toml`. The caller in `prepare_minimiki_handoff` already
+/// handles `Err` by skipping the screenshot, so the Linux stub is a
+/// drop-in that just degrades gracefully.
+#[cfg(not(target_os = "linux"))]
 fn capture_window_png() -> Result<Vec<u8>, String> {
     use std::io::Cursor;
     use xcap::Window;
@@ -71,6 +80,11 @@ fn capture_window_png() -> Result<Vec<u8>, String> {
         .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
         .map_err(|e| format!("png encode failed: {e}"))?;
     Ok(bytes)
+}
+
+#[cfg(target_os = "linux")]
+fn capture_window_png() -> Result<Vec<u8>, String> {
+    Err("Screenshot capture is not supported on Linux builds".to_string())
 }
 
 /// Upload PNG bytes to the public `feedback-screenshots` bucket and return
