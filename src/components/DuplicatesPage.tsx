@@ -101,6 +101,16 @@ export function DuplicatesPage({ isActive, settings }: Props) {
   // reference to the merged record without forcing an export refetch.
   // Cleared on Refresh / page reload by virtue of being component state.
   const [sessionResolvedKeys, setSessionResolvedKeys] = useState<Set<string>>(new Set());
+  // Pair keys we've confirmed have no `duplicate_merge_snapshots` row.
+  // Set by `MergeHistoryDetail`'s `onSnapshotMissing` callback when the
+  // user opens a session-merged pair we can't render through the history
+  // view (e.g. the resolution came from "Mark resolved" which doesn't
+  // write a snapshot, or the merge predates the snapshots table). Acts
+  // as a sticky toggle so we don't ping-pong between the two detail
+  // components on every render.
+  const [pairKeysMissingSnapshot, setPairKeysMissingSnapshot] = useState<Set<string>>(
+    new Set(),
+  );
   // Top-level navigation: pending list (default) vs. merge history list.
   // Detail views are layered on top of these via `selectedPairKey` and
   // `selectedHistoryId`.
@@ -124,6 +134,13 @@ export function DuplicatesPage({ isActive, settings }: Props) {
       if (force) setRefreshing(true);
       else setLoading(true);
       setError(null);
+      // A forced refresh re-fetches HubSpot and re-runs detection from
+      // scratch, so the missing-snapshot cache is no longer trustworthy
+      // (the user may have created a snapshot in HubSpot in the meantime,
+      // or the snapshots table may have been migrated since the last
+      // attempt). Cheaper to drop the cache than to remember which
+      // entries are still valid.
+      if (force) setPairKeysMissingSnapshot(new Set());
       try {
         const result = await ensureCreatorsExport({ token, force });
         const next = analyze(result);
@@ -269,6 +286,35 @@ export function DuplicatesPage({ isActive, settings }: Props) {
     const resolvedSurvivingRid = sessionResolvedKeys.has(pairKey)
       ? resolutions.get(pairKey)?.winnerRecordId ?? null
       : null;
+    // Session-merged pairs (resolved AND a winner record id is set —
+    // i.e. came from the in-app merge or "Mark resolved" with a winner)
+    // route through `MergeHistoryDetail` so the user sees the snapshot
+    // archaeology + live winner data instead of an empty live view (the
+    // loser is archived in HubSpot post-merge). If the snapshot is
+    // missing for any reason we sticky-fall-back to `DuplicatePairDetail`
+    // via the `pairKeysMissingSnapshot` set so we don't loop.
+    const hasWinner = !!resolvedSurvivingRid;
+    const snapshotKnownMissing = pairKeysMissingSnapshot.has(pairKey);
+    const useHistoryView =
+      sessionResolvedKeys.has(pairKey) && hasWinner && !snapshotKnownMissing;
+    if (useHistoryView) {
+      return (
+        <MergeHistoryDetail
+          pairKey={pairKey}
+          token={token}
+          backLabel="Back to duplicates"
+          onBack={() => setSelectedPairKey(null)}
+          onSnapshotMissing={() => {
+            setPairKeysMissingSnapshot((prev) => {
+              if (prev.has(pairKey)) return prev;
+              const next = new Set(prev);
+              next.add(pairKey);
+              return next;
+            });
+          }}
+        />
+      );
+    }
     return (
       <DuplicatePairDetail
         pair={selectedPair}
@@ -301,6 +347,19 @@ export function DuplicatesPage({ isActive, settings }: Props) {
           //    the "Resolved this session" section at the top instead of
           //    hiding it. Cleared on Refresh / page reload.
           setSessionResolvedKeys((prev) => new Set(prev).add(pairKey));
+          // 2b. A successful merge always writes a fresh
+          //     `duplicate_merge_snapshots` row (see
+          //     `recordMergeResolution`), so clear any earlier
+          //     "snapshot missing" sticky flag for this pair. Without
+          //     this, a Reopen → re-merge cycle would keep falling
+          //     back to the live `DuplicatePairDetail` view even
+          //     though we now have an archaeology row to show.
+          setPairKeysMissingSnapshot((prev) => {
+            if (!prev.has(pairKey)) return prev;
+            const next = new Set(prev);
+            next.delete(pairKey);
+            return next;
+          });
           // 3. Navigate back to the list. We deliberately do NOT auto-refetch
           //    the creators export — that's a slow, network-heavy operation
           //    and the user can trigger it via the Refresh button when they

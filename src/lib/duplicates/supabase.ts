@@ -421,6 +421,44 @@ export async function fetchMergeSnapshot(
 }
 
 /**
+ * Fetch the most recent snapshot for the given `pair_key`.
+ *
+ * Used by the Duplicates page to render a session-merged pair through the
+ * same view as the History list — looking up the snapshot row that was
+ * just inserted by `recordMergeResolution`. We sort by `merged_at desc`
+ * because in theory the same pair could be merged → reopened → re-merged
+ * multiple times, and we want the latest archaeology.
+ *
+ * Returns `null` when the snapshot is missing (older merges before the
+ * snapshot table existed, manual resolutions that never go through merge,
+ * or the migration not yet applied) so callers can fall back to the live
+ * detail view without surfacing a hard error.
+ */
+export async function fetchMergeSnapshotByPairKey(
+  pairKey: string,
+): Promise<MergeSnapshot | null> {
+  const client = getClient();
+  const { data, error } = await client
+    .from("duplicate_merge_snapshots")
+    .select(MERGE_SNAPSHOT_FULL_COLUMNS)
+    .eq("pair_key", pairKey)
+    .order("merged_at", { ascending: false })
+    .limit(1)
+    .maybeSingle();
+  if (error) {
+    if (isMissingTableError(error)) {
+      console.warn(
+        "[duplicates] duplicate_merge_snapshots table not found while loading snapshot by pair key.",
+      );
+      return null;
+    }
+    throw error;
+  }
+  if (!data) return null;
+  return mapSnapshot(data as MergeSnapshotRow);
+}
+
+/**
  * Read the current resolution row for the given pair keys.
  *
  * Returns a Map keyed by `pairKey` so callers can do an O(1) lookup per

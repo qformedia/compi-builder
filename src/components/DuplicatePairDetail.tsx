@@ -377,16 +377,32 @@ export function DuplicatePairDetail({
     setMerging(true);
     setMergeError(null);
     setMergeWarning(null);
+    // HubSpot's merge endpoint may return a different primary id than the
+    // one we sent (it picks the canonical surviving record id, which can
+    // differ from `primaryObjectId` when there have been prior merges
+    // touching either side). We persist *that* id into the snapshot and
+    // resolution row so the History view's live-winner fetch hits a
+    // record that actually exists in HubSpot. Falling back to `winnerRid`
+    // keeps the prior behaviour for the common case where the API
+    // response shape doesn't expose an id.
+    let actualWinnerRid = winnerRid;
     try {
-      await invoke("merge_creators", {
+      const directRes = await invoke<unknown>("merge_creators", {
         token,
         winnerId: winnerRid,
         loserId: loserRid,
       });
+      actualWinnerRid = extractMergedRecordId(directRes) ?? winnerRid;
     } catch (err) {
       setMergeError(err instanceof Error ? err.message : String(err));
       setMerging(false);
       return;
+    }
+    if (actualWinnerRid !== winnerRid) {
+      console.info(
+        `[duplicates] HubSpot resolved primary id ${winnerRid} → ${actualWinnerRid} during merge. ` +
+          "Using HubSpot's canonical id for the snapshot.",
+      );
     }
 
     try {
@@ -404,7 +420,7 @@ export function DuplicatePairDetail({
       const loserAssoc = winnerSide === "a" ? assocData?.b ?? null : assocData?.a ?? null;
       await recordMergeResolution({
         pairKey: pair.pairKey,
-        winnerRecordId: winnerRid,
+        winnerRecordId: actualWinnerRid,
         loserRecordId: loserRid,
         actor: localUser,
         snapshot: {
@@ -438,7 +454,7 @@ export function DuplicatePairDetail({
 
     setConfirmOpen(false);
     setMerging(false);
-    onMergeSuccess?.(winnerRid, loserRid);
+    onMergeSuccess?.(actualWinnerRid, loserRid);
   }
 
   return (
@@ -1123,3 +1139,38 @@ function humanizeSource(s: string): string {
 // Re-export the labels constant so consumers wanting to map property keys
 // can avoid an extra import. (No-op cost; tree-shaken if unused.)
 export { CREATOR_PROPERTY_LABELS };
+
+/**
+ * Extract the canonical surviving-record id from a HubSpot merge response.
+ *
+ * HubSpot's merge endpoint always echoes the surviving object under
+ * different keys depending on which API version / object type the request
+ * hit. We accept the most common shapes seen in production:
+ *
+ *   - `{ id: "..." }`            — modern CRM objects API.
+ *   - `{ vid: 123 }`             — legacy contact merge.
+ *   - `{ objectId: "..." }`      — some object-type merges.
+ *   - `{ properties: { hs_object_id: "..." } }` — when the response
+ *     includes the merged object's properties.
+ *
+ * Returns `null` when nothing recognisable is present so callers can fall
+ * back to the id they originally sent.
+ */
+function extractMergedRecordId(response: unknown): string | null {
+  if (!response || typeof response !== "object") return null;
+  const obj = response as Record<string, unknown>;
+  const direct = obj.id ?? obj.objectId ?? obj.vid;
+  if (direct != null) {
+    const s = String(direct).trim();
+    if (s) return s;
+  }
+  const props = obj.properties;
+  if (props && typeof props === "object") {
+    const hsId = (props as Record<string, unknown>).hs_object_id;
+    if (hsId != null) {
+      const s = String(hsId).trim();
+      if (s) return s;
+    }
+  }
+  return null;
+}

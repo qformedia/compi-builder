@@ -404,6 +404,7 @@ export function AssociatedRecordsSection({
   recordsB,
   winnerSide,
   mergedColumnLabel,
+  mergedRecordsOverride,
   renderChips,
   buildUrl,
 }: {
@@ -412,6 +413,12 @@ export function AssociatedRecordsSection({
   recordsB: AssociatedRecord[];
   winnerSide: "a" | "b" | null;
   mergedColumnLabel: string | null;
+  /** When supplied (history view, post-merge), the third column renders
+   *  this explicit list instead of the predicted winner+loser union. Used
+   *  by the History detail to show the live HubSpot associations of the
+   *  surviving record so post-merge edits / actual merge outcomes are
+   *  visible — the predicted union is only an estimate. */
+  mergedRecordsOverride?: AssociatedRecord[];
   renderChips: (r: AssociatedRecord) => React.ReactNode;
   buildUrl: (r: AssociatedRecord) => string;
 }) {
@@ -422,6 +429,7 @@ export function AssociatedRecordsSection({
   // association (HubSpot dedupes). Mirroring that here keeps the count in
   // the rollup table honest with the list shown right above it.
   const mergedRecords = useMemo<AssociatedRecord[]>(() => {
+    if (mergedRecordsOverride) return mergedRecordsOverride;
     if (!winnerSide) return [];
     const winner = winnerSide === "a" ? recordsA : recordsB;
     const loser = winnerSide === "a" ? recordsB : recordsA;
@@ -433,7 +441,7 @@ export function AssociatedRecordsSection({
       out.push(r);
     }
     return out;
-  }, [winnerSide, recordsA, recordsB]);
+  }, [winnerSide, recordsA, recordsB, mergedRecordsOverride]);
 
   const gridClass = winnerSide
     ? "grid grid-cols-[minmax(160px,200px)_1fr_1fr_1fr] gap-3"

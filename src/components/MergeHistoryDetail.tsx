@@ -1,5 +1,5 @@
 /**
- * Read-only A/B/Predicted-merged comparison for a past merge.
+ * Read-only A/B/Live-merged comparison for a past merge.
  *
  * This view exists because HubSpot's native merge is destructive: once two
  * records are merged you cannot reconstruct what the loser looked like
@@ -7,13 +7,33 @@
  * merge time (see `recordMergeResolution` in
  * `src/lib/duplicates/supabase.ts`) and replay it here.
  *
+ * Two entry points:
+ *
+ *   - From the History list: the parent passes `snapshotId`. Used to
+ *     review any past merge from `duplicate_merge_snapshots`.
+ *   - From the "Resolved this session" list on the Duplicates page: the
+ *     parent passes `pairKey`. We look up the most recent snapshot for
+ *     that pair so the just-merged pair renders with the same archaeology
+ *     instead of the empty live view (the loser is now archived in
+ *     HubSpot, so a naive live fetch returns blanks).
+ *
  * Layout intentionally mirrors {@link DuplicatePairDetail} — same Why /
- * Statuses / Associations / Side-by-side cards — but:
- *   - Always 3 columns (Winner / Loser / Predicted merged), no winner
- *     picker, no merge action.
- *   - Data sourced from Supabase, not live HubSpot.
+ * License / Associations / Side-by-side cards — but:
+ *   - Always 3 columns (Winner snapshot / Loser snapshot / Merged record (live)).
+ *   - First two columns are sourced from Supabase, third column is sourced
+ *     from a live HubSpot fetch of the surviving record. Cells where the
+ *     live value diverges from the captured winner snapshot are
+ *     highlighted to surface post-merge edits or HubSpot merge surprises.
+ *   - When the live fetch fails or the snapshot is missing, we fall back
+ *     to the predicted merged value (`predictMergedProperties`) and surface
+ *     a warning banner so the reviewer knows what they're looking at.
  *   - Top banner records who/when, plus a "View merged record" shortcut
  *     into the surviving HubSpot record.
+ *
+ * If `pairKey` is provided but no snapshot exists (older merges, manual
+ * resolutions, missing migration), we surface that to the parent via
+ * `onSnapshotMissing` so it can swap us out for the live `DuplicatePairDetail`
+ * fallback view.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -23,6 +43,7 @@ import {
   Check,
   ExternalLink,
   Loader2,
+  Pencil,
 } from "lucide-react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
@@ -48,6 +69,7 @@ import {
 import {
   describeSupabaseError,
   fetchMergeSnapshot,
+  fetchMergeSnapshotByPairKey,
   type MergeSnapshot,
 } from "@/lib/duplicates/supabase";
 import { hubspotClipUrl, hubspotCreatorUrl, hubspotVideoProjectUrl } from "@/lib/hubspot-urls";
@@ -60,15 +82,27 @@ import {
   type HubspotFileInfo,
 } from "@/components/duplicate-pair-view-primitives";
 
-interface Props {
-  snapshotId: string;
-  /** Optional HubSpot token used to resolve license-file ids → human
-   *  filenames. Snapshots store only the ids (HubSpot's data model), so
-   *  the file metadata fetch happens at view time against live HubSpot.
-   *  Without a token the chips fall back to showing the raw id. */
+type Props = (
+  | { snapshotId: string; pairKey?: undefined }
+  | { snapshotId?: undefined; pairKey: string }
+) & {
+  /** Optional HubSpot token used to (a) resolve license-file ids → human
+   *  filenames and (b) fetch the live state of the surviving record so the
+   *  third column can show real post-merge data instead of a prediction.
+   *  Without a token the chips fall back to showing raw ids and the third
+   *  column falls back to the predicted-merged values. */
   token?: string;
   onBack: () => void;
-}
+  /** Custom label for the back button. Defaults to "Back to history".
+   *  The Duplicates page passes "Back to duplicates" when surfacing this
+   *  view from the session-resolved list. */
+  backLabel?: string;
+  /** Fired when no snapshot row exists for the given `pairKey`. The parent
+   *  uses this to swap in a live fallback (`DuplicatePairDetail`) so the
+   *  user always sees something rather than a hard error. Only meaningful
+   *  in the `pairKey` entry-point; ignored in the `snapshotId` path. */
+  onSnapshotMissing?: () => void;
+};
 
 const BUCKET_LABEL: Record<PropDiffBucket, string> = {
   mismatch: "Differs",
@@ -91,24 +125,82 @@ const BUCKET_ROW_CLASS: Record<PropDiffBucket, string> = {
   equal: "",
 };
 
-// Three-column layout is constant in this view (winner / loser / predicted
-// merged). Pulled out so the header and every row stay aligned.
+// Three-column layout is constant in this view (winner / loser / live
+// surviving record). Pulled out so the header and every row stay aligned.
 const GRID_COLS = "grid-cols-[minmax(160px,200px)_1fr_1fr_1fr]";
 
-export function MergeHistoryDetail({ snapshotId, token, onBack }: Props) {
+// Header label for the third column. Was "Predicted merged" when the
+// column showed `predictMergedProperties(...)`; now it always shows the
+// live state of the surviving record (or the predicted value as a
+// fallback when the live fetch fails — banner surfaces the fallback).
+const MERGED_COLUMN_LABEL = "Merged record (live)";
+
+interface CreatorRecord {
+  id: string;
+  properties: Record<string, string | null>;
+}
+
+interface FetchCreatorsResponse {
+  results: CreatorRecord[];
+}
+
+interface CreatorAssociations {
+  id: string;
+  videoProjects: AssociatedRecord[];
+  externalClips: AssociatedRecord[];
+}
+
+interface AssociationsResponse {
+  results: CreatorAssociations[];
+}
+
+interface LiveWinnerData {
+  props: Record<string, string>;
+  associations: CreatorAssociations | null;
+}
+
+export function MergeHistoryDetail({
+  snapshotId,
+  pairKey,
+  token,
+  onBack,
+  backLabel = "Back to history",
+  onSnapshotMissing,
+}: Props) {
   const [snapshot, setSnapshot] = useState<MergeSnapshot | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // True after we've signalled `onSnapshotMissing` so the parent has a
+  // tick to swap us out for the fallback view. While this is true we
+  // keep rendering a neutral loader instead of the "Snapshot not found"
+  // error — otherwise the user sees a flash of the error in the gap
+  // between "we know snapshot is missing" and "parent re-renders us
+  // with a different component".
+  const [handingOff, setHandingOff] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
+    setSnapshot(null);
+    setHandingOff(false);
     void (async () => {
       try {
-        const s = await fetchMergeSnapshot(snapshotId);
+        const s = pairKey
+          ? await fetchMergeSnapshotByPairKey(pairKey)
+          : snapshotId
+            ? await fetchMergeSnapshot(snapshotId)
+            : null;
         if (cancelled) return;
         if (!s) {
+          if (pairKey && onSnapshotMissing) {
+            // Tell the parent there's no snapshot for this pair so it
+            // can render the live fallback view. Stay in a soft "handing
+            // off" state until the parent's next render replaces us.
+            setHandingOff(true);
+            onSnapshotMissing();
+            return;
+          }
           setError(
             "Snapshot not found. It may have been deleted, or the migration that creates the merge_snapshots table hasn't been applied yet.",
           );
@@ -126,7 +218,13 @@ export function MergeHistoryDetail({ snapshotId, token, onBack }: Props) {
     return () => {
       cancelled = true;
     };
-  }, [snapshotId]);
+    // `onSnapshotMissing` intentionally omitted: callers passing a fresh
+    // closure each render would otherwise force a re-fetch of the
+    // snapshot every time. The latest closure is captured via the ref
+    // pattern via React's stale-closure rules — fine here because the
+    // missing-snapshot signal only matters once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [snapshotId, pairKey]);
 
   // Ownership map captured at merge time. Wrapped in a Map so it has the
   // same call shape as the live view's `ownersById`, which lets us reuse
@@ -154,10 +252,100 @@ export function MergeHistoryDetail({ snapshotId, token, onBack }: Props) {
     return groups;
   }, [diff]);
 
-  const mergedProps = useMemo<Record<string, string>>(() => {
+  const predictedMergedProps = useMemo<Record<string, string>>(() => {
     if (!snapshot) return {};
     return predictMergedProperties(snapshot.winnerProps, snapshot.loserProps);
   }, [snapshot]);
+
+  // ── Live winner fetch (props + associations) ────────────────────────
+  // Kicks off after the snapshot resolves so we know `winner_record_id`.
+  // Loading and error are tracked separately so we can keep showing the
+  // predicted merged data while live is in flight, and so we can surface
+  // a clear "showing predicted as fallback" banner when the live fetch
+  // fails (e.g. winner archived for unrelated reasons, network error,
+  // expired token). The snapshot is the source of truth for the first
+  // two columns regardless of live state.
+  const [liveWinner, setLiveWinner] = useState<LiveWinnerData | null>(null);
+  const [liveLoading, setLiveLoading] = useState(false);
+  const [liveError, setLiveError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!snapshot) return;
+    const winnerId = snapshot.winnerRecordId;
+    if (!winnerId || !token) {
+      setLiveWinner(null);
+      setLiveError(null);
+      setLiveLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setLiveLoading(true);
+    setLiveError(null);
+    void (async () => {
+      try {
+        const [propsRes, assocRes] = await Promise.all([
+          invoke<FetchCreatorsResponse>("fetch_creators_batch", {
+            token,
+            creatorIds: [winnerId],
+          }),
+          invoke<AssociationsResponse>("fetch_creator_associations_batch", {
+            token,
+            creatorIds: [winnerId],
+          }),
+        ]);
+        if (cancelled) return;
+        const propsRow = propsRes.results.find((r) => r.id === winnerId);
+        const assocRow = assocRes.results.find((r) => r.id === winnerId);
+        // HubSpot's batch read filters out archived records by default
+        // (we don't pass `archived=true`), so a record that was archived
+        // after the merge — or any record we can't read with the current
+        // token — comes back as an empty `results` array. Treating that
+        // as a successful fetch with `props={}` would paint every cell
+        // in the third column as "—" with an "Edited" pill, which is a
+        // lie. Surface it as an error instead so the column falls back
+        // to predicted merged values and the amber banner explains why.
+        if (!propsRow) {
+          throw new Error(
+            `Surviving record ${winnerId} returned no data from HubSpot. ` +
+              `It may have been archived after the merge, or your token may ` +
+              `lack access. Showing predicted merged values instead.`,
+          );
+        }
+        const normalizedProps: Record<string, string> = {};
+        for (const [k, v] of Object.entries(propsRow.properties)) {
+          normalizedProps[k] = v == null ? "" : String(v);
+        }
+        setLiveWinner({
+          props: normalizedProps,
+          associations: assocRow ?? null,
+        });
+      } catch (err) {
+        if (cancelled) return;
+        setLiveError(err instanceof Error ? err.message : String(err));
+        setLiveWinner(null);
+      } finally {
+        if (!cancelled) setLiveLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [snapshot, token]);
+
+  // The third-column data source. Falls back to predicted merged when
+  // live data isn't available (loading or failed). Once live data lands
+  // we switch over and unlock the "edited since merge" highlight so the
+  // user can see exactly which fields drift from the snapshot.
+  const displayMergedProps = useMemo<Record<string, string>>(() => {
+    return liveWinner?.props ?? predictedMergedProps;
+  }, [liveWinner, predictedMergedProps]);
+
+  // Live winner associations override the predicted union shown in the
+  // third column. When live isn't available we let the primitive compute
+  // the predicted union from snapshot winner+loser (the existing default
+  // behavior of `AssociatedRecordsSection`).
+  const liveVideoProjects = liveWinner?.associations?.videoProjects;
+  const liveExternalClips = liveWinner?.associations?.externalClips;
 
   // ── License file id → name resolver (best-effort, mirrors live view).
   // The snapshot only stores ids (that's all HubSpot gives us), so we
@@ -179,8 +367,20 @@ export function MergeHistoryDetail({ snapshotId, token, onBack }: Props) {
         }
       }
     }
+    // Also include any file ids that appear only on the live winner so
+    // the third column's chips resolve to filenames too.
+    if (liveWinner) {
+      for (const key of ["license_file", "traceability_file"] as const) {
+        const raw = (liveWinner.props[key] ?? "").trim();
+        if (!raw) continue;
+        for (const tok of raw.split(/[;,\s]+/)) {
+          const t = tok.trim();
+          if (t) out.add(t);
+        }
+      }
+    }
     return Array.from(out).sort();
-  }, [snapshot]);
+  }, [snapshot, liveWinner]);
   const fileIdsKey = fileIds.join(",");
   useEffect(() => {
     if (!token || fileIds.length === 0) {
@@ -206,11 +406,11 @@ export function MergeHistoryDetail({ snapshotId, token, onBack }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [token, fileIdsKey]);
 
-  if (loading) {
+  if (loading || handingOff) {
     return (
       <div className="h-full overflow-auto">
         <div className="w-full space-y-4 px-4 py-4">
-          <BackButton onBack={onBack} />
+          <BackButton onBack={onBack} label={backLabel} />
           <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
             <Loader2 className="h-3.5 w-3.5 flex-shrink-0 animate-spin" />
             Loading merge snapshot…
@@ -224,7 +424,7 @@ export function MergeHistoryDetail({ snapshotId, token, onBack }: Props) {
     return (
       <div className="h-full overflow-auto">
         <div className="w-full space-y-4 px-4 py-4">
-          <BackButton onBack={onBack} />
+          <BackButton onBack={onBack} label={backLabel} />
           <div className="flex flex-wrap items-start gap-2 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive">
             <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
             <span className="min-w-0 break-words">
@@ -242,7 +442,7 @@ export function MergeHistoryDetail({ snapshotId, token, onBack }: Props) {
   return (
     <div className="h-full overflow-auto">
       <div className="w-full space-y-4 px-4 py-4">
-        <BackButton onBack={onBack} />
+        <BackButton onBack={onBack} label={backLabel} />
 
         {/* Top banner: who/when + the link out to HubSpot. Sits above the
             comparison cards so it's the first thing the reviewer sees when
@@ -257,8 +457,10 @@ export function MergeHistoryDetail({ snapshotId, token, onBack }: Props) {
               )}
             </CardTitle>
             <CardDescription className="text-xs text-emerald-900/80">
-              The data below is the snapshot captured at merge time, not the
-              current state of HubSpot.
+              The first two columns show the snapshot captured at merge
+              time. The third column shows the live HubSpot state of the
+              surviving record. Cells highlighted in green changed since
+              the merge.
             </CardDescription>
           </CardHeader>
           <CardContent className="flex items-center justify-end">
@@ -273,6 +475,29 @@ export function MergeHistoryDetail({ snapshotId, token, onBack }: Props) {
             </Button>
           </CardContent>
         </Card>
+
+        {/* Live-fetch status banners. Loading is a soft info banner so
+            the user knows the third column will refresh shortly; error
+            is amber and explains the fallback to predicted merged. */}
+        {liveLoading && !liveWinner && (
+          <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+            <Loader2 className="h-3.5 w-3.5 flex-shrink-0 animate-spin" />
+            <span className="min-w-0 break-words">
+              Loading the current state of the surviving record from HubSpot…
+              The third column shows the predicted merge until then.
+            </span>
+          </div>
+        )}
+        {liveError && !liveWinner && (
+          <div className="flex flex-wrap items-start gap-2 rounded-md border border-amber-300 bg-amber-50/70 px-3 py-2 text-xs text-amber-900">
+            <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+            <span className="min-w-0 break-words">
+              Couldn&apos;t load the live state of the surviving record:
+              {" "}{liveError}. The third column is showing the predicted
+              merged values as a fallback.
+            </span>
+          </div>
+        )}
 
         {/* Why card (mirrors DuplicatePairDetail's layout but built from
             the snapshot's denormalized fields). */}
@@ -311,39 +536,40 @@ export function MergeHistoryDetail({ snapshotId, token, onBack }: Props) {
         </Card>
 
         {/* License Information card — same layout as the live view but
-            always 3 columns (Winner / Loser / Predicted merged). The
-            mergedProps argument is non-null so LicenseInfoCard renders
-            the third column unconditionally. */}
+            always 3 columns (Winner / Loser / Merged record (live)). The
+            third column is sourced from `displayMergedProps` which is the
+            live winner data when available, predicted merged when not. */}
         <Card>
           <CardHeader className="gap-1.5">
             <CardTitle className="text-base">License Information</CardTitle>
             <CardDescription className="text-xs">
-              Snapshot of each side's HubSpot license fields at merge time.
+              Side-by-side license fields. The first two columns are from
+              the snapshot; the third is the current state of the surviving
+              record.
             </CardDescription>
           </CardHeader>
           <CardContent>
             <LicenseInfoCard
               propsA={snapshot.winnerProps}
               propsB={snapshot.loserProps}
-              mergedProps={mergedProps}
+              mergedProps={displayMergedProps}
               nameA={winnerName}
               nameB={loserName}
-              mergedColumnLabel="Predicted merged"
+              mergedColumnLabel={MERGED_COLUMN_LABEL}
               fileNamesById={fileNamesById}
             />
           </CardContent>
         </Card>
 
-        {/* Associations card — counts table + records sections from the
-            snapshot. Both `winner_associations` and `loser_associations`
-            can be null if the associations fetch failed at merge time;
-            we render empty sections in that case so the layout stays
-            consistent. */}
+        {/* Associations card — counts table + records sections. The third
+            column counts come from live winner properties when available;
+            the records lists come from the live winner associations. */}
         <Card>
           <CardHeader className="gap-1.5">
             <CardTitle className="text-base">Associations</CardTitle>
             <CardDescription className="text-xs">
-              Rollup counts and associated records as captured at merge time.
+              First two columns: snapshot. Third column: live HubSpot
+              associations of the surviving record.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
@@ -357,14 +583,24 @@ export function MergeHistoryDetail({ snapshotId, token, onBack }: Props) {
                 <span>Count</span>
                 <span>{winnerName}</span>
                 <span>{loserName}</span>
-                <span className="text-emerald-700">Predicted merged</span>
+                <span className="text-emerald-700">{MERGED_COLUMN_LABEL}</span>
               </div>
               <ul className="divide-y">
                 {ASSOCIATION_ROLLUP_KEYS.map((key) => {
                   const valWinner = snapshot.winnerProps[key] ?? "0";
                   const valLoser = snapshot.loserProps[key] ?? "0";
                   const differs = valWinner !== valLoser;
-                  const mergedVal = predictMergedAssociationRollup(valWinner, valLoser);
+                  // Live count when we have it; otherwise predicted sum.
+                  const liveVal = liveWinner?.props[key];
+                  const mergedVal = liveVal != null
+                    ? liveVal || "0"
+                    : predictMergedAssociationRollup(valWinner, valLoser);
+                  // Edited-since-merge highlight: live count differs from
+                  // the snapshot winner count. Empty (no live yet) → no
+                  // highlight.
+                  const editedSinceMerge =
+                    !!liveWinner &&
+                    (liveVal ?? "0").trim() !== (valWinner ?? "0").trim();
                   return (
                     <li
                       key={key}
@@ -383,7 +619,20 @@ export function MergeHistoryDetail({ snapshotId, token, onBack }: Props) {
                       <span className={cn(differs && "font-semibold text-amber-700")}>
                         {valLoser || "0"}
                       </span>
-                      <span className="font-semibold text-emerald-700">{mergedVal}</span>
+                      <span
+                        className={cn(
+                          "font-semibold text-emerald-700",
+                          editedSinceMerge &&
+                            "rounded-sm bg-emerald-100/80 px-1.5 py-0.5",
+                        )}
+                        title={
+                          editedSinceMerge
+                            ? "Changed since the merge"
+                            : undefined
+                        }
+                      >
+                        {mergedVal}
+                      </span>
                     </li>
                   );
                 })}
@@ -400,7 +649,8 @@ export function MergeHistoryDetail({ snapshotId, token, onBack }: Props) {
                   (snapshot.loserAssociations?.videoProjects as AssociatedRecord[] | undefined) ?? []
                 }
                 winnerSide="a"
-                mergedColumnLabel="Predicted merged"
+                mergedColumnLabel={MERGED_COLUMN_LABEL}
+                mergedRecordsOverride={liveVideoProjects}
                 renderChips={(r) => {
                   const tag = r.tag as string | undefined;
                   const status = r.status as string | undefined;
@@ -426,7 +676,8 @@ export function MergeHistoryDetail({ snapshotId, token, onBack }: Props) {
                   (snapshot.loserAssociations?.externalClips as AssociatedRecord[] | undefined) ?? []
                 }
                 winnerSide="a"
-                mergedColumnLabel="Predicted merged"
+                mergedColumnLabel={MERGED_COLUMN_LABEL}
+                mergedRecordsOverride={liveExternalClips}
                 renderChips={(r) => {
                   const score = r.score as string | undefined;
                   return (
@@ -443,7 +694,11 @@ export function MergeHistoryDetail({ snapshotId, token, onBack }: Props) {
           </CardContent>
         </Card>
 
-        {/* Side-by-side property diff (3 columns: Winner / Loser / Predicted). */}
+        {/* Side-by-side property diff (3 columns: Winner snapshot / Loser
+            snapshot / Merged record (live)). Cells where the live winner
+            value diverges from the captured winner snapshot are tagged
+            with an "Edited" pill so the reviewer can spot post-merge
+            edits at a glance. */}
         <Card className="overflow-hidden p-0">
           <CardHeader className="gap-1.5 px-4 py-3">
             <div className={cn("grid items-center gap-3 text-sm", GRID_COLS)}>
@@ -467,11 +722,15 @@ export function MergeHistoryDetail({ snapshotId, token, onBack }: Props) {
                     className="h-5 border-emerald-300 bg-emerald-50 px-1.5 text-[10px] text-emerald-700"
                   >
                     <Check className="mr-0.5 h-3 w-3" />
-                    Predicted merged
+                    {MERGED_COLUMN_LABEL}
                   </Badge>
                 </div>
                 <div className="text-[11px] text-muted-foreground">
-                  Winner wins on conflict; empty winner fields filled from loser
+                  {liveWinner
+                    ? "Current data from HubSpot for the surviving record"
+                    : liveLoading
+                      ? "Loading current data… showing predicted merged"
+                      : "Predicted merged (live data unavailable)"}
                 </div>
               </div>
             </div>
@@ -502,12 +761,16 @@ export function MergeHistoryDetail({ snapshotId, token, onBack }: Props) {
                       // sortPropertiesForDiff in that order above.
                       const displayWinner = formatDisplayValue(row.key, row.valueA, ownersById);
                       const displayLoser = formatDisplayValue(row.key, row.valueB, ownersById);
-                      const mergedRaw = mergedProps[row.key] ?? "";
+                      const mergedRaw = displayMergedProps[row.key] ?? "";
                       const displayMerged = formatDisplayValue(row.key, mergedRaw, ownersById);
-                      // Highlight the merged cell when the predicted value
-                      // came from the loser (i.e. the winner's field was
-                      // empty) — same affordance as the live view.
-                      const filledFromLoser = !row.valueA.trim() && !!mergedRaw.trim();
+                      // Edited-since-merge highlight: live data is loaded
+                      // and the value diverges from the captured winner
+                      // snapshot. The trim is important because HubSpot
+                      // sometimes returns whitespace-only diffs for
+                      // unchanged fields.
+                      const editedSinceMerge =
+                        !!liveWinner &&
+                        mergedRaw.trim() !== row.valueA.trim();
                       return (
                         <li
                           key={row.key}
@@ -520,7 +783,18 @@ export function MergeHistoryDetail({ snapshotId, token, onBack }: Props) {
                           <div className="font-medium text-foreground">{row.label}</div>
                           <PropValueCell value={displayWinner} rawValue={row.valueA} propKey={row.key} />
                           <PropValueCell value={displayLoser} rawValue={row.valueB} propKey={row.key} />
-                          <div className={cn(filledFromLoser && "rounded-sm bg-emerald-50/70 px-1.5 py-0.5")}>
+                          <div
+                            className={cn(
+                              editedSinceMerge && "rounded-sm bg-emerald-50/70 px-1.5 py-0.5",
+                            )}
+                            title={editedSinceMerge ? "Changed since the merge" : undefined}
+                          >
+                            {editedSinceMerge && (
+                              <div className="mb-0.5 inline-flex items-center gap-1 rounded-sm bg-emerald-100 px-1 py-0.5 text-[9px] font-semibold uppercase tracking-wide text-emerald-700">
+                                <Pencil className="h-2.5 w-2.5" />
+                                Edited
+                              </div>
+                            )}
                             <PropValueCell value={displayMerged} rawValue={mergedRaw} propKey={row.key} />
                           </div>
                         </li>
@@ -542,7 +816,7 @@ export function MergeHistoryDetail({ snapshotId, token, onBack }: Props) {
   );
 }
 
-function BackButton({ onBack }: { onBack: () => void }) {
+function BackButton({ onBack, label }: { onBack: () => void; label: string }) {
   return (
     <div className="flex items-center gap-3">
       <Button
@@ -552,7 +826,7 @@ function BackButton({ onBack }: { onBack: () => void }) {
         onClick={onBack}
       >
         <ArrowLeft className="mr-1.5 h-4 w-4" />
-        Back to history
+        {label}
       </Button>
     </div>
   );
