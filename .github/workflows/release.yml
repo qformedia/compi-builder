@@ -29,6 +29,10 @@ jobs:
           cache-on-failure: true
 
       - name: Install Linux system dependencies
+        # libpipewire-0.3-dev is required by the `xcap` crate (pulled in
+        # by the MiniMiki screenshot path) on Linux. Without it the
+        # Linux test job fails to compile `libspa-sys`. We don't ship
+        # Linux builds — this is just for `cargo test --lib` to compile.
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -37,6 +41,7 @@ jobs:
             libwebkit2gtk-4.1-dev \
             libayatana-appindicator3-dev \
             librsvg2-dev \
+            libpipewire-0.3-dev \
             patchelf
 
       - name: Install dependencies
