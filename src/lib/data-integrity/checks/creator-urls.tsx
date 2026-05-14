@@ -1,6 +1,45 @@
-import { useEffect, useState } from "react";
+/**
+ * Creator profile URL integrity check.
+ *
+ * v2 structure (this file): the same five strict regex rules from
+ * `creator-url-rules.ts` are still the gate, but rows are now triaged by
+ * the classifier (`creator-url-classifier.ts`) into three action-shaped
+ * buckets so the user knows exactly what to do with each issue:
+ *
+ *   1. Auto-fixable          — Bulk-fix runner writes the canonical URL.
+ *   2. Duplicate after fix   — Send the user to the Duplicates page to
+ *                              merge before any write touches HubSpot.
+ *   3. Manual review         — Open the creator in HubSpot, edit by hand.
+ *
+ * Pull plan:
+ *
+ *   - `ensureCreatorsExport` provides the cached CSV (and re-fetches from
+ *     HubSpot if it's older than 24h). We parse it with
+ *     `parseCreatorsCsvFull` so the classifier has access to all columns.
+ *   - `fetchResolutions` provides the current Supabase resolution rows.
+ *     The classifier uses them to drop already-merged pairs from the
+ *     duplicate-after-fix bucket and to promote the merge winner's row
+ *     back to auto-fixable. Failure is non-fatal — we degrade to "treat
+ *     everything as pending" so a transient Supabase outage doesn't take
+ *     the integrity card down with it.
+ *   - The whole pipeline is memoised by (export source, generatedAt,
+ *     resolution-version) so opening the integrity card a second time
+ *     doesn't re-parse the CSV.
+ */
+
+import { useEffect, useMemo, useState } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { AlertTriangle, ExternalLink, Loader2, RefreshCw } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowRight,
+  CheckCircle2,
+  ExternalLink,
+  Loader2,
+  Pencil,
+  RefreshCw,
+  ShieldAlert,
+  Users,
+} from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -23,17 +62,27 @@ import {
   type CreatorExportResult,
 } from "@/lib/creator-export";
 import { hubspotCreatorUrl } from "@/lib/hubspot-urls";
+import { describeSupabaseError, fetchResolutions } from "@/lib/duplicates/supabase";
+import type { DuplicatePairResolution } from "@/lib/duplicates/supabase";
 import {
-  CREATOR_URL_FIELDS,
   CREATOR_URL_RULES,
   type CreatorUrlField,
 } from "../creator-url-rules";
 import {
-  groupIssuesByField,
-  parseCreatorsCsv,
-  validateCreatorUrls,
-  type CreatorUrlIssue,
+  parseCreatorsCsvFull,
 } from "../creator-csv";
+import {
+  classifyCreatorUrls,
+  groupIssuesByBucket,
+  type ClassifiedBucket,
+  type ClassifiedIssue,
+} from "../creator-url-classifier";
+import {
+  runBulkAutoFix,
+  hasCompletedAutofixRun,
+  AUTOFIX_FIRST_RUN_CAP,
+  type BulkAutoFixOutcome,
+} from "../creator-url-bulk-fix";
 import type {
   IntegrityCheck,
   IntegritySection,
@@ -44,42 +93,81 @@ import type {
 
 interface CachedAnalysis {
   generatedAt: Date;
-  /** Keyed by field; preserves CREATOR_URL_FIELDS order. */
-  groups: Record<CreatorUrlField, CreatorUrlIssue[]>;
-  totals: Record<CreatorUrlField, number>;
+  issues: ClassifiedIssue[];
+  counts: Record<ClassifiedBucket, number>;
+  groups: Record<ClassifiedBucket, ClassifiedIssue[]>;
 }
 
 let cachedAnalysis: CachedAnalysis | null = null;
 let cachedSourceKey: string | null = null;
 
-function analyze(result: CreatorExportResult): CachedAnalysis {
-  const key = `${result.generatedAt.toISOString()}::${result.source}`;
+function analyze(
+  result: CreatorExportResult,
+  resolutions: Map<string, DuplicatePairResolution>,
+  resolutionsVersion: string,
+): CachedAnalysis {
+  const key = `${result.generatedAt.toISOString()}::${result.source}::${resolutionsVersion}`;
   if (cachedAnalysis && cachedSourceKey === key) {
     return cachedAnalysis;
   }
-  const rows = parseCreatorsCsv(result.csv);
-  const issues = validateCreatorUrls(rows);
-  const groups = groupIssuesByField(issues);
-  const totals: Record<CreatorUrlField, number> = {
-    instagram: groups.instagram.length,
-    secondary_instagram: groups.secondary_instagram.length,
-    tiktok: groups.tiktok.length,
-    secondary_tiktok: groups.secondary_tiktok.length,
-    youtube: groups.youtube.length,
-  };
-  cachedAnalysis = { generatedAt: result.generatedAt, groups, totals };
+  const rows = parseCreatorsCsvFull(result.csv);
+  const { issues, counts } = classifyCreatorUrls({ creators: rows, resolutions });
+  const groups = groupIssuesByBucket(issues);
+  cachedAnalysis = { generatedAt: result.generatedAt, issues, counts, groups };
   cachedSourceKey = key;
   return cachedAnalysis;
 }
 
 /**
- * If the CSV we got back can't be parsed, the local cache contains garbage
- * that would keep failing on every app start. Drop the cache so the next
- * call goes back to Supabase / HubSpot for a fresh copy.
+ * Fetch resolutions for the pair keys mentioned in `duplicate-after-fix`
+ * collision targets. Failure is non-fatal — we proceed with an empty map
+ * so the classifier still works.
  */
+async function loadResolutionsSafely(
+  pairKeys: string[],
+): Promise<{ map: Map<string, DuplicatePairResolution>; version: string }> {
+  if (pairKeys.length === 0) {
+    return { map: new Map(), version: "empty" };
+  }
+  try {
+    const map = await fetchResolutions(pairKeys);
+    // Version string is stable for identical resolution data so the cache
+    // key changes only when something actually moved in Supabase.
+    const parts: string[] = [];
+    for (const [k, v] of map) parts.push(`${k}=${v.status}=${v.winnerRecordId ?? ""}`);
+    parts.sort();
+    return { map, version: parts.join("|") || "none" };
+  } catch (err) {
+    console.warn("[creator-urls] failed to fetch resolutions:", describeSupabaseError(err));
+    return { map: new Map(), version: "error" };
+  }
+}
+
+/**
+ * Two-pass analyser: classify once without resolutions to learn which pair
+ * keys we'd hit, then re-run with the actual resolution rows. Saves a
+ * blanket "fetch every pair key in the resolutions table" call — the
+ * classifier only cares about pairs it's about to flag.
+ */
+async function analyzeWithResolutions(
+  result: CreatorExportResult,
+): Promise<CachedAnalysis> {
+  const firstPass = (() => {
+    const rows = parseCreatorsCsvFull(result.csv);
+    return classifyCreatorUrls({ creators: rows });
+  })();
+  const pairKeys = new Set<string>();
+  for (const issue of firstPass.issues) {
+    if (issue.bucket !== "duplicate-after-fix" || !issue.collidesWith) continue;
+    for (const c of issue.collidesWith) pairKeys.add(c.pairKey);
+  }
+  const { map, version } = await loadResolutionsSafely([...pairKeys]);
+  return analyze(result, map, version);
+}
+
 async function tryAnalyze(result: CreatorExportResult): Promise<CachedAnalysis> {
   try {
-    return analyze(result);
+    return await analyzeWithResolutions(result);
   } catch (err) {
     if (result.source === "local") {
       await clearLocalCreatorsExport();
@@ -88,27 +176,31 @@ async function tryAnalyze(result: CreatorExportResult): Promise<CachedAnalysis> 
   }
 }
 
+const BUCKET_SECTIONS: { id: ClassifiedBucket; title: string; severity: Severity }[] = [
+  { id: "auto-fixable", title: "Auto-fixable", severity: "warning" },
+  { id: "duplicate-after-fix", title: "Becomes a duplicate after fix", severity: "warning" },
+  { id: "manual", title: "Manual review", severity: "info" },
+];
+
 function sectionsFromAnalysis(
   analysis: CachedAnalysis,
-): IntegritySection<CreatorUrlIssue>[] {
-  return CREATOR_URL_FIELDS.map((field) => ({
-    id: field,
-    title: CREATOR_URL_RULES[field].label,
-    severity: "warning" as Severity,
-    defaultOpen: analysis.totals[field] > 0,
-    items: analysis.groups[field],
+): IntegritySection<ClassifiedIssue>[] {
+  return BUCKET_SECTIONS.map((spec) => ({
+    id: spec.id,
+    title: spec.title,
+    severity: spec.severity,
+    defaultOpen: analysis.counts[spec.id] > 0,
+    items: analysis.groups[spec.id],
   }));
 }
 
-function countsFromAnalysis(
-  analysis: CachedAnalysis,
-): IntegritySectionCount[] {
-  return CREATOR_URL_FIELDS.map((field) => ({
-    id: field,
-    title: CREATOR_URL_RULES[field].label,
-    severity: "warning" as Severity,
-    defaultOpen: analysis.totals[field] > 0,
-    total: analysis.totals[field],
+function countsFromAnalysis(analysis: CachedAnalysis): IntegritySectionCount[] {
+  return BUCKET_SECTIONS.map((spec) => ({
+    id: spec.id,
+    title: spec.title,
+    severity: spec.severity,
+    defaultOpen: analysis.counts[spec.id] > 0,
+    total: analysis.counts[spec.id],
   }));
 }
 
@@ -128,12 +220,10 @@ async function fetchCreatorUrlsCounts(
 async function fetchCreatorUrlsSections(
   token: string,
   _after?: string,
-): Promise<IntegritySectionPage<CreatorUrlIssue>> {
+): Promise<IntegritySectionPage<ClassifiedIssue>> {
   const result = await ensureCreatorsExport({ token });
   const analysis = await tryAnalyze(result);
-  return {
-    sections: sectionsFromAnalysis(analysis),
-  };
+  return { sections: sectionsFromAnalysis(analysis) };
 }
 
 /** Reset the in-memory analysis so the next fetchCount/fetch re-parses. */
@@ -153,16 +243,27 @@ function formatAge(generatedAt: Date): string {
   return `${days}d ago`;
 }
 
-function CreatorUrlRow({
+// ──────────────────────────────────────────────────────────────────────
+// Row
+// ──────────────────────────────────────────────────────────────────────
+
+/**
+ * Shared visual scaffold for every bucket row: creator name + field
+ * badge + value diff. Per-bucket actions are rendered in the right-hand
+ * slot via `actions`.
+ */
+function ClassifiedRowShell({
   item,
+  actions,
+  bucketLabel,
 }: {
-  item: CreatorUrlIssue;
-  token: string;
-  onFixed: (id: string, summary?: string) => void;
+  item: ClassifiedIssue;
+  actions: React.ReactNode;
+  bucketLabel?: React.ReactNode;
 }) {
   const rule = CREATOR_URL_RULES[item.field];
   return (
-    <li className="group flex min-h-[56px] flex-col gap-1 px-4 py-2.5 transition-colors hover:bg-muted/30 sm:flex-row sm:items-center sm:gap-3">
+    <li className="group flex min-h-[64px] flex-col gap-1 px-4 py-2.5 transition-colors hover:bg-muted/30 sm:flex-row sm:items-center sm:gap-3">
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
         <div className="flex min-w-0 items-center gap-2">
           <button
@@ -179,13 +280,245 @@ function CreatorUrlRow({
           >
             {rule.label}
           </Badge>
+          {bucketLabel}
         </div>
-        <div className="min-w-0 truncate text-xs text-muted-foreground" title={item.value}>
-          {item.value}
-        </div>
-        <div className="text-[11px] text-amber-700">{rule.invalidMessage}</div>
+        <ValueDiff item={item} />
+        <ReasonLine item={item} />
       </div>
-      <div className="flex flex-shrink-0 items-center gap-2">
+      <div className="flex flex-shrink-0 items-center gap-2">{actions}</div>
+    </li>
+  );
+}
+
+function ValueDiff({ item }: { item: ClassifiedIssue }) {
+  if (item.proposedUrl && item.proposedUrl !== item.rawValue) {
+    return (
+      <div className="flex min-w-0 flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+        <span className="min-w-0 truncate font-mono text-[11px] text-rose-700" title={item.rawValue}>
+          {item.rawValue}
+        </span>
+        <ArrowRight className="h-3 w-3 flex-shrink-0 opacity-60" />
+        <span
+          className="min-w-0 truncate font-mono text-[11px] text-emerald-700"
+          title={item.proposedUrl}
+        >
+          {item.proposedUrl}
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div className="min-w-0 truncate text-xs text-muted-foreground" title={item.rawValue}>
+      {item.rawValue}
+    </div>
+  );
+}
+
+function ReasonLine({ item }: { item: ClassifiedIssue }) {
+  if (item.bucket === "manual") {
+    const rule = CREATOR_URL_RULES[item.field];
+    return (
+      <div className="text-[11px] text-amber-700">
+        {item.manualReason || rule.invalidMessage}
+      </div>
+    );
+  }
+  if (item.bucket === "duplicate-after-fix") {
+    const other = item.collidesWith?.[0];
+    const more = item.collidesWith && item.collidesWith.length > 1
+      ? ` and ${item.collidesWith.length - 1} other${item.collidesWith.length - 1 === 1 ? "" : "s"}`
+      : "";
+    return (
+      <div className="text-[11px] text-amber-700">
+        Same canonical URL as{" "}
+        <span className="font-medium">{other?.creatorName ?? "another creator"}</span>
+        {more} — resolve in Duplicates first.
+      </div>
+    );
+  }
+  if (item.proposedIssues && item.proposedIssues.length > 0) {
+    return (
+      <div className="text-[11px] text-emerald-700">
+        Will: {item.proposedIssues.join(", ")}.
+      </div>
+    );
+  }
+  return null;
+}
+
+function CreatorUrlRow({
+  item,
+  token,
+  onFixed,
+}: {
+  item: ClassifiedIssue;
+  token: string;
+  onFixed: (id: string, summary?: string) => void;
+  settings: unknown;
+}) {
+  if (item.bucket === "auto-fixable") {
+    return (
+      <AutoFixableRow item={item} token={token} onFixed={onFixed} />
+    );
+  }
+  if (item.bucket === "duplicate-after-fix") {
+    return <DuplicateAfterFixRow item={item} />;
+  }
+  return <ManualRow item={item} />;
+}
+
+function AutoFixableRow({
+  item,
+  token,
+  onFixed,
+}: {
+  item: ClassifiedIssue;
+  token: string;
+  onFixed: (id: string, summary?: string) => void;
+}) {
+  const [state, setState] = useState<
+    { kind: "idle" } | { kind: "running" } | { kind: "applied" } | { kind: "skipped"; reason: string } | { kind: "error"; message: string }
+  >({ kind: "idle" });
+
+  const applyOne = async () => {
+    if (state.kind === "running" || !token) return;
+    setState({ kind: "running" });
+    try {
+      const [outcome] = await runBulkAutoFix({
+        token,
+        issues: [item],
+        onProgress: () => {},
+      });
+      if (outcome.kind === "applied") {
+        setState({ kind: "applied" });
+        onFixed(item.id, `Fixed ${CREATOR_URL_RULES[item.field].label}`);
+      } else if (outcome.kind === "skipped") {
+        setState({ kind: "skipped", reason: outcome.reason });
+      } else {
+        setState({ kind: "error", message: outcome.message });
+      }
+    } catch (err) {
+      setState({
+        kind: "error",
+        message: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  return (
+    <ClassifiedRowShell
+      item={item}
+      actions={
+        <>
+          {state.kind === "applied" && (
+            <span className="inline-flex items-center gap-1 text-[11px] text-emerald-700">
+              <CheckCircle2 className="h-3 w-3" />
+              Fixed
+            </span>
+          )}
+          {state.kind === "skipped" && (
+            <span className="max-w-[180px] truncate text-[10px] text-muted-foreground" title={state.reason}>
+              Skipped: {state.reason}
+            </span>
+          )}
+          {state.kind === "error" && (
+            <span className="max-w-[180px] truncate text-[10px] text-destructive" title={state.message}>
+              {state.message}
+            </span>
+          )}
+          {state.kind !== "applied" && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 cursor-pointer px-2 text-xs"
+              disabled={state.kind === "running" || !token}
+              onClick={() => void applyOne()}
+              title="Apply just this fix"
+            >
+              {state.kind === "running" ? (
+                <>
+                  <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                  Fixing…
+                </>
+              ) : (
+                <>
+                  <Pencil className="mr-1 h-3 w-3" />
+                  Fix
+                </>
+              )}
+            </Button>
+          )}
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 cursor-pointer px-2 text-xs"
+            onClick={() => openUrl(hubspotCreatorUrl(item.creatorId))}
+          >
+            <ExternalLink className="mr-1 h-3 w-3" />
+            HubSpot
+          </Button>
+        </>
+      }
+    />
+  );
+}
+
+function DuplicateAfterFixRow({ item }: { item: ClassifiedIssue }) {
+  const other = item.collidesWith?.[0];
+  const onOpenDuplicates = () => {
+    if (!other) return;
+    window.dispatchEvent(
+      new CustomEvent("duplicates:open-pair", { detail: { pairKey: other.pairKey } }),
+    );
+  };
+  return (
+    <ClassifiedRowShell
+      item={item}
+      bucketLabel={
+        <Badge
+          variant="outline"
+          className="h-4 flex-shrink-0 rounded px-1.5 text-[10px] font-normal text-amber-700"
+        >
+          Resolve first
+        </Badge>
+      }
+      actions={
+        <>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-7 cursor-pointer px-2 text-xs"
+            disabled={!other}
+            onClick={onOpenDuplicates}
+            title="Jump to this pair in the Duplicates page"
+          >
+            <Users className="mr-1 h-3 w-3" />
+            Open in Duplicates
+          </Button>
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 cursor-pointer px-2 text-xs"
+            onClick={() => openUrl(hubspotCreatorUrl(item.creatorId))}
+          >
+            <ExternalLink className="mr-1 h-3 w-3" />
+            HubSpot
+          </Button>
+        </>
+      }
+    />
+  );
+}
+
+function ManualRow({ item }: { item: ClassifiedIssue }) {
+  return (
+    <ClassifiedRowShell
+      item={item}
+      actions={
         <Button
           type="button"
           variant="ghost"
@@ -196,10 +529,14 @@ function CreatorUrlRow({
           <ExternalLink className="mr-1 h-3 w-3" />
           Open in HubSpot
         </Button>
-      </div>
-    </li>
+      }
+    />
   );
 }
+
+// ──────────────────────────────────────────────────────────────────────
+// StatusLine + BulkActions
+// ──────────────────────────────────────────────────────────────────────
 
 function CreatorUrlsStatusLine() {
   const progress = useCreatorExportProgress();
@@ -213,14 +550,37 @@ function CreatorUrlsStatusLine() {
   );
 }
 
-function CreatorUrlsBulkActions({ token }: { token: string }) {
+function CreatorUrlsBulkActions({
+  sections,
+  token,
+  onFixed,
+}: {
+  sections: IntegritySection<ClassifiedIssue>[];
+  token: string;
+  onFixed: (id: string, summary?: string) => void;
+}) {
   const [progress, setProgress] = useState<CreatorExportProgress>({ phase: "idle" });
   const [refreshing, setRefreshing] = useState(false);
-  const [confirmOpen, setConfirmOpen] = useState(false);
+  const [confirmRefreshOpen, setConfirmRefreshOpen] = useState(false);
+  const [fixDialogOpen, setFixDialogOpen] = useState(false);
+  const [fixing, setFixing] = useState(false);
+  const [fixProgress, setFixProgress] = useState({ done: 0, total: 0 });
+  const [fixOutcomes, setFixOutcomes] = useState<BulkAutoFixOutcome[] | null>(null);
+  const [previouslyRan, setPreviouslyRan] = useState<boolean>(hasCompletedAutofixRun());
 
   useEffect(() => {
     return subscribeCreatorExportProgress(setProgress);
   }, []);
+
+  const autoFixable = useMemo(
+    () => sections.find((s) => s.id === "auto-fixable")?.items ?? [],
+    [sections],
+  );
+
+  const appliedSlice = useMemo(() => {
+    const cap = previouslyRan ? autoFixable.length : Math.min(autoFixable.length, AUTOFIX_FIRST_RUN_CAP);
+    return autoFixable.slice(0, cap);
+  }, [autoFixable, previouslyRan]);
 
   const generatedAt = progress.generatedAt ?? cachedAnalysis?.generatedAt;
   const isStale = generatedAt ? isCreatorExportStale(generatedAt) : true;
@@ -231,25 +591,60 @@ function CreatorUrlsBulkActions({ token }: { token: string }) {
     try {
       invalidateCreatorUrlsAnalysis();
       await ensureCreatorsExport({ token, force: true });
-      // The parent card driven by `useIntegrity` listens for this event and
-      // re-runs `loadCheck` so the analysis from the new CSV is shown.
       window.dispatchEvent(new CustomEvent("creator-urls:refresh-requested"));
     } finally {
       setRefreshing(false);
     }
   };
 
-  const onClick = () => {
+  const onClickRefresh = () => {
     if (refreshing || !token) return;
     if (!isStale && generatedAt) {
-      setConfirmOpen(true);
+      setConfirmRefreshOpen(true);
       return;
     }
     void runForceRefresh();
   };
 
+  const onClickFixAll = () => {
+    if (autoFixable.length === 0 || fixing || !token) return;
+    setFixOutcomes(null);
+    setFixDialogOpen(true);
+  };
+
+  const runFixAll = async () => {
+    setFixing(true);
+    setFixProgress({ done: 0, total: 0 });
+    try {
+      const slice = appliedSlice;
+      setFixProgress({ done: 0, total: slice.length });
+      const outcomes = await runBulkAutoFix({
+        token,
+        issues: slice,
+        onProgress: (done) => setFixProgress({ done, total: slice.length }),
+      });
+      setFixOutcomes(outcomes);
+      for (const o of outcomes) {
+        if (o.kind === "applied") onFixed(o.issueId, "Auto-fixed URL");
+      }
+      if (outcomes.some((o) => o.kind === "applied")) {
+        setPreviouslyRan(true);
+        // Re-run analysis from a clean slate so the just-fixed rows
+        // disappear from the bucket counts without waiting for the next
+        // CSV export. We don't force a re-export — the local CSV is
+        // still the freshest signal we have until the user clicks
+        // Refresh, and re-classifying after applying writes to HubSpot
+        // is honest enough for the user to verify their work.
+        invalidateCreatorUrlsAnalysis();
+        window.dispatchEvent(new CustomEvent("creator-urls:refresh-requested"));
+      }
+    } finally {
+      setFixing(false);
+    }
+  };
+
   const ageLabel = generatedAt ? `Last export: ${formatAge(generatedAt)}` : "No cached export";
-  const isBusy =
+  const isExportBusy =
     refreshing ||
     [
       "exporting-hubspot",
@@ -264,21 +659,47 @@ function CreatorUrlsBulkActions({ token }: { token: string }) {
     <>
       <div className="flex flex-col items-end gap-1">
         <span className="text-[11px] text-muted-foreground">{ageLabel}</span>
-        <Button
-          type="button"
-          variant="outline"
-          size="sm"
-          className="h-7 cursor-pointer px-2 text-xs"
-          disabled={isBusy || !token}
-          onClick={onClick}
-          title="Re-run HubSpot CSV export and re-validate"
-        >
-          <RefreshCw className={cn("mr-1.5 h-3 w-3", isBusy && "animate-spin")} />
-          Force re-export
-        </Button>
+        <div className="flex items-center gap-1">
+          {autoFixable.length > 0 && (
+            <Button
+              type="button"
+              variant="default"
+              size="sm"
+              className="h-7 cursor-pointer px-2 text-xs"
+              disabled={fixing || !token}
+              onClick={onClickFixAll}
+              title="Apply every auto-fixable URL"
+            >
+              {fixing ? (
+                <>
+                  <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                  Fixing {fixProgress.done}/{fixProgress.total}
+                </>
+              ) : (
+                <>
+                  <Pencil className="mr-1 h-3 w-3" />
+                  Fix all auto-fixable ({autoFixable.length})
+                </>
+              )}
+            </Button>
+          )}
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            className="h-7 cursor-pointer px-2 text-xs"
+            disabled={isExportBusy || !token}
+            onClick={onClickRefresh}
+            title="Re-run HubSpot CSV export and re-validate"
+          >
+            <RefreshCw className={cn("mr-1.5 h-3 w-3", isExportBusy && "animate-spin")} />
+            Force re-export
+          </Button>
+        </div>
       </div>
 
-      <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
+      {/* Re-export confirmation (warns if cache is fresh). */}
+      <Dialog open={confirmRefreshOpen} onOpenChange={setConfirmRefreshOpen}>
         <DialogContent>
           <DialogHeader>
             <DialogTitle className="flex items-center gap-2">
@@ -295,12 +716,12 @@ function CreatorUrlsBulkActions({ token }: { token: string }) {
             </DialogDescription>
           </DialogHeader>
           <DialogFooter className="gap-2">
-            <Button variant="ghost" onClick={() => setConfirmOpen(false)}>
+            <Button variant="ghost" onClick={() => setConfirmRefreshOpen(false)}>
               Cancel
             </Button>
             <Button
               onClick={() => {
-                setConfirmOpen(false);
+                setConfirmRefreshOpen(false);
                 void runForceRefresh();
               }}
             >
@@ -309,18 +730,201 @@ function CreatorUrlsBulkActions({ token }: { token: string }) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Fix-All confirmation dialog with sample preview. */}
+      <Dialog open={fixDialogOpen} onOpenChange={(open) => !fixing && setFixDialogOpen(open)}>
+        <DialogContent className="sm:max-w-4xl max-h-[85vh] flex flex-col">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <ShieldAlert className="h-4 w-4 text-amber-600" />
+              {fixOutcomes
+                ? "Auto-fix complete"
+                : previouslyRan
+                  ? `Fix ${autoFixable.length} URL${autoFixable.length === 1 ? "" : "s"}?`
+                  : `Fix first ${Math.min(autoFixable.length, AUTOFIX_FIRST_RUN_CAP)} of ${autoFixable.length} URL${autoFixable.length === 1 ? "" : "s"}?`}
+            </DialogTitle>
+            <DialogDescription>
+              {fixOutcomes
+                ? renderOutcomeSummary(fixOutcomes)
+                : previouslyRan
+                  ? "Each row is re-checked against HubSpot right before the write. If the value already changed, that row is skipped."
+                  : `First run is capped at ${AUTOFIX_FIRST_RUN_CAP} rows so you can spot-check the result. The cap lifts automatically after the first successful run.`}
+            </DialogDescription>
+          </DialogHeader>
+
+          {!fixOutcomes && !fixing && (
+            <ChangesTable items={appliedSlice} totalCount={autoFixable.length} />
+          )}
+
+          {fixing && (
+            <div className="flex items-center gap-2 rounded-md border bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              Applying {fixProgress.done} of {fixProgress.total}…
+            </div>
+          )}
+
+          {fixOutcomes && <OutcomeList outcomes={fixOutcomes} />}
+
+          <DialogFooter className="gap-2">
+            {fixOutcomes ? (
+              <Button onClick={() => setFixDialogOpen(false)}>Close</Button>
+            ) : (
+              <>
+                <Button variant="ghost" disabled={fixing} onClick={() => setFixDialogOpen(false)}>
+                  Cancel
+                </Button>
+                <Button
+                  disabled={fixing}
+                  onClick={() => void runFixAll()}
+                >
+                  {fixing ? (
+                    <>
+                      <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                      Fixing…
+                    </>
+                  ) : (
+                    "Apply fixes"
+                  )}
+                </Button>
+              </>
+            )}
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </>
   );
 }
 
-export const creatorUrlsCheck: IntegrityCheck<CreatorUrlIssue> = {
+function renderOutcomeSummary(outcomes: BulkAutoFixOutcome[]): string {
+  let applied = 0;
+  let skipped = 0;
+  let errors = 0;
+  for (const o of outcomes) {
+    if (o.kind === "applied") applied++;
+    else if (o.kind === "skipped") skipped++;
+    else errors++;
+  }
+  const parts: string[] = [`${applied} applied`];
+  if (skipped > 0) parts.push(`${skipped} skipped`);
+  if (errors > 0) parts.push(`${errors} failed`);
+  return parts.join(" · ");
+}
+
+function ChangesTable({ items, totalCount }: { items: ClassifiedIssue[]; totalCount: number }) {
+  if (items.length === 0) return null;
+  return (
+    <div className="flex flex-col gap-2 min-h-0">
+      <div className="overflow-y-auto max-h-[55vh] rounded-md border">
+        <table className="w-full text-left text-[11px]">
+          <thead className="sticky top-0 z-10 bg-muted/80 backdrop-blur-sm">
+            <tr className="border-b">
+              <th className="px-3 py-2 font-medium">Creator</th>
+              <th className="px-3 py-2 font-medium">Field</th>
+              <th className="px-3 py-2 font-medium">Before → After</th>
+              <th className="px-3 py-2 font-medium">Changes</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y">
+            {items.map((item) => (
+              <tr key={item.id} className="hover:bg-muted/30">
+                <td className="px-3 py-2 align-top">
+                  <button
+                    type="button"
+                    className="font-medium hover:underline text-left text-foreground"
+                    title="Open creator in HubSpot"
+                    onClick={() => openUrl(hubspotCreatorUrl(item.creatorId))}
+                  >
+                    {item.creatorName}
+                  </button>
+                </td>
+                <td className="px-3 py-2 align-top">
+                  <Badge
+                    variant="outline"
+                    className="h-4 rounded px-1.5 text-[10px] font-normal text-muted-foreground whitespace-nowrap"
+                  >
+                    {CREATOR_URL_RULES[item.field].label}
+                  </Badge>
+                </td>
+                <td className="px-3 py-2 align-top">
+                  <div className="flex flex-col gap-0.5">
+                    <span className="truncate font-mono text-[10px] text-rose-700 max-w-[400px]" title={item.rawValue}>
+                      {item.rawValue}
+                    </span>
+                    <span className="truncate font-mono text-[10px] text-emerald-700 max-w-[400px]" title={item.proposedUrl}>
+                      {item.proposedUrl}
+                    </span>
+                  </div>
+                </td>
+                <td className="px-3 py-2 align-top text-muted-foreground">
+                  {item.proposedIssues?.join(", ")}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {items.length < totalCount && (
+        <div className="text-[11px] text-muted-foreground">
+          Showing {items.length} of {totalCount} auto-fixable
+        </div>
+      )}
+    </div>
+  );
+}
+
+function OutcomeList({ outcomes }: { outcomes: BulkAutoFixOutcome[] }) {
+  const skipped = outcomes.filter((o) => o.kind === "skipped");
+  const errors = outcomes.filter((o) => o.kind === "error");
+  if (skipped.length === 0 && errors.length === 0) {
+    return (
+      <div className="rounded-md border border-emerald-200 bg-emerald-50/40 px-3 py-2 text-xs text-emerald-700">
+        Every selected row was written successfully.
+      </div>
+    );
+  }
+  return (
+    <div className="space-y-2 text-[11px]">
+      {errors.length > 0 && (
+        <div className="space-y-1 rounded-md border border-destructive/30 bg-destructive/5 px-3 py-2">
+          <div className="font-medium text-destructive">{errors.length} failed</div>
+          <ul className="space-y-0.5 text-destructive">
+            {errors.slice(0, 6).map((o) => (
+              <li key={o.issueId} className="truncate">
+                {o.creatorName}: {o.message}
+              </li>
+            ))}
+            {errors.length > 6 && <li className="text-destructive/60">+ {errors.length - 6} more</li>}
+          </ul>
+        </div>
+      )}
+      {skipped.length > 0 && (
+        <div className="space-y-1 rounded-md border bg-muted/40 px-3 py-2">
+          <div className="font-medium text-muted-foreground">{skipped.length} skipped</div>
+          <ul className="space-y-0.5 text-muted-foreground">
+            {skipped.slice(0, 6).map((o) => (
+              <li key={o.issueId} className="truncate">
+                {o.creatorName}: {o.reason}
+              </li>
+            ))}
+            {skipped.length > 6 && <li>+ {skipped.length - 6} more</li>}
+          </ul>
+        </div>
+      )}
+    </div>
+  );
+}
+
+export const creatorUrlsCheck: IntegrityCheck<ClassifiedIssue> = {
   id: "creator-urls",
   title: "Creator profile URLs",
   description:
-    "Creators whose Instagram / TikTok / YouTube URLs don't match the canonical profile-URL format. Open the creator in HubSpot to fix the value manually.",
+    "Creators whose Instagram / TikTok / YouTube URLs don't match the canonical profile-URL format. Auto-fixable rows can be corrected in bulk; collisions are routed to the Duplicates page.",
   fetchCount: fetchCreatorUrlsCounts,
   fetch: fetchCreatorUrlsSections,
   Row: CreatorUrlRow,
   BulkActions: CreatorUrlsBulkActions,
   StatusLine: CreatorUrlsStatusLine,
 };
+
+// Re-export internal types so the bulk-fix module and tests can reuse them.
+export type { CreatorUrlField };

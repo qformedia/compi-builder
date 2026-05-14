@@ -211,6 +211,13 @@ function App() {
   const [activePage, setActivePage] = useState<Page>("videos");
   const [activeVideoTab, setActiveVideoTab] = useState("search");
   const [activeClipTab, setActiveClipTab] = useState("general-search");
+  /**
+   * Pair key requested by a `duplicates:open-pair` event (currently
+   * dispatched by the "Open in Duplicates" button on the Creator URL
+   * integrity rows). Consumed by `DuplicatesPage` on activation and then
+   * cleared, so it's a one-shot navigation token, not persistent state.
+   */
+  const [pendingDuplicatePairKey, setPendingDuplicatePairKey] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => {
     return localStorage.getItem("sidebar-collapsed") === "true";
   });
@@ -226,6 +233,25 @@ function App() {
       fetchTagOptions(settings.hubspotToken).then(setAppTagOptions).catch(() => {});
     }
   }, [settings.hubspotToken]);
+
+  // Cross-page deep-link: the Creator URL integrity check fires
+  // `duplicates:open-pair` when the user clicks "Open in Duplicates" on a
+  // duplicate-after-fix row. We switch tabs and stash the pair key so
+  // `DuplicatesPage` opens that side-by-side on activation. Stashed as a
+  // one-shot token (cleared on consume) so navigating away and back
+  // doesn't re-open the same pair.
+  useEffect(() => {
+    function onOpenDuplicatesPair(e: Event) {
+      const detail = (e as CustomEvent<{ pairKey?: string }>).detail;
+      if (!detail?.pairKey) return;
+      setPendingDuplicatePairKey(detail.pairKey);
+      setActivePage("duplicates");
+    }
+    window.addEventListener("duplicates:open-pair", onOpenDuplicatesPair);
+    return () => {
+      window.removeEventListener("duplicates:open-pair", onOpenDuplicatesPair);
+    };
+  }, []);
 
   // Finish video flow
   type StepStatus = "pending" | "working" | "done" | "error";
@@ -1507,6 +1533,8 @@ function App() {
                   <DuplicatesPage
                     isActive={activePage === "duplicates"}
                     settings={settings}
+                    pendingOpenPairKey={pendingDuplicatePairKey}
+                    onConsumePendingOpenPairKey={() => setPendingDuplicatePairKey(null)}
                   />
                 </TabErrorBoundary>
               </div>

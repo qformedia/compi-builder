@@ -342,6 +342,32 @@ export function IntegrityProvider({
     };
   }, [loadCheck, loadCheckCount]);
 
+  // Lighter-weight refresh path: re-run a check against the existing CSV
+  // cache (no HubSpot re-export) so its classifier picks up something
+  // that changed elsewhere — e.g. a teammate marked a duplicate-pair
+  // resolution from the Duplicates page and we want the Creator URL
+  // bucket to drop the now-handled rows. The `creator-urls` check's
+  // internal analysis cache keys on (CSV, source, resolutionsVersion),
+  // so a refetch with fresh resolutions naturally bypasses the cache —
+  // we just need to also bypass the provider's 60s count TTL.
+  useEffect(() => {
+    function onReclassifyRequested(e: Event) {
+      const checkId = (e as CustomEvent<string>).detail || "creator-urls";
+      const check = INTEGRITY_CHECKS.find((c) => c.id === checkId);
+      if (!check) return;
+      setCheckData((prev) => {
+        const existing = prev[checkId];
+        if (!existing) return prev;
+        return { ...prev, [checkId]: { ...existing, countsAt: 0 } };
+      });
+      void loadCheckCount(check, false).then(() => loadCheck(check, false));
+    }
+    window.addEventListener("creator-urls:reclassify", onReclassifyRequested);
+    return () => {
+      window.removeEventListener("creator-urls:reclassify", onReclassifyRequested);
+    };
+  }, [loadCheck, loadCheckCount]);
+
   const summary = useMemo((): IntegritySummary => {
     let c = 0;
     let w = 0;
