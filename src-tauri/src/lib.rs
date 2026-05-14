@@ -109,6 +109,11 @@ pub struct DownloadProgress {
 const EXTERNAL_CLIPS_OBJECT_ID: &str = "2-192287471";
 const CREATORS_OBJECT_ID: &str = "2-191972671";
 const VIDEO_PROJECTS_OBJECT_ID: &str = "2-192286893";
+/// HubSpot's stock Contacts object id. Stable across portals — listed in
+/// HubSpot's CRM Object Type ID reference and used wherever we need to
+/// address Creator → Contact associations from the v4 endpoints (e.g. the
+/// merge-with-reassign workaround).
+const CONTACTS_OBJECT_ID: &str = "0-1";
 
 /// Shared clip properties requested from HubSpot
 const CLIP_PROPERTIES: &[&str] = &[
@@ -6129,6 +6134,508 @@ async fn merge_creators(
     Ok(json)
 }
 
+// ── Merge with reassignment workaround ───────────────────────────────────
+//
+// HubSpot's `POST /crm/v3/objects/{type}/merge` endpoint refuses to swap
+// associations atomically when the admin has configured a per-record cap
+// (e.g. "an External Clip can be associated to at most 1 Creator"). The
+// engine tries to ADD the winner-side association before REMOVING the
+// loser-side one, which momentarily double-associates each record and
+// trips the cap. The whole merge is then rejected with
+// `Association configuration limits are exceeded`.
+//
+// The frontend tries a plain `merge_creators` first; only when that fails
+// with the specific cap error does it fall back to this command. We:
+//
+//   1. Probe each known Creator-related association pair in BOTH
+//      directions via `GET /crm/v4/associations/definitions/configurations/
+//      {from}/{to}` to find configured caps.
+//   2. For caps on the merging side (`Creator → other = N`), refuse the
+//      merge with an actionable message — pre-swapping wouldn't help
+//      because the winner still ends up over the cap.
+//   3. For caps on the other side (`other → Creator = N`, e.g. the
+//      "1 Creator per External Clip" rule), pre-swap each loser-attached
+//      record by archiving the loser association first, then creating a
+//      fresh winner association. That leaves the record briefly with 0
+//      Creators (allowed — caps are upper bounds), then back to 1.
+//   4. Retry the standard merge endpoint, which now has nothing capped
+//      to transfer and proceeds normally — properties and rollups still
+//      get the canonical merge treatment server-side.
+
+/// Object types we know how to probe for caps and pre-swap. Extend this
+/// list when additional Creator associations need workaround support.
+/// Each entry is `(other_object_type_id, human_label, rollup_property)`.
+const CREATOR_ASSOC_PEERS: &[(&str, &str, &str)] = &[
+    (CONTACTS_OBJECT_ID, "Contacts", "num_of_contacts"),
+    (
+        EXTERNAL_CLIPS_OBJECT_ID,
+        "External Clips",
+        "num_of_external_clips",
+    ),
+    (
+        VIDEO_PROJECTS_OBJECT_ID,
+        "Video Projects",
+        "num_of_video_projects",
+    ),
+];
+
+/// Read both creators' rollup counts so we can evaluate merging-side caps
+/// without paging through actual associations. Missing properties / null
+/// values are treated as 0 so a fresh creator with no rollups doesn't
+/// trip the bail logic.
+async fn fetch_creator_rollups_for_pair(
+    client: &reqwest::Client,
+    token: &str,
+    winner_id: &str,
+    loser_id: &str,
+) -> Result<(HashMap<String, u32>, HashMap<String, u32>), String> {
+    let url = format!(
+        "https://api.hubapi.com/crm/v3/objects/{}/batch/read",
+        CREATORS_OBJECT_ID
+    );
+    let properties: Vec<&str> = CREATOR_ASSOC_PEERS.iter().map(|(_, _, p)| *p).collect();
+    let body = serde_json::json!({
+        "properties": properties,
+        "inputs": [
+            { "id": winner_id },
+            { "id": loser_id }
+        ]
+    });
+
+    let res = client
+        .post(&url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Rollups batch read failed: {e}"))?;
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("HubSpot rollups error ({}): {}", status, text));
+    }
+    let parsed: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse rollups response: {e}"))?;
+
+    let mut winner = HashMap::new();
+    let mut loser = HashMap::new();
+    if let Some(results) = parsed.get("results").and_then(|v| v.as_array()) {
+        for row in results {
+            let id = row
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let target = if id == winner_id {
+                &mut winner
+            } else if id == loser_id {
+                &mut loser
+            } else {
+                continue;
+            };
+            if let Some(props) = row.get("properties").and_then(|v| v.as_object()) {
+                for (key, val) in props {
+                    let n = val
+                        .as_str()
+                        .and_then(|s| s.trim().parse::<u32>().ok())
+                        .or_else(|| val.as_u64().map(|n| n as u32))
+                        .unwrap_or(0);
+                    target.insert(key.clone(), n);
+                }
+            }
+        }
+    }
+    Ok((winner, loser))
+}
+
+/// Probe a single (from, to) pair for an admin-configured cap.
+///
+/// Returns `Some((max, type_id, category))` for the most-restrictive
+/// label on the pair, or `None` when no cap exists. A 404 from HubSpot
+/// is treated as "no configuration" — that's the documented response
+/// when the admin has never touched the pair.
+async fn probe_assoc_pair_limit(
+    client: &reqwest::Client,
+    token: &str,
+    from_object_type: &str,
+    to_object_type: &str,
+) -> Result<Option<(u32, u64, String)>, String> {
+    let url = format!(
+        "https://api.hubapi.com/crm/v4/associations/definitions/configurations/{}/{}",
+        from_object_type, to_object_type
+    );
+    let res = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| format!("Association config probe failed ({from_object_type}→{to_object_type}): {e}"))?;
+
+    if res.status() == reqwest::StatusCode::NOT_FOUND {
+        return Ok(None);
+    }
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!(
+            "HubSpot association config error ({from_object_type}→{to_object_type}, {}): {}",
+            status, text
+        ));
+    }
+    let parsed: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse association config response: {e}"))?;
+    Ok(helpers::most_restrictive_limit(&parsed))
+}
+
+/// Read the loser's associated record ids of a given peer object type,
+/// along with the association `types` (category + typeId + label) used
+/// for each. We re-use the same types when re-creating the association
+/// against the winner so any custom labels are preserved.
+async fn fetch_loser_associations(
+    client: &reqwest::Client,
+    token: &str,
+    peer_object_type: &str,
+    loser_id: &str,
+) -> Result<Vec<(String, Vec<serde_json::Value>)>, String> {
+    let url = format!(
+        "https://api.hubapi.com/crm/v4/associations/{}/{}/batch/read",
+        CREATORS_OBJECT_ID, peer_object_type
+    );
+    let body = serde_json::json!({
+        "inputs": [{ "id": loser_id }]
+    });
+    let res = client
+        .post(&url)
+        .bearer_auth(token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Loser→{peer_object_type} associations read failed: {e}"))?;
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!(
+            "HubSpot Loser→{peer_object_type} associations error ({}): {}",
+            status, text
+        ));
+    }
+    let parsed: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse loser associations: {e}"))?;
+
+    let mut out: Vec<(String, Vec<serde_json::Value>)> = Vec::new();
+    if let Some(results) = parsed.get("results").and_then(|v| v.as_array()) {
+        for row in results {
+            if let Some(to_arr) = row.get("to").and_then(|v| v.as_array()) {
+                for to in to_arr {
+                    let to_id = to
+                        .get("toObjectId")
+                        .and_then(|v| v.as_i64())
+                        .map(|i| i.to_string())
+                        .or_else(|| {
+                            to.get("toObjectId")
+                                .and_then(|v| v.as_str())
+                                .map(String::from)
+                        })
+                        .or_else(|| to.get("id").and_then(|v| v.as_str()).map(String::from));
+                    let Some(to_id) = to_id else { continue };
+                    let types: Vec<serde_json::Value> = to
+                        .get("associationTypes")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.clone())
+                        .unwrap_or_default();
+                    out.push((to_id, types));
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Pre-swap one peer object type. Returns the count of records moved.
+///
+/// Steps per chunk of up to 100 records (HubSpot batch limit):
+///   1. Archive the loser-side associations (record → loser).
+///   2. Create the winner-side associations (record → winner) using the
+///      same `associationTypes` payload that the read returned, so any
+///      custom labels survive.
+///
+/// Any HTTP failure aborts the whole pre-swap; the caller surfaces the
+/// error and the partial state can be inspected in HubSpot directly.
+async fn pre_swap_peer_associations(
+    client: &reqwest::Client,
+    token: &str,
+    peer_object_type: &str,
+    winner_id: &str,
+    loser_id: &str,
+    fallback_type_id: u64,
+    fallback_category: &str,
+) -> Result<u32, String> {
+    let records = fetch_loser_associations(client, token, peer_object_type, loser_id).await?;
+    if records.is_empty() {
+        return Ok(0);
+    }
+
+    let archive_url = format!(
+        "https://api.hubapi.com/crm/v4/associations/{}/{}/batch/archive",
+        peer_object_type, CREATORS_OBJECT_ID
+    );
+    let create_url = format!(
+        "https://api.hubapi.com/crm/v4/associations/{}/{}/batch/create",
+        peer_object_type, CREATORS_OBJECT_ID
+    );
+
+    let total = records.len() as u32;
+    for chunk in records.chunks(100) {
+        // 1. Archive loser-side associations for this chunk. We pass an
+        //    array of `to` ids so the v4 archive endpoint clears every
+        //    record→loser association in one call.
+        let archive_inputs: Vec<serde_json::Value> = chunk
+            .iter()
+            .map(|(record_id, _types)| {
+                serde_json::json!({
+                    "from": { "id": record_id },
+                    "to": [{ "id": loser_id }]
+                })
+            })
+            .collect();
+        let archive_body = serde_json::json!({ "inputs": archive_inputs });
+        let archive_res = client
+            .post(&archive_url)
+            .bearer_auth(token)
+            .json(&archive_body)
+            .send()
+            .await
+            .map_err(|e| {
+                format!("Loser→{peer_object_type} archive request failed: {e}")
+            })?;
+        if !archive_res.status().is_success() {
+            let status = archive_res.status();
+            let text = archive_res.text().await.unwrap_or_default();
+            return Err(format!(
+                "HubSpot {peer_object_type}→Creator archive error ({}): {}",
+                status, text
+            ));
+        }
+
+        // 2. Create winner-side associations. We mirror the type set we
+        //    saw on the loser side so labels survive; if the read response
+        //    had no types (older HubSpot rows can omit them), we fall back
+        //    to the typeId we discovered from the configurations probe.
+        let create_inputs: Vec<serde_json::Value> = chunk
+            .iter()
+            .map(|(record_id, types)| {
+                let resolved_types = if types.is_empty() {
+                    serde_json::json!([{
+                        "associationCategory": fallback_category,
+                        "associationTypeId": fallback_type_id
+                    }])
+                } else {
+                    serde_json::Value::Array(
+                        types
+                            .iter()
+                            .map(|t| {
+                                let category = t
+                                    .get("category")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or(fallback_category);
+                                let type_id = t
+                                    .get("typeId")
+                                    .and_then(|v| v.as_u64())
+                                    .unwrap_or(fallback_type_id);
+                                serde_json::json!({
+                                    "associationCategory": category,
+                                    "associationTypeId": type_id,
+                                })
+                            })
+                            .collect(),
+                    )
+                };
+                serde_json::json!({
+                    "from": { "id": record_id },
+                    "to": { "id": winner_id },
+                    "types": resolved_types,
+                })
+            })
+            .collect();
+        let create_body = serde_json::json!({ "inputs": create_inputs });
+        let create_res = client
+            .post(&create_url)
+            .bearer_auth(token)
+            .json(&create_body)
+            .send()
+            .await
+            .map_err(|e| format!("Winner→{peer_object_type} create request failed: {e}"))?;
+        if !create_res.status().is_success() {
+            let status = create_res.status();
+            let text = create_res.text().await.unwrap_or_default();
+            return Err(format!(
+                "HubSpot {peer_object_type}→Creator create error (after archive succeeded — \
+                 records may temporarily have no Creator) ({}): {}",
+                status, text
+            ));
+        }
+    }
+    Ok(total)
+}
+
+/// Public Tauri command: workaround merge that pre-reassigns capped
+/// associations from loser to winner before invoking the standard
+/// HubSpot merge endpoint. Returns a structured summary so the frontend
+/// can show the user what was moved and stash the same shape into the
+/// audit log payload.
+#[tauri::command]
+async fn merge_creators_with_reassign(
+    token: String,
+    winner_id: String,
+    loser_id: String,
+) -> Result<serde_json::Value, String> {
+    let (winner, loser) = helpers::validate_merge_ids(&winner_id, &loser_id)?;
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(60))
+        .build()
+        .map_err(|e| e.to_string())?;
+
+    // Step 1: read rollup counts so we can evaluate merging-side caps.
+    let (winner_counts, loser_counts) =
+        fetch_creator_rollups_for_pair(&client, &token, &winner, &loser).await?;
+
+    // Step 2: probe every known peer in both directions and build the
+    // plan list. We only fail the entire pre-flight on transport errors
+    // — a missing config (404) is normal and we just skip that pair.
+    let mut plans: Vec<helpers::AssocPairPlan> = Vec::new();
+    for (peer_id, peer_label, rollup_key) in CREATOR_ASSOC_PEERS {
+        let winner_count = winner_counts.get(*rollup_key).copied().unwrap_or(0);
+        let loser_count = loser_counts.get(*rollup_key).copied().unwrap_or(0);
+
+        if let Some((max, _type_id, _cat)) =
+            probe_assoc_pair_limit(&client, &token, CREATORS_OBJECT_ID, peer_id).await?
+        {
+            plans.push(helpers::AssocPairPlan {
+                other_object_type_id: (*peer_id).to_string(),
+                other_object_label: (*peer_label).to_string(),
+                direction: helpers::AssocLimitDirection::MergingSide { max },
+                loser_count,
+                winner_count,
+            });
+        }
+        if let Some((max, type_id, category)) =
+            probe_assoc_pair_limit(&client, &token, peer_id, CREATORS_OBJECT_ID).await?
+        {
+            plans.push(helpers::AssocPairPlan {
+                other_object_type_id: (*peer_id).to_string(),
+                other_object_label: (*peer_label).to_string(),
+                direction: helpers::AssocLimitDirection::OtherSide {
+                    max,
+                    type_id,
+                    category,
+                },
+                loser_count,
+                winner_count,
+            });
+        }
+    }
+
+    // Step 3: bail on any merging-side cap that the union would exceed.
+    // We stop on the FIRST exceeded cap — surfacing every failure at once
+    // would just be noisy when the user has to fix one at a time anyway.
+    for plan in &plans {
+        if let helpers::AssocLimitDirection::MergingSide { .. } = plan.direction {
+            if let helpers::MergingSideOutcome::Exceeded { message } =
+                helpers::evaluate_merging_side_cap(plan, "Creator")
+            {
+                return Err(message);
+            }
+        }
+    }
+
+    // Step 4: pre-swap each other-side cap. Capture the moved-record
+    // count per peer so we can return a useful audit summary.
+    let mut reassignments: Vec<serde_json::Value> = Vec::new();
+    for plan in &plans {
+        if let helpers::AssocLimitDirection::OtherSide {
+            type_id, category, ..
+        } = &plan.direction
+        {
+            let moved = pre_swap_peer_associations(
+                &client,
+                &token,
+                &plan.other_object_type_id,
+                &winner,
+                &loser,
+                *type_id,
+                category,
+            )
+            .await?;
+            if moved > 0 {
+                reassignments.push(serde_json::json!({
+                    "objectTypeId": plan.other_object_type_id,
+                    "objectTypeLabel": plan.other_object_label,
+                    "count": moved,
+                }));
+            }
+        }
+    }
+
+    // Step 5: retry the standard merge. With every capped peer pre-swapped
+    // the loser has zero records of those types, so HubSpot's engine has
+    // nothing left to violate. A failure here is genuine (and probably a
+    // peer type we don't know about) — surface it verbatim.
+    let merge_url = helpers::hubspot_merge_url(CREATORS_OBJECT_ID);
+    let merge_body = helpers::hubspot_merge_body(&winner, &loser);
+    let merge_res = client
+        .post(&merge_url)
+        .bearer_auth(&token)
+        .json(&merge_body)
+        .send()
+        .await
+        .map_err(|e| format!("Merge retry request failed: {e}"))?;
+    if !merge_res.status().is_success() {
+        let status = merge_res.status();
+        let text = merge_res.text().await.unwrap_or_default();
+        if helpers::is_association_limit_error(&text) {
+            // We pre-swapped every peer we know about and HubSpot still
+            // refuses on a cap. That means there's at least one other
+            // capped association on the Creators object we haven't
+            // taught CompiFlow about yet. Surface a precise message so
+            // the user knows raising or removing the cap in HubSpot is
+            // the unblock — and which kind of associations to look at.
+            return Err(format!(
+                "HubSpot still rejected the merge after reassigning {} record(s) across known \
+                 association types. There may be another capped association on the Creators \
+                 object that CompiFlow doesn't yet know how to reassign automatically. Check \
+                 Settings → Properties → Associations in HubSpot for any Creator pair set to a \
+                 small custom limit, raise it temporarily, and retry. (Raw HubSpot error: {})",
+                reassignments
+                    .iter()
+                    .filter_map(|r| r.get("count").and_then(|v| v.as_u64()))
+                    .sum::<u64>(),
+                text
+            ));
+        }
+        return Err(format!(
+            "HubSpot merge error after reassignment ({}): {}",
+            status, text
+        ));
+    }
+    let merge_response: serde_json::Value = merge_res
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse HubSpot merge response: {e}"))?;
+
+    Ok(serde_json::json!({
+        "merged": true,
+        "reassignments": reassignments,
+        "mergeResponse": merge_response,
+    }))
+}
+
 /// Fetch latest clips filtered by found_in and link pattern (instagram/tiktok)
 #[tauri::command]
 async fn search_latest_clips_by_platform(
@@ -6758,6 +7265,7 @@ pub fn run() {
             update_clip_properties,
             update_creator_properties,
             merge_creators,
+            merge_creators_with_reassign,
             search_latest_clips_by_platform,
             save_text_file,
             hubspot_export_all_creators_start,

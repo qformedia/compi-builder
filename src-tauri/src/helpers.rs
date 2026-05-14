@@ -796,6 +796,7 @@ pub(crate) fn full_creator_properties() -> &'static [&'static str] {
     &[
         // Identity / classification
         "name",
+        "email",
         "main_link",
         "main_account",
         "status",
@@ -822,14 +823,17 @@ pub(crate) fn full_creator_properties() -> &'static [&'static str] {
         "x",
         "web",
         "other_links",
-        // China-network handles
+        // China-network handles (both the profile URL and the bare-handle *_id)
         "from_china",
         "bilibili",
+        "douyin",
         "douyin_id",
         "ixigua",
+        "kuaishou",
         "kuaishou_id",
         "weibo",
         "wechat",
+        "xiaohongshu",
         "xiaohongshu_id",
         // Notes / follow-up
         "notes",
@@ -896,6 +900,178 @@ pub(crate) fn hubspot_merge_body(winner_id: &str, loser_id: &str) -> serde_json:
         "primaryObjectId": winner_id,
         "objectIdToMerge": loser_id,
     })
+}
+
+// ── Association-limit detection & pre-swap planning ──────────────────────────
+//
+// HubSpot's `POST /crm/v3/objects/{type}/merge` endpoint refuses to swap
+// associations atomically when the admin has configured a per-record cap.
+// The user-visible failure is a generic `VALIDATION_ERROR` with no detail
+// about which pair tripped the limit. We work around it by:
+//
+//   1. Recognising the specific error text so the frontend can fall back to
+//      the reassign flow only when this is the actual cause.
+//   2. Probing each configured association limit involving the merging
+//      object type and deciding whether the pair needs a pre-swap (limit on
+//      the OTHER side, e.g. "1 Creator per External Clip") or a hard bail
+//      (limit on the merging side that the union would exceed).
+//
+// All helpers here are intentionally pure — they take parsed JSON and return
+// either a plan or a validation outcome — so we can unit-test them without
+// spinning up an HTTP mock for HubSpot.
+
+/// True when a HubSpot error string is the specific "association
+/// configuration limits exceeded" payload that the merge endpoint returns
+/// when an admin-configured per-record cap blocks the merge.
+///
+/// The merge endpoint only ever surfaces this exact phrase for this
+/// failure mode, so we can detect it cheaply with a substring check
+/// without parsing the JSON body. Stays case-sensitive because HubSpot
+/// always returns the same casing — a future relaxation should be paired
+/// with a wider response payload contract test.
+pub(crate) fn is_association_limit_error(message: &str) -> bool {
+    message.contains("Association configuration limits are exceeded")
+}
+
+/// Decision for a single (other-object-type, direction) configuration
+/// after probing HubSpot's `/configurations/{from}/{to}` endpoint.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AssocLimitDirection {
+    /// The cap lives on the OTHER side ("each {other} can have at most N
+    /// {merging}"). When N is finite and small, merging would temporarily
+    /// double-associate each loser-attached record; we pre-swap them
+    /// (archive loser-association, then create winner-association).
+    OtherSide { max: u32, type_id: u64, category: String },
+    /// The cap lives on the MERGING side ("each {merging} can have at
+    /// most N {other}"). The merge would push the winner past N if the
+    /// union of (winner's count + loser's count) exceeds N, so we bail
+    /// with a clear error before touching any records.
+    MergingSide { max: u32 },
+}
+
+/// Per-pair plan derived from configurations + actual loser-side counts.
+///
+/// `other_object_type_id` is the HubSpot object type id of the side
+/// opposite the merging records (e.g. External Clips when merging
+/// Creators). Used by the caller to address the right `/v4/associations/`
+/// endpoints when executing the plan.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AssocPairPlan {
+    pub other_object_type_id: String,
+    pub other_object_label: String,
+    pub direction: AssocLimitDirection,
+    /// Loser-side total of associations of this pair, sourced from the
+    /// rollup property (e.g. `num_of_external_clips`). Only consulted for
+    /// `MergingSide` pre-flight validation; ignored for `OtherSide`
+    /// because we always page through the actual association ids before
+    /// swapping anyway.
+    pub loser_count: u32,
+    /// Winner-side total of associations of this pair, sourced from the
+    /// same rollup property on the winner. Only consulted for
+    /// `MergingSide` pre-flight validation.
+    pub winner_count: u32,
+}
+
+/// Outcome of evaluating a single `MergingSide` cap. Either the merge can
+/// proceed for this pair or we have a precise human-readable explanation
+/// of which pair would exceed the cap and by how much.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MergingSideOutcome {
+    Ok,
+    Exceeded {
+        message: String,
+    },
+}
+
+/// Decide whether a `MergingSide` cap would be violated by the merge.
+///
+/// The post-merge upper bound is `winner_count + loser_count` (HubSpot
+/// could deduplicate records associated to both sides, which is rare; the
+/// rollups don't tell us the overlap, so we use the safe upper bound — a
+/// false-positive bail is far less harmful than a confusing post-merge
+/// failure).
+pub(crate) fn evaluate_merging_side_cap(
+    plan: &AssocPairPlan,
+    merging_label: &str,
+) -> MergingSideOutcome {
+    let max = match plan.direction {
+        AssocLimitDirection::MergingSide { max } => max,
+        AssocLimitDirection::OtherSide { .. } => return MergingSideOutcome::Ok,
+    };
+    let predicted = plan.winner_count.saturating_add(plan.loser_count);
+    if predicted <= max {
+        return MergingSideOutcome::Ok;
+    }
+    let message = format!(
+        "Cannot merge: the surviving {merging_label} would end up with up to {predicted} {other} \
+         (winner has {winner}, loser has {loser}), which exceeds your portal's limit of \
+         {max} {other} per {merging_label}. Detach some {other} from one side in HubSpot \
+         first, or have an admin raise the limit in Settings → Properties → Associations.",
+        merging_label = merging_label,
+        other = plan.other_object_label,
+        predicted = predicted,
+        winner = plan.winner_count,
+        loser = plan.loser_count,
+        max = max,
+    );
+    MergingSideOutcome::Exceeded { message }
+}
+
+/// Parse a single configuration entry from
+/// `GET /crm/v4/associations/definitions/configurations/{from}/{to}`.
+///
+/// Returns `Some((max, type_id, category))` when the entry has a finite
+/// `userEnforcedMaxToObjectIds` cap; `None` for entries representing
+/// "Many" (no admin-set cap) or malformed entries we can't reason about.
+///
+/// The shape we accept matches the documented OpenAPI schema for
+/// `PublicAssociationDefinitionUserConfiguration` but is tolerant about
+/// missing / null fields — HubSpot has historically added fields without
+/// a major-version bump and we don't want to break on a benign addition.
+pub(crate) fn parse_assoc_limit_entry(
+    entry: &serde_json::Value,
+) -> Option<(u32, u64, String)> {
+    let max = entry.get("userEnforcedMaxToObjectIds").and_then(|v| v.as_u64())?;
+    let type_id = entry.get("typeId").and_then(|v| v.as_u64())?;
+    let category = entry
+        .get("category")
+        .and_then(|v| v.as_str())
+        .unwrap_or("HUBSPOT_DEFINED")
+        .to_string();
+    if max == 0 {
+        // Defensive: HubSpot disallows 0 in the UI, but if it ever surfaces
+        // here we'd never want to "swap" zero associations, so treat as no
+        // cap (let the merge proceed and surface any actual error normally).
+        return None;
+    }
+    Some((max as u32, type_id, category))
+}
+
+/// Pick the most-restrictive cap from a configurations response body.
+///
+/// HubSpot returns a `results` array with one entry per (typeId, label)
+/// configuration on the pair. The merge engine's effective cap is the
+/// minimum across labels (any label hitting its cap rejects the merge).
+/// Returns `None` if no entry has a finite cap — the configurations
+/// endpoint may legitimately return entries with `userEnforcedMaxToObjectIds`
+/// absent when the admin chose "Many" for every label.
+pub(crate) fn most_restrictive_limit(
+    body: &serde_json::Value,
+) -> Option<(u32, u64, String)> {
+    let results = body.get("results").and_then(|v| v.as_array())?;
+    let mut best: Option<(u32, u64, String)> = None;
+    for entry in results {
+        if let Some((max, type_id, category)) = parse_assoc_limit_entry(entry) {
+            match &best {
+                None => best = Some((max, type_id, category)),
+                Some((current_max, _, _)) if max < *current_max => {
+                    best = Some((max, type_id, category));
+                }
+                _ => {}
+            }
+        }
+    }
+    best
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -2042,5 +2218,149 @@ mod tests {
         assert_eq!(body["objectIdToMerge"], "67890");
         // Nothing else should leak into the body or HubSpot may reject it.
         assert_eq!(body.as_object().map(|o| o.len()), Some(2));
+    }
+
+    // ── Association-limit detection & planning ────────────────────────────
+
+    #[test]
+    fn is_association_limit_error_matches_real_payload() {
+        // The exact substring HubSpot returns when an admin-configured
+        // per-record cap blocks a merge (sampled from a 400 response).
+        let payload = r#"HubSpot merge error (400 Bad Request): {"status":"error","message":"Association configuration limits are exceeded in portal 146859718 when merging 238292703419 into 238298166504 of object type 2-191972671","correlationId":"019e2559-bc5f-718a-85bc-1777f9178748","category":"VALIDATION_ERROR"}"#;
+        assert!(is_association_limit_error(payload));
+    }
+
+    #[test]
+    fn is_association_limit_error_rejects_unrelated_errors() {
+        assert!(!is_association_limit_error(
+            "HubSpot merge error (401 Unauthorized): missing scope crm.objects.custom.write"
+        ));
+        assert!(!is_association_limit_error(
+            "HubSpot merge error (400 Bad Request): invalid object id"
+        ));
+        assert!(!is_association_limit_error(""));
+    }
+
+    #[test]
+    fn parse_assoc_limit_entry_reads_finite_cap() {
+        let entry = serde_json::json!({
+            "category": "HUBSPOT_DEFINED",
+            "typeId": 297,
+            "label": null,
+            "userEnforcedMaxToObjectIds": 1
+        });
+        let parsed = parse_assoc_limit_entry(&entry);
+        assert_eq!(parsed, Some((1, 297, "HUBSPOT_DEFINED".to_string())));
+    }
+
+    #[test]
+    fn parse_assoc_limit_entry_returns_none_when_no_cap() {
+        // "Many" — the admin chose no limit; HubSpot omits the field.
+        let entry = serde_json::json!({
+            "category": "HUBSPOT_DEFINED",
+            "typeId": 297,
+            "label": null
+        });
+        assert_eq!(parse_assoc_limit_entry(&entry), None);
+    }
+
+    #[test]
+    fn parse_assoc_limit_entry_treats_zero_as_no_cap() {
+        // Defence-in-depth — if HubSpot ever surfaces 0 we should not try
+        // to swap "zero" associations; let the merge run and fail visibly.
+        let entry = serde_json::json!({
+            "category": "USER_DEFINED",
+            "typeId": 196,
+            "userEnforcedMaxToObjectIds": 0
+        });
+        assert_eq!(parse_assoc_limit_entry(&entry), None);
+    }
+
+    #[test]
+    fn most_restrictive_limit_picks_min_across_labels() {
+        // Multiple labels on the same pair, each with its own cap. The
+        // merge engine refuses if ANY label's cap is exceeded, so we want
+        // the most restrictive one for our planning.
+        let body = serde_json::json!({
+            "results": [
+                { "category": "HUBSPOT_DEFINED", "typeId": 297, "userEnforcedMaxToObjectIds": 5 },
+                { "category": "USER_DEFINED",    "typeId": 196, "userEnforcedMaxToObjectIds": 1 },
+                { "category": "USER_DEFINED",    "typeId": 198 } // "Many"
+            ]
+        });
+        assert_eq!(
+            most_restrictive_limit(&body),
+            Some((1, 196, "USER_DEFINED".to_string()))
+        );
+    }
+
+    #[test]
+    fn most_restrictive_limit_returns_none_when_no_caps() {
+        let body = serde_json::json!({
+            "results": [
+                { "category": "HUBSPOT_DEFINED", "typeId": 297 },
+                { "category": "USER_DEFINED",    "typeId": 196 }
+            ]
+        });
+        assert_eq!(most_restrictive_limit(&body), None);
+    }
+
+    #[test]
+    fn evaluate_merging_side_cap_passes_when_under_limit() {
+        let plan = AssocPairPlan {
+            other_object_type_id: "0-1".to_string(),
+            other_object_label: "Contacts".to_string(),
+            direction: AssocLimitDirection::MergingSide { max: 5 },
+            loser_count: 1,
+            winner_count: 2,
+        };
+        assert_eq!(
+            evaluate_merging_side_cap(&plan, "Creator"),
+            MergingSideOutcome::Ok
+        );
+    }
+
+    #[test]
+    fn evaluate_merging_side_cap_bails_with_actionable_message() {
+        let plan = AssocPairPlan {
+            other_object_type_id: "0-1".to_string(),
+            other_object_label: "Contacts".to_string(),
+            direction: AssocLimitDirection::MergingSide { max: 5 },
+            loser_count: 2,
+            winner_count: 5,
+        };
+        match evaluate_merging_side_cap(&plan, "Creator") {
+            MergingSideOutcome::Ok => panic!("expected Exceeded"),
+            MergingSideOutcome::Exceeded { message } => {
+                // The message must mention the actual numbers and point to
+                // the HubSpot setting that fixes it — anything less and the
+                // user has to dig through HubSpot to figure out what to do.
+                assert!(message.contains("up to 7 Contacts"));
+                assert!(message.contains("limit of 5 Contacts per Creator"));
+                assert!(message.contains("Settings → Properties → Associations"));
+            }
+        }
+    }
+
+    #[test]
+    fn evaluate_merging_side_cap_ignores_other_side_plans() {
+        // OtherSide caps are handled by the pre-swap path, never by the
+        // bail path. Make sure this helper doesn't accidentally bail on
+        // them or it would block fixable merges.
+        let plan = AssocPairPlan {
+            other_object_type_id: "2-192287471".to_string(),
+            other_object_label: "External Clips".to_string(),
+            direction: AssocLimitDirection::OtherSide {
+                max: 1,
+                type_id: 297,
+                category: "HUBSPOT_DEFINED".to_string(),
+            },
+            loser_count: 50,
+            winner_count: 0,
+        };
+        assert_eq!(
+            evaluate_merging_side_cap(&plan, "Creator"),
+            MergingSideOutcome::Ok
+        );
     }
 }
