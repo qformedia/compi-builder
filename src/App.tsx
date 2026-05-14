@@ -18,6 +18,8 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { SettingsPage } from "@/components/SettingsPage";
+import { RequiredHubSpotTokenDialog } from "@/components/RequiredHubSpotTokenDialog";
+import { MissingOptionalSettingsDialog } from "@/components/MissingOptionalSettingsDialog";
 import { Sidebar, type Page } from "@/components/Sidebar";
 import { ChangelogDialog } from "@/components/ChangelogDialog";
 import { FeedbackDialog } from "@/components/FeedbackDialog";
@@ -207,6 +209,10 @@ function App() {
   const [feedbackOpen, setFeedbackOpen] = useState(false);
   const [changelogOpen, setChangelogOpen] = useState(false);
   const [downloadsLogOpen, setDownloadsLogOpen] = useState(false);
+  const [requiredTokenOpen, setRequiredTokenOpen] = useState(() => !settings.hubspotToken);
+  const [optionalDialogOpen, setOptionalDialogOpen] = useState(
+    () => !!settings.hubspotToken && (!settings.ownerEmail || !settings.socialkitApiKey || !settings.socialfetchApiKey)
+  );
   const [project, setProject] = useState<Project | null>(null);
   const [activePage, setActivePage] = useState<Page>("videos");
   const [activeVideoTab, setActiveVideoTab] = useState("search");
@@ -686,7 +692,7 @@ function App() {
     localStorage.setItem("compi-settings", JSON.stringify(next));
   };
 
-  const isConfigured = settings.hubspotToken && settings.rootFolder;
+  const isConfigured = settings.rootFolder;
 
   useEffect(() => {
     if (!isConfigured) setActivePage("settings");
@@ -1608,6 +1614,30 @@ function App() {
           </div>
         </main>
       </div>
+
+      <RequiredHubSpotTokenDialog
+        open={requiredTokenOpen}
+        onSave={(token) => {
+          saveSettings({ ...settings, hubspotToken: token });
+          setRequiredTokenOpen(false);
+          if (!settings.ownerEmail || !settings.socialkitApiKey || !settings.socialfetchApiKey) {
+            setOptionalDialogOpen(true);
+          }
+        }}
+      />
+
+      <MissingOptionalSettingsDialog
+        open={optionalDialogOpen}
+        hubspotToken={settings.hubspotToken}
+        missingEmail={!settings.ownerEmail}
+        missingSocialKit={!settings.socialkitApiKey}
+        missingSocialFetch={!settings.socialfetchApiKey}
+        onSave={(payload) => {
+          saveSettings({ ...settings, ...payload });
+          setOptionalDialogOpen(false);
+        }}
+        onSkip={() => setOptionalDialogOpen(false)}
+      />
 
       <FeedbackDialog
         open={feedbackOpen}

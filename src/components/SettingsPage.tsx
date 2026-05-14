@@ -18,6 +18,7 @@ import {
   unexcludeOwner,
   isSupabaseConfigured,
 } from "@/lib/supabase";
+import { resolveOwnerId } from "@/lib/owner-email";
 import type { AppSettings } from "@/types";
 
 declare const __APP_VERSION__: string;
@@ -153,10 +154,7 @@ export function SettingsPage({ settings, onSave, onCheckUpdate }: Props) {
       setSaving(true);
       setEmailError(null);
       try {
-        const id = await invoke<string>("resolve_owner_id", {
-          token: draft.hubspotToken,
-          email: draft.ownerEmail.trim(),
-        });
+        const id = await resolveOwnerId(draft.hubspotToken, draft.ownerEmail.trim());
         onSave({ ...draft, ownerEmail: draft.ownerEmail.trim(), ownerId: id });
         flashSaved();
       } catch (err) {
