@@ -198,6 +198,8 @@ export interface SnapshotAssociations {
   externalClips: SnapshotAssociatedRecord[];
 }
 
+import { BackedUpFile } from "./file-backup";
+
 export interface MergeSnapshotPayload {
   network: string;
   canonicalUrl: string;
@@ -211,6 +213,7 @@ export interface MergeSnapshotPayload {
    *  diff renders the same human label in the History view even if the
    *  owner is later renamed or deactivated in HubSpot. */
   ownersById: Record<string, string>;
+  backedUpFiles?: BackedUpFile[];
 }
 
 /**
@@ -323,6 +326,7 @@ export async function recordMergeResolution(
       winner_associations: args.snapshot.winnerAssociations,
       loser_associations: args.snapshot.loserAssociations,
       owners_by_id: args.snapshot.ownersById,
+      backed_up_files: args.snapshot.backedUpFiles || [],
     });
   if (snapErr) throw snapErr;
 }
@@ -356,6 +360,7 @@ export interface MergeSnapshot extends MergeSnapshotSummary {
   winnerAssociations: SnapshotAssociations | null;
   loserAssociations: SnapshotAssociations | null;
   ownersById: Record<string, string>;
+  backedUpFiles: BackedUpFile[];
 }
 
 interface MergeSnapshotSummaryRow {
@@ -379,13 +384,14 @@ interface MergeSnapshotRow extends MergeSnapshotSummaryRow {
   winner_associations: SnapshotAssociations | null;
   loser_associations: SnapshotAssociations | null;
   owners_by_id: Record<string, string> | null;
+  backed_up_files: BackedUpFile[] | null;
 }
 
 const MERGE_SNAPSHOT_SUMMARY_COLUMNS =
   "id, pair_key, merged_at, actor, winner_record_id, loser_record_id, winner_name, loser_name, network, canonical_url";
 
 const MERGE_SNAPSHOT_FULL_COLUMNS =
-  `${MERGE_SNAPSHOT_SUMMARY_COLUMNS}, record_id_a, record_id_b, winner_props, loser_props, winner_associations, loser_associations, owners_by_id`;
+  `${MERGE_SNAPSHOT_SUMMARY_COLUMNS}, record_id_a, record_id_b, winner_props, loser_props, winner_associations, loser_associations, owners_by_id, backed_up_files`;
 
 function mapSnapshotSummary(r: MergeSnapshotSummaryRow): MergeSnapshotSummary {
   return {
@@ -412,6 +418,7 @@ function mapSnapshot(r: MergeSnapshotRow): MergeSnapshot {
     winnerAssociations: r.winner_associations,
     loserAssociations: r.loser_associations,
     ownersById: r.owners_by_id ?? {},
+    backedUpFiles: r.backed_up_files ?? [],
   };
 }
 

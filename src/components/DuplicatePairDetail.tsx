@@ -69,6 +69,8 @@ import {
   predictMergedAssociationRollup,
   ASSOCIATION_ROLLUP_KEYS,
   ASSOCIATION_ROLLUP_LABELS,
+  MULTI_FILE_PROPERTY_KEYS,
+  combineMultiFileValue,
   type PropDiff,
   type PropDiffBucket,
 } from "@/lib/duplicates/diff";
@@ -84,6 +86,7 @@ import {
   markDismissed,
   reopen,
 } from "@/lib/duplicates/resolve";
+import { backupMergeFiles, type BackedUpFile } from "@/lib/duplicates/file-backup";
 import {
   formatReassignmentSummary,
   isAssociationLimitError,
@@ -447,11 +450,10 @@ export function DuplicatePairDetail({
     : null;
 
   // ── Merge action handler ───────────────────────────────────────────────
-  // Strict ordering: HubSpot merge first, then Supabase audit. If HubSpot
-  // fails we surface the error and never write to Supabase. If HubSpot
-  // succeeds but Supabase fails we still treat the operation as a success
-  // for the user (the irreversible write already happened) but warn so they
-  // can manually re-run the audit if needed.
+  // 1. Backup: Best-effort backup of all license_file/traceability_file bytes to Supabase
+  // 2. Merge: Strict ordering HubSpot merge first. If HubSpot fails we surface the error and never write to Supabase.
+  // 3. Combine-Patch: Best-effort patch of combined multi-file properties to the surviving record.
+  // 4. Audit: Best-effort write to Supabase duplicate_pair_events/resolutions/snapshots.
   async function handleMergeConfirm() {
     if (!winnerRid || !loserRid) return;
     setMerging(true);
@@ -460,20 +462,21 @@ export function DuplicatePairDetail({
     setMergeReassignments(null);
     setMergePhase("direct");
 
-    // ── Phase 1: try the standard HubSpot merge ──────────────────────
-    // This handles ~99% of merges. The only documented failure mode
-    // we're prepared to recover from is the "association configuration
-    // limits exceeded" rejection — every other error bubbles straight
-    // up to the user.
-    //
-    // We capture the `id` from HubSpot's merge response and use IT as
-    // the canonical surviving record id (instead of trusting the
-    // `winnerId` we sent). HubSpot can return a different id when the
-    // primary record has been involved in past merges and HubSpot
-    // resolves to its canonical id — in that case the input id is
-    // archived and any subsequent live read against it returns no row.
-    // Trusting the response keeps the snapshot pointing at a record
-    // we can actually fetch later.
+    // ── Phase 1: Backup ────────────────────────────────────────────────
+    let backedUpFiles: BackedUpFile[] = [];
+    try {
+      if (token && props) {
+        const { files, failedCount } = await backupMergeFiles(token, pair.pairKey, props.a, props.b);
+        backedUpFiles = files;
+        if (failedCount > 0) {
+          setMergeWarning(`Could not back up ${failedCount} file(s); merge proceeded.`);
+        }
+      }
+    } catch (err) {
+      setMergeWarning(`File backup failed: ${err instanceof Error ? err.message : String(err)}. Merge proceeded.`);
+    }
+
+    // ── Phase 2: try the standard HubSpot merge ──────────────────────
     let reassignments: Reassignment[] = [];
     let actualWinnerRid = winnerRid;
     try {
@@ -491,13 +494,6 @@ export function DuplicatePairDetail({
         setMergePhase("idle");
         return;
       }
-      // ── Phase 2: workaround merge with pre-reassignment ──────────
-      // HubSpot's merge engine rejected this pair because of an
-      // admin-configured per-record cap (the in-engine merge would
-      // briefly double-associate each loser-attached record). Fall
-      // back to the Tauri command that probes the cap configuration,
-      // pre-swaps the affected associations onto the winner, and then
-      // retries the merge.
       setMergePhase("fallback");
       try {
         const result = await invoke<MergeReassignResult>(
@@ -521,15 +517,27 @@ export function DuplicatePairDetail({
       );
     }
 
-    // ── Audit log (non-fatal) ─────────────────────────────────────────
-    // Capture the full pre-merge state so the History view can render an
-    // A/B/Predicted-merged comparison later. Both `props` and `assocData`
-    // are guaranteed non-null here because the Merge button is disabled
-    // until both fetches complete (the loading branch above the merge
-    // card is mutually exclusive). Associations are still wrapped in a
-    // null fallback because the associations fetch can fail
-    // independently and we'd rather record the property snapshot on a
-    // best-effort basis than skip the snapshot entirely.
+    // ── Phase 3: Combine and Patch ───────────────────────────────────
+    try {
+      const winnerProps = winnerSide === "a" ? props!.a : props!.b;
+      const loserProps = winnerSide === "a" ? props!.b : props!.a;
+      const patchPayload: Record<string, string> = {};
+      for (const key of MULTI_FILE_PROPERTY_KEYS) {
+        patchPayload[key] = combineMultiFileValue(winnerProps[key], loserProps[key]);
+      }
+      if (Object.keys(patchPayload).length > 0) {
+        await invoke("update_creator_properties", {
+          token,
+          creatorId: actualWinnerRid,
+          properties: patchPayload,
+        });
+      }
+    } catch (err) {
+      const msg = `Merged, but couldn't combine license files. Edit the record in HubSpot or retry. (${err instanceof Error ? err.message : String(err)})`;
+      setMergeWarning((prev) => (prev ? `${prev} ${msg}` : msg));
+    }
+
+    // ── Phase 4: Audit log (non-fatal) ───────────────────────────────
     try {
       const winnerProps = winnerSide === "a" ? props!.a : props!.b;
       const loserProps = winnerSide === "a" ? props!.b : props!.a;
@@ -560,17 +568,13 @@ export function DuplicatePairDetail({
               }
             : null,
           ownersById: Object.fromEntries(ownersById),
+          backedUpFiles,
         },
-        // Only set when the workaround actually moved something — keeps
-        // the audit row identical to today's shape for the common case
-        // where the regular merge succeeded.
         reassignments: reassignments.length > 0 ? reassignments : undefined,
       });
     } catch (err) {
-      setMergeWarning(
-        `Merge succeeded in HubSpot, but couldn't record the audit row: ${describeSupabaseError(err)}. ` +
-          "The pair may briefly reappear until the next refresh, and the merge may not show up in History.",
-      );
+      const msg = `Merge succeeded in HubSpot, but couldn't record the audit row: ${describeSupabaseError(err)}. The pair may briefly reappear until the next refresh, and the merge may not show up in History.`;
+      setMergeWarning((prev) => (prev ? `${prev} ${msg}` : msg));
     }
 
     // ── Resolve the dialog ────────────────────────────────────────────

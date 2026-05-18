@@ -2762,6 +2762,207 @@ async fn set_clip_property(
     Ok(())
 }
 
+#[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupItem {
+    pub file_id: String,
+    pub side: String,
+    pub property: String,
+}
+
+#[derive(serde::Serialize, Debug)]
+#[serde(rename_all = "camelCase")]
+pub struct BackedUpFile {
+    pub side: String,
+    pub property: String,
+    pub hubspot_file_id: String,
+    pub name: Option<String>,
+    pub extension: Option<String>,
+    pub mime: Option<String>,
+    pub size: Option<u64>,
+    pub storage_path: Option<String>,
+    pub hubspot_url: Option<String>,
+    pub status: String,
+    pub error: Option<String>,
+}
+
+#[tauri::command]
+async fn backup_hubspot_files_to_supabase(
+    token: String,
+    supabase_url: String,
+    supabase_anon_key: String,
+    bucket: String,
+    pair_key: String,
+    items: Vec<BackupItem>,
+) -> Result<Vec<BackedUpFile>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("Network error: {e}"))?;
+
+    let mut results = Vec::new();
+
+    for item in items {
+        let meta_url = format!("https://api.hubapi.com/files/v3/files/{}", item.file_id);
+        
+        let meta_res = match client.get(&meta_url).bearer_auth(&token).send().await {
+            Ok(res) => res,
+            Err(e) => {
+                results.push(BackedUpFile {
+                    side: item.side.clone(),
+                    property: item.property.clone(),
+                    hubspot_file_id: item.file_id.clone(),
+                    name: None, extension: None, mime: None, size: None, storage_path: None, hubspot_url: None,
+                    status: "failed".to_string(),
+                    error: Some(format!("HubSpot meta fetch failed: {}", e)),
+                });
+                continue;
+            }
+        };
+
+        if !meta_res.status().is_success() {
+            let status = meta_res.status();
+            results.push(BackedUpFile {
+                side: item.side.clone(),
+                property: item.property.clone(),
+                hubspot_file_id: item.file_id.clone(),
+                name: None, extension: None, mime: None, size: None, storage_path: None, hubspot_url: None,
+                status: "failed".to_string(),
+                error: Some(format!("HubSpot file lookup error ({}): {}", status, meta_res.text().await.unwrap_or_default())),
+            });
+            continue;
+        }
+
+        let meta_json: serde_json::Value = match meta_res.json().await {
+            Ok(json) => json,
+            Err(e) => {
+                results.push(BackedUpFile {
+                    side: item.side.clone(),
+                    property: item.property.clone(),
+                    hubspot_file_id: item.file_id.clone(),
+                    name: None, extension: None, mime: None, size: None, storage_path: None, hubspot_url: None,
+                    status: "failed".to_string(),
+                    error: Some(format!("Failed to parse HubSpot file {}: {}", item.file_id, e)),
+                });
+                continue;
+            }
+        };
+
+        let name = meta_json.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let extension = meta_json.get("extension").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let size = meta_json.get("size").and_then(|v| v.as_u64());
+        let hubspot_url = meta_json.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let mime = meta_json.get("type").and_then(|v| v.as_str()).unwrap_or("application/octet-stream").to_string();
+
+        let safe_name = helpers::safe_storage_filename(&name);
+        let storage_path = format!("{}/{}/{}_{}.{}", pair_key, item.side, item.file_id, safe_name, extension);
+
+        if hubspot_url.is_empty() {
+            results.push(BackedUpFile {
+                side: item.side.clone(),
+                property: item.property.clone(),
+                hubspot_file_id: item.file_id.clone(),
+                name: Some(name), extension: Some(extension), mime: Some(mime), size, storage_path: None, hubspot_url: None,
+                status: "failed".to_string(),
+                error: Some("HubSpot returned empty URL".to_string()),
+            });
+            continue;
+        }
+
+        let bytes_res = match client.get(&hubspot_url).send().await {
+            Ok(res) => res,
+            Err(e) => {
+                results.push(BackedUpFile {
+                    side: item.side.clone(),
+                    property: item.property.clone(),
+                    hubspot_file_id: item.file_id.clone(),
+                    name: Some(name), extension: Some(extension), mime: Some(mime), size, storage_path: None, hubspot_url: Some(hubspot_url),
+                    status: "failed".to_string(),
+                    error: Some(format!("Failed to download from HubSpot URL: {}", e)),
+                });
+                continue;
+            }
+        };
+
+        if !bytes_res.status().is_success() {
+            let status = bytes_res.status();
+            results.push(BackedUpFile {
+                side: item.side.clone(),
+                property: item.property.clone(),
+                hubspot_file_id: item.file_id.clone(),
+                name: Some(name), extension: Some(extension), mime: Some(mime), size, storage_path: None, hubspot_url: Some(hubspot_url),
+                status: "failed".to_string(),
+                error: Some(format!("HubSpot download error ({}): {}", status, bytes_res.text().await.unwrap_or_default())),
+            });
+            continue;
+        }
+
+        let bytes = match bytes_res.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                results.push(BackedUpFile {
+                    side: item.side.clone(),
+                    property: item.property.clone(),
+                    hubspot_file_id: item.file_id.clone(),
+                    name: Some(name), extension: Some(extension), mime: Some(mime), size, storage_path: None, hubspot_url: Some(hubspot_url),
+                    status: "failed".to_string(),
+                    error: Some(format!("Failed to read bytes: {}", e)),
+                });
+                continue;
+            }
+        };
+
+        let sb_url = format!("{}/storage/v1/object/{}/{}", supabase_url, bucket, storage_path);
+        let sb_res = match client.post(&sb_url)
+            .bearer_auth(&supabase_anon_key)
+            .header("Content-Type", &mime)
+            .body(bytes)
+            .send().await {
+                Ok(res) => res,
+                Err(e) => {
+                    results.push(BackedUpFile {
+                        side: item.side.clone(),
+                        property: item.property.clone(),
+                        hubspot_file_id: item.file_id.clone(),
+                        name: Some(name), extension: Some(extension), mime: Some(mime), size, storage_path: Some(storage_path), hubspot_url: Some(hubspot_url),
+                        status: "failed".to_string(),
+                        error: Some(format!("Supabase upload failed: {}", e)),
+                    });
+                    continue;
+                }
+            };
+
+        if !sb_res.status().is_success() {
+            let status = sb_res.status();
+            results.push(BackedUpFile {
+                side: item.side.clone(),
+                property: item.property.clone(),
+                hubspot_file_id: item.file_id.clone(),
+                name: Some(name), extension: Some(extension), mime: Some(mime), size, storage_path: Some(storage_path), hubspot_url: Some(hubspot_url),
+                status: "failed".to_string(),
+                error: Some(format!("Supabase upload error ({}): {}", status, sb_res.text().await.unwrap_or_default())),
+            });
+            continue;
+        }
+
+        results.push(BackedUpFile {
+            side: item.side,
+            property: item.property,
+            hubspot_file_id: item.file_id,
+            name: Some(name),
+            extension: Some(extension),
+            mime: Some(mime),
+            size,
+            storage_path: Some(storage_path),
+            hubspot_url: Some(hubspot_url),
+            status: "ok".to_string(),
+            error: None,
+        });
+    }
+
+    Ok(results)
+}
+
 fn extension_from_mime(mime: &str) -> &'static str {
     if mime.contains("png") {
         "png"
@@ -7205,6 +7406,7 @@ pub fn run() {
             response.body(buf).unwrap()
         })
         .invoke_handler(tauri::generate_handler![
+            backup_hubspot_files_to_supabase,
             fetch_tag_options,
             create_tag_option,
             search_clips,

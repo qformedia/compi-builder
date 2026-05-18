@@ -1076,6 +1076,37 @@ pub(crate) fn most_restrictive_limit(
 
 // ── Tests ────────────────────────────────────────────────────────────────────
 
+pub(crate) fn combine_multi_file_value(winner: &str, loser: &str) -> String {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    let mut process = |s: &str| {
+        for token in s.split(|c: char| c == ';' || c == ',' || c.is_whitespace()) {
+            let t = token.trim();
+            if !t.is_empty() && seen.insert(t.to_string()) {
+                out.push(t.to_string());
+            }
+        }
+    };
+
+    process(winner);
+    process(loser);
+
+    out.join(";")
+}
+
+pub(crate) fn safe_storage_filename(name: &str) -> String {
+    name.chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2362,5 +2393,23 @@ mod tests {
             evaluate_merging_side_cap(&plan, "Creator"),
             MergingSideOutcome::Ok
         );
+    }
+    #[test]
+    fn test_combine_multi_file_value() {
+        assert_eq!(combine_multi_file_value("", ""), "");
+        assert_eq!(combine_multi_file_value("123", ""), "123");
+        assert_eq!(combine_multi_file_value("", "456"), "456");
+        assert_eq!(combine_multi_file_value("123", "456"), "123;456");
+        assert_eq!(combine_multi_file_value("123", "123"), "123");
+        assert_eq!(combine_multi_file_value("123; 456", "789, 123"), "123;456;789");
+        assert_eq!(combine_multi_file_value("  123 \n 456  ", " 456 ; 789 "), "123;456;789");
+    }
+
+    #[test]
+    fn test_safe_storage_filename() {
+        assert_eq!(safe_storage_filename("hello-world.mp4"), "hello-world.mp4");
+        assert_eq!(safe_storage_filename("hello world!.mp4"), "hello_world_.mp4");
+        assert_eq!(safe_storage_filename("special/chars?\\"), "special_chars__");
+        assert_eq!(safe_storage_filename("valid_name-1.2.3"), "valid_name-1.2.3");
     }
 }

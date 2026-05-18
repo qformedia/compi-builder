@@ -139,6 +139,11 @@ export const LICENSE_INFO_KEYS = [
   "special_requests",
 ] as const;
 
+export const MULTI_FILE_PROPERTY_KEYS = new Set([
+  "license_file",
+  "traceability_file",
+]);
+
 const SKIP_KEYS = new Set<string>([
   ...ASSOCIATION_ROLLUP_KEYS,
   ...LICENSE_INFO_KEYS,
@@ -219,6 +224,28 @@ export function sortPropertiesForDiff(
 // sides, which is rare) but good enough for the preview signal.
 // ──────────────────────────────────────────────────────────────────────────
 
+export function combineMultiFileValue(winner: string | null | undefined, loser: string | null | undefined): string {
+  const out: string[] = [];
+  const seen = new Set<string>();
+
+  const process = (s: string | null | undefined) => {
+    if (!s) return;
+    const tokens = s.split(/[;,\s]+/);
+    for (const tok of tokens) {
+      const t = tok.trim();
+      if (t && !seen.has(t)) {
+        seen.add(t);
+        out.push(t);
+      }
+    }
+  };
+
+  process(winner);
+  process(loser);
+
+  return out.join(";");
+}
+
 /**
  * Predict the property map of the post-merge winner record.
  *
@@ -226,6 +253,9 @@ export function sortPropertiesForDiff(
  * two input maps. Whitespace-only values count as empty (matches the
  * existing `normalize` used by `sortPropertiesForDiff`, so the preview
  * stays consistent with the diff buckets).
+ * 
+ * For keys in `MULTI_FILE_PROPERTY_KEYS`, applies the `combineMultiFileValue`
+ * rule instead so the preview matches the custom post-merge PATCH behavior.
  */
 export function predictMergedProperties(
   winner: Record<string, string>,
@@ -236,9 +266,13 @@ export function predictMergedProperties(
   for (const k of Object.keys(winner)) keys.add(k);
   for (const k of Object.keys(loser)) keys.add(k);
   for (const key of keys) {
-    const w = normalize(winner[key]);
-    const l = normalize(loser[key]);
-    out[key] = w !== "" ? w : l;
+    if (MULTI_FILE_PROPERTY_KEYS.has(key)) {
+      out[key] = combineMultiFileValue(winner[key], loser[key]);
+    } else {
+      const w = normalize(winner[key]);
+      const l = normalize(loser[key]);
+      out[key] = w !== "" ? w : l;
+    }
   }
   return out;
 }

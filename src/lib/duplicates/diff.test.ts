@@ -5,7 +5,20 @@ import {
   predictMergedAssociationRollups,
   predictMergedProperties,
   sortPropertiesForDiff,
+  combineMultiFileValue,
 } from "./diff";
+
+describe("combineMultiFileValue", () => {
+  it("unions file IDs preserving winner order", () => {
+    expect(combineMultiFileValue("", "")).toBe("");
+    expect(combineMultiFileValue("123", "")).toBe("123");
+    expect(combineMultiFileValue("", "456")).toBe("456");
+    expect(combineMultiFileValue("123", "456")).toBe("123;456");
+    expect(combineMultiFileValue("123", "123")).toBe("123");
+    expect(combineMultiFileValue("123; 456", "789, 123")).toBe("123;456;789");
+    expect(combineMultiFileValue("  123 \n 456  ", " 456 ; 789 ")).toBe("123;456;789");
+  });
+});
 
 describe("predictMergedProperties — native-merge defaults", () => {
   it("keeps the winner's value when both sides differ", () => {
@@ -67,6 +80,15 @@ describe("predictMergedProperties — native-merge defaults", () => {
         expect(merged[row.key]).toBe(row.valueB);
       }
     }
+  });
+
+  it("applies combineMultiFileValue for MULTI_FILE_PROPERTY_KEYS", () => {
+    const merged = predictMergedProperties(
+      { license_file: "123", traceability_file: "" },
+      { license_file: "456", traceability_file: "789" },
+    );
+    expect(merged.license_file).toBe("123;456");
+    expect(merged.traceability_file).toBe("789");
   });
 });
 
