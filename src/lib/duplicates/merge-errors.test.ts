@@ -104,6 +104,69 @@ describe("formatReassignmentSummary", () => {
     ]);
     expect(summary).toBe("Reassigned 4 External Clips before merging.");
   });
+
+  it("reports loser-side detachments on their own when nothing was moved", () => {
+    // The user-visible Deals case: cap 1, winner has its own Deal, loser
+    // had 1 too. We detach the loser's Deal so the merge fits the cap;
+    // no peer records moved, but the user still needs to see what
+    // dropped.
+    const summary = formatReassignmentSummary([
+      {
+        objectTypeId: "0-3",
+        objectTypeLabel: "Deals",
+        count: 0,
+        detachedFromLoser: 1,
+      },
+    ]);
+    expect(summary).toBe(
+      "Detached 1 Deals from the loser to honour per-Creator caps.",
+    );
+  });
+
+  it("combines reassignments and detachments in one banner", () => {
+    const summary = formatReassignmentSummary([
+      {
+        objectTypeId: "2-192287471",
+        objectTypeLabel: "External Clips",
+        count: 4,
+      },
+      {
+        objectTypeId: "0-3",
+        objectTypeLabel: "Deals",
+        count: 0,
+        detachedFromLoser: 1,
+      },
+    ]);
+    expect(summary).toBe(
+      "Reassigned 4 External Clips before merging. Detached 1 Deals from the loser to honour per-Creator caps.",
+    );
+  });
+
+  it("joins multiple detached peers with an Oxford comma", () => {
+    const summary = formatReassignmentSummary([
+      {
+        objectTypeId: "0-3",
+        objectTypeLabel: "Deals",
+        count: 0,
+        detachedFromLoser: 1,
+      },
+      {
+        objectTypeId: "2-X",
+        objectTypeLabel: "Social Interactions",
+        count: 0,
+        detachedFromLoser: 2,
+      },
+      {
+        objectTypeId: "2-Y",
+        objectTypeLabel: "Public Video Projects",
+        count: 0,
+        detachedFromLoser: 3,
+      },
+    ]);
+    expect(summary).toBe(
+      "Detached 1 Deals, 2 Social Interactions, and 3 Public Video Projects from the loser to honour per-Creator caps.",
+    );
+  });
 });
 
 describe("totalReassignedRecords", () => {

@@ -972,49 +972,57 @@ pub(crate) struct AssocPairPlan {
     pub winner_count: u32,
 }
 
-/// Outcome of evaluating a single `MergingSide` cap. Either the merge can
-/// proceed for this pair or we have a precise human-readable explanation
-/// of which pair would exceed the cap and by how much.
+/// What to do about a `MergingSide` cap given the current counts.
+///
+/// The merging-side cap is "each merging-object (e.g. Creator) can have
+/// at most N peer records". When `winner_count + loser_count > max`,
+/// the naive merge would push the winner past the cap. Three outcomes:
+///
+/// * `Noop` — the union fits under the cap; the merge can proceed.
+/// * `DetachLoser(n)` — archive `n` of the loser's peer associations
+///   before merging. The winner's records stay intact (this matches the
+///   "keep winner's, drop loser's overflow" policy); the loser's records
+///   in excess of `n` get archived too as a side-effect of the merge,
+///   but we explicitly archive the first `n` so the cap is satisfied
+///   before HubSpot's merge engine validates.
+/// * `PreExistingWinnerViolation` — the winner already exceeds the cap
+///   on its own. We can't fix that from the loser side; the caller
+///   surfaces a clear "fix this in HubSpot first" error.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum MergingSideOutcome {
-    Ok,
-    Exceeded {
-        message: String,
+pub(crate) enum MergingSideAction {
+    Noop,
+    DetachLoser(u32),
+    PreExistingWinnerViolation {
+        winner_count: u32,
+        max: u32,
     },
 }
 
-/// Decide whether a `MergingSide` cap would be violated by the merge.
-///
-/// The post-merge upper bound is `winner_count + loser_count` (HubSpot
-/// could deduplicate records associated to both sides, which is rare; the
-/// rollups don't tell us the overlap, so we use the safe upper bound — a
-/// false-positive bail is far less harmful than a confusing post-merge
-/// failure).
-pub(crate) fn evaluate_merging_side_cap(
+/// Decide what to do about one `MergingSide` cap given the current
+/// (winner_count, loser_count) and the configured max. Returns
+/// `MergingSideAction::Noop` for `OtherSide` plans — those have their
+/// own pre-swap path and don't go through this gate.
+pub(crate) fn plan_merging_side_action(
     plan: &AssocPairPlan,
-    merging_label: &str,
-) -> MergingSideOutcome {
+) -> MergingSideAction {
     let max = match plan.direction {
         AssocLimitDirection::MergingSide { max } => max,
-        AssocLimitDirection::OtherSide { .. } => return MergingSideOutcome::Ok,
+        AssocLimitDirection::OtherSide { .. } => return MergingSideAction::Noop,
     };
-    let predicted = plan.winner_count.saturating_add(plan.loser_count);
-    if predicted <= max {
-        return MergingSideOutcome::Ok;
+    if plan.winner_count > max {
+        return MergingSideAction::PreExistingWinnerViolation {
+            winner_count: plan.winner_count,
+            max,
+        };
     }
-    let message = format!(
-        "Cannot merge: the surviving {merging_label} would end up with up to {predicted} {other} \
-         (winner has {winner}, loser has {loser}), which exceeds your portal's limit of \
-         {max} {other} per {merging_label}. Detach some {other} from one side in HubSpot \
-         first, or have an admin raise the limit in Settings → Properties → Associations.",
-        merging_label = merging_label,
-        other = plan.other_object_label,
-        predicted = predicted,
-        winner = plan.winner_count,
-        loser = plan.loser_count,
-        max = max,
-    );
-    MergingSideOutcome::Exceeded { message }
+    let union = plan.winner_count.saturating_add(plan.loser_count);
+    if union <= max {
+        return MergingSideAction::Noop;
+    }
+    // overflow ≤ loser_count here because winner_count ≤ max ⇒
+    // union − max = (winner + loser) − max ≤ loser. Safe to subtract.
+    let overflow = union - max;
+    MergingSideAction::DetachLoser(overflow.min(plan.loser_count))
 }
 
 /// Parse a single configuration entry from
@@ -1072,6 +1080,162 @@ pub(crate) fn most_restrictive_limit(
         }
     }
     best
+}
+
+/// Partition `loser_ids` into `(overlap, only_on_loser)` against the
+/// peer ids already associated to the winner.
+///
+/// Used by the OtherSide pre-swap so we only have to *create* a new
+/// `record → winner` association for records that aren't already on the
+/// winner. Records in the overlap just need their loser-side archived;
+/// re-creating the winner-side would either no-op or trip a per-pair
+/// cap depending on label configuration.
+///
+/// Order within `only_on_loser` is preserved from `loser_ids` so chunked
+/// HTTP batches remain deterministic. `overlap` is also preserved in
+/// insertion order for diagnostic readability.
+pub(crate) fn partition_by_overlap(
+    loser_ids: &[String],
+    winner_ids: &[String],
+) -> (Vec<String>, Vec<String>) {
+    let winner_set: std::collections::HashSet<&String> = winner_ids.iter().collect();
+    let mut overlap = Vec::new();
+    let mut only_on_loser = Vec::new();
+    for id in loser_ids {
+        if winner_set.contains(id) {
+            overlap.push(id.clone());
+        } else {
+            only_on_loser.push(id.clone());
+        }
+    }
+    (overlap, only_on_loser)
+}
+
+/// Build the `inputs` array for the v4 batch archive call that removes
+/// each `record → loser` association.
+///
+/// Shape per record: `{ "from": { "id": record_id }, "to": [{ "id": loser_id }] }`.
+/// The v4 archive endpoint clears every association in the pair regardless
+/// of typeId, so we only need to pass the ids.
+pub(crate) fn build_pre_swap_archive_inputs(
+    record_ids: &[String],
+    loser_id: &str,
+) -> Vec<serde_json::Value> {
+    record_ids
+        .iter()
+        .map(|record_id| {
+            serde_json::json!({
+                "from": { "id": record_id },
+                "to": [{ "id": loser_id }],
+            })
+        })
+        .collect()
+}
+
+/// Parse a `GET /crm/v3/schemas/{CREATORS_OBJECT_ID}` response into the
+/// unique `toObjectTypeId` list, deduped and stable-ordered. This is the
+/// canonical "which object types can a Creator be associated with"
+/// answer — it covers custom AND standard objects (Notes, Calls, Emails,
+/// …), unlike `GET /crm/v3/schemas` which only lists custom objects.
+///
+/// We deliberately don't filter Creators-self or known ids here so this
+/// function stays a pure parser; the caller layers in those rules.
+pub(crate) fn parse_creator_peer_ids_from_schema(
+    body: &serde_json::Value,
+) -> Vec<String> {
+    let Some(assocs) = body.get("associations").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for entry in assocs {
+        let Some(id) = entry
+            .get("toObjectTypeId")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        if seen.insert(id.clone()) {
+            out.push(id);
+        }
+    }
+    out
+}
+
+/// Parse a `GET /crm/v3/schemas` response into a `objectTypeId -> label`
+/// map. Lets the discovery layer translate raw type ids (e.g.
+/// `2-19228xxxx`) into friendly names (e.g. `Send Link Actions`).
+///
+/// Label preference: `labels.plural` → `labels.singular` → `name`.
+/// Schemas without `objectTypeId` or any usable label are skipped.
+pub(crate) fn parse_custom_object_label_map(
+    body: &serde_json::Value,
+) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let Some(results) = body.get("results").and_then(|v| v.as_array()) else {
+        return out;
+    };
+    for schema in results {
+        let Some(id) = schema
+            .get("objectTypeId")
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+        else {
+            continue;
+        };
+        let label = schema
+            .get("labels")
+            .and_then(|l| l.get("plural"))
+            .and_then(|v| v.as_str())
+            .or_else(|| {
+                schema
+                    .get("labels")
+                    .and_then(|l| l.get("singular"))
+                    .and_then(|v| v.as_str())
+            })
+            .or_else(|| schema.get("name").and_then(|v| v.as_str()))
+            .map(str::to_string);
+        if let Some(label) = label {
+            out.insert(id, label);
+        }
+    }
+    out
+}
+
+/// Build the `inputs` array for the v4 batch create call that links each
+/// `record → winner` with the single `(category, typeId)` for the direction
+/// we are creating in.
+///
+/// We deliberately collapse to one typeId for every record. The typeIds
+/// returned by the loser-side read are valid for the `creators → peer`
+/// direction only; reusing them on the reverse-direction create call gets
+/// rejected by HubSpot with a VALIDATION_ERROR. The caller passes the
+/// `peer → creators` typeId discovered via the associations configuration
+/// probe, which is guaranteed to be valid for this direction. Custom
+/// USER_DEFINED labels on the original associations are not preserved —
+/// they collapse to whichever label the probe surfaced (typically the
+/// primary label that owns the cap).
+pub(crate) fn build_pre_swap_create_inputs(
+    record_ids: &[String],
+    winner_id: &str,
+    type_id: u64,
+    category: &str,
+) -> Vec<serde_json::Value> {
+    let types_array = serde_json::json!([{
+        "associationCategory": category,
+        "associationTypeId": type_id,
+    }]);
+    record_ids
+        .iter()
+        .map(|record_id| {
+            serde_json::json!({
+                "from": { "id": record_id },
+                "to": { "id": winner_id },
+                "types": types_array,
+            })
+        })
+        .collect()
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────────
@@ -2336,50 +2500,72 @@ mod tests {
         assert_eq!(most_restrictive_limit(&body), None);
     }
 
-    #[test]
-    fn evaluate_merging_side_cap_passes_when_under_limit() {
-        let plan = AssocPairPlan {
-            other_object_type_id: "0-1".to_string(),
-            other_object_label: "Contacts".to_string(),
-            direction: AssocLimitDirection::MergingSide { max: 5 },
-            loser_count: 1,
-            winner_count: 2,
-        };
-        assert_eq!(
-            evaluate_merging_side_cap(&plan, "Creator"),
-            MergingSideOutcome::Ok
-        );
-    }
-
-    #[test]
-    fn evaluate_merging_side_cap_bails_with_actionable_message() {
-        let plan = AssocPairPlan {
-            other_object_type_id: "0-1".to_string(),
-            other_object_label: "Contacts".to_string(),
-            direction: AssocLimitDirection::MergingSide { max: 5 },
-            loser_count: 2,
-            winner_count: 5,
-        };
-        match evaluate_merging_side_cap(&plan, "Creator") {
-            MergingSideOutcome::Ok => panic!("expected Exceeded"),
-            MergingSideOutcome::Exceeded { message } => {
-                // The message must mention the actual numbers and point to
-                // the HubSpot setting that fixes it — anything less and the
-                // user has to dig through HubSpot to figure out what to do.
-                assert!(message.contains("up to 7 Contacts"));
-                assert!(message.contains("limit of 5 Contacts per Creator"));
-                assert!(message.contains("Settings → Properties → Associations"));
-            }
+    fn merging_plan(max: u32, winner: u32, loser: u32) -> AssocPairPlan {
+        AssocPairPlan {
+            other_object_type_id: "0-3".to_string(),
+            other_object_label: "Deals".to_string(),
+            direction: AssocLimitDirection::MergingSide { max },
+            loser_count: loser,
+            winner_count: winner,
         }
     }
 
     #[test]
-    fn evaluate_merging_side_cap_ignores_other_side_plans() {
-        // OtherSide caps are handled by the pre-swap path, never by the
-        // bail path. Make sure this helper doesn't accidentally bail on
-        // them or it would block fixable merges.
+    fn plan_merging_side_action_noop_when_under_cap() {
+        assert_eq!(
+            plan_merging_side_action(&merging_plan(5, 2, 1)),
+            MergingSideAction::Noop
+        );
+    }
+
+    #[test]
+    fn plan_merging_side_action_noop_when_exactly_at_cap() {
+        assert_eq!(
+            plan_merging_side_action(&merging_plan(5, 3, 2)),
+            MergingSideAction::Noop
+        );
+    }
+
+    #[test]
+    fn plan_merging_side_action_detaches_overflow_keeping_winner_intact() {
+        // The user-visible Deals case: cap 1, winner 1, loser 1 ⇒ detach 1.
+        assert_eq!(
+            plan_merging_side_action(&merging_plan(1, 1, 1)),
+            MergingSideAction::DetachLoser(1)
+        );
+        // Cap 5, winner 3, loser 7 ⇒ overflow 5, detach 5 (loser keeps 2).
+        assert_eq!(
+            plan_merging_side_action(&merging_plan(5, 3, 7)),
+            MergingSideAction::DetachLoser(5)
+        );
+    }
+
+    #[test]
+    fn plan_merging_side_action_clamps_to_loser_count() {
+        // Defensive: if rollups disagree with reality we never claim to
+        // detach more than the loser actually has.
+        assert_eq!(
+            plan_merging_side_action(&merging_plan(2, 2, 1)),
+            MergingSideAction::DetachLoser(1)
+        );
+    }
+
+    #[test]
+    fn plan_merging_side_action_bails_when_winner_already_over_cap() {
+        let plan = merging_plan(1, 3, 0);
+        assert_eq!(
+            plan_merging_side_action(&plan),
+            MergingSideAction::PreExistingWinnerViolation {
+                winner_count: 3,
+                max: 1
+            }
+        );
+    }
+
+    #[test]
+    fn plan_merging_side_action_ignores_other_side_plans() {
         let plan = AssocPairPlan {
-            other_object_type_id: "2-192287471".to_string(),
+            other_object_type_id: "2-X".to_string(),
             other_object_label: "External Clips".to_string(),
             direction: AssocLimitDirection::OtherSide {
                 max: 1,
@@ -2389,11 +2575,251 @@ mod tests {
             loser_count: 50,
             winner_count: 0,
         };
-        assert_eq!(
-            evaluate_merging_side_cap(&plan, "Creator"),
-            MergingSideOutcome::Ok
+        assert_eq!(plan_merging_side_action(&plan), MergingSideAction::Noop);
+    }
+
+    #[test]
+    fn parse_creator_peer_ids_from_schema_returns_empty_when_no_associations() {
+        assert!(parse_creator_peer_ids_from_schema(&serde_json::json!({})).is_empty());
+        assert!(
+            parse_creator_peer_ids_from_schema(&serde_json::json!({ "associations": [] }))
+                .is_empty()
         );
     }
+
+    #[test]
+    fn parse_creator_peer_ids_from_schema_extracts_custom_and_standard_ids() {
+        let body = serde_json::json!({
+            "associations": [
+                { "fromObjectTypeId": "2-191972671", "toObjectTypeId": "0-1" },
+                { "fromObjectTypeId": "2-191972671", "toObjectTypeId": "2-192287471" },
+                { "fromObjectTypeId": "2-191972671", "toObjectTypeId": "0-46" }
+            ]
+        });
+        assert_eq!(
+            parse_creator_peer_ids_from_schema(&body),
+            vec![
+                "0-1".to_string(),
+                "2-192287471".to_string(),
+                "0-46".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_creator_peer_ids_from_schema_dedupes_repeated_to_ids() {
+        // HubSpot lists one entry per association *label*, so the same
+        // toObjectTypeId can appear multiple times. Make sure we collapse
+        // those so probes don't repeat needlessly.
+        let body = serde_json::json!({
+            "associations": [
+                { "toObjectTypeId": "0-1" },
+                { "toObjectTypeId": "0-1" },
+                { "toObjectTypeId": "0-46" }
+            ]
+        });
+        assert_eq!(
+            parse_creator_peer_ids_from_schema(&body),
+            vec!["0-1".to_string(), "0-46".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_creator_peer_ids_from_schema_skips_entries_without_to_id() {
+        let body = serde_json::json!({
+            "associations": [
+                { "fromObjectTypeId": "2-191972671" },
+                { "toObjectTypeId": "2-OK" }
+            ]
+        });
+        assert_eq!(
+            parse_creator_peer_ids_from_schema(&body),
+            vec!["2-OK".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_custom_object_label_map_empty_on_missing_results() {
+        assert!(parse_custom_object_label_map(&serde_json::json!({})).is_empty());
+    }
+
+    #[test]
+    fn parse_custom_object_label_map_prefers_plural_then_singular_then_name() {
+        let body = serde_json::json!({
+            "results": [
+                { "objectTypeId": "2-A", "labels": { "plural": "Send Link Actions" } },
+                { "objectTypeId": "2-B", "labels": { "singular": "Social Interaction" } },
+                { "objectTypeId": "2-C", "name": "public_video_project" }
+            ]
+        });
+        let map = parse_custom_object_label_map(&body);
+        assert_eq!(map.get("2-A").map(String::as_str), Some("Send Link Actions"));
+        assert_eq!(
+            map.get("2-B").map(String::as_str),
+            Some("Social Interaction")
+        );
+        assert_eq!(
+            map.get("2-C").map(String::as_str),
+            Some("public_video_project")
+        );
+    }
+
+    #[test]
+    fn parse_custom_object_label_map_skips_unusable_entries() {
+        let body = serde_json::json!({
+            "results": [
+                { "labels": { "plural": "No id" } },
+                { "objectTypeId": "2-NOLABEL" },
+                { "objectTypeId": "2-OK", "labels": { "plural": "Has Label" } }
+            ]
+        });
+        let map = parse_custom_object_label_map(&body);
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get("2-OK").map(String::as_str), Some("Has Label"));
+    }
+
+    #[test]
+    fn partition_by_overlap_empty_loser_returns_empty() {
+        let (overlap, only_on_loser) =
+            partition_by_overlap(&[], &["1".to_string()]);
+        assert!(overlap.is_empty());
+        assert!(only_on_loser.is_empty());
+    }
+
+    #[test]
+    fn partition_by_overlap_empty_winner_puts_everything_in_only_on_loser() {
+        let loser = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let (overlap, only_on_loser) = partition_by_overlap(&loser, &[]);
+        assert!(overlap.is_empty());
+        assert_eq!(only_on_loser, loser);
+    }
+
+    #[test]
+    fn partition_by_overlap_splits_correctly() {
+        let loser = vec![
+            "1".to_string(),
+            "2".to_string(),
+            "3".to_string(),
+            "4".to_string(),
+        ];
+        let winner = vec!["2".to_string(), "4".to_string(), "5".to_string()];
+        let (overlap, only_on_loser) = partition_by_overlap(&loser, &winner);
+        assert_eq!(overlap, vec!["2".to_string(), "4".to_string()]);
+        assert_eq!(only_on_loser, vec!["1".to_string(), "3".to_string()]);
+    }
+
+    #[test]
+    fn partition_by_overlap_preserves_loser_order() {
+        // Chunked HTTP batches downstream rely on stable order so the
+        // request body matches what we'd see if we logged the inputs.
+        let loser = vec!["z".to_string(), "a".to_string(), "m".to_string()];
+        let winner = vec!["a".to_string()];
+        let (overlap, only_on_loser) = partition_by_overlap(&loser, &winner);
+        assert_eq!(overlap, vec!["a".to_string()]);
+        assert_eq!(only_on_loser, vec!["z".to_string(), "m".to_string()]);
+    }
+
+    #[test]
+    fn build_pre_swap_archive_inputs_empty_slice() {
+        let inputs = build_pre_swap_archive_inputs(&[], "999");
+        assert!(inputs.is_empty());
+    }
+
+    #[test]
+    fn build_pre_swap_archive_inputs_single_record() {
+        let inputs = build_pre_swap_archive_inputs(&["111".to_string()], "999");
+        assert_eq!(
+            inputs,
+            vec![serde_json::json!({
+                "from": { "id": "111" },
+                "to": [{ "id": "999" }],
+            })]
+        );
+    }
+
+    #[test]
+    fn build_pre_swap_archive_inputs_multiple_records_preserves_order() {
+        let record_ids = vec!["1".to_string(), "2".to_string(), "3".to_string()];
+        let inputs = build_pre_swap_archive_inputs(&record_ids, "loser");
+        assert_eq!(inputs.len(), 3);
+        for (i, expected) in ["1", "2", "3"].iter().enumerate() {
+            assert_eq!(
+                inputs[i]["from"]["id"].as_str(),
+                Some(*expected),
+                "record at index {i}"
+            );
+            assert_eq!(inputs[i]["to"][0]["id"].as_str(), Some("loser"));
+        }
+    }
+
+    #[test]
+    fn build_pre_swap_create_inputs_empty_slice() {
+        let inputs = build_pre_swap_create_inputs(&[], "winner", 1, "HUBSPOT_DEFINED");
+        assert!(inputs.is_empty());
+    }
+
+    #[test]
+    fn build_pre_swap_create_inputs_single_record_hubspot_defined() {
+        let inputs = build_pre_swap_create_inputs(
+            &["clip-1".to_string()],
+            "winner",
+            297,
+            "HUBSPOT_DEFINED",
+        );
+        assert_eq!(
+            inputs,
+            vec![serde_json::json!({
+                "from": { "id": "clip-1" },
+                "to": { "id": "winner" },
+                "types": [{
+                    "associationCategory": "HUBSPOT_DEFINED",
+                    "associationTypeId": 297,
+                }],
+            })]
+        );
+    }
+
+    #[test]
+    fn build_pre_swap_create_inputs_user_defined_uses_provided_type() {
+        let inputs = build_pre_swap_create_inputs(
+            &["clip-1".to_string()],
+            "winner",
+            148,
+            "USER_DEFINED",
+        );
+        assert_eq!(
+            inputs[0]["types"][0]["associationCategory"].as_str(),
+            Some("USER_DEFINED")
+        );
+        assert_eq!(
+            inputs[0]["types"][0]["associationTypeId"].as_u64(),
+            Some(148)
+        );
+    }
+
+    #[test]
+    fn build_pre_swap_create_inputs_shape_uses_types_not_associationtypes() {
+        // The v4 batch create endpoint expects `types`. Earlier iterations of
+        // this code used `associationTypes` (the read shape) which is rejected
+        // by HubSpot. Lock the shape in so we never regress.
+        let inputs = build_pre_swap_create_inputs(
+            &["1".to_string()],
+            "winner",
+            1,
+            "HUBSPOT_DEFINED",
+        );
+        assert!(inputs[0].get("types").is_some());
+        assert!(inputs[0].get("associationTypes").is_none());
+    }
+
+    #[test]
+    fn build_pre_swap_create_inputs_multiple_records_share_one_type_array() {
+        let record_ids = vec!["a".to_string(), "b".to_string()];
+        let inputs = build_pre_swap_create_inputs(&record_ids, "winner", 5, "HUBSPOT_DEFINED");
+        assert_eq!(inputs.len(), 2);
+        assert_eq!(inputs[0]["types"], inputs[1]["types"]);
+    }
+
     #[test]
     fn test_combine_multi_file_value() {
         assert_eq!(combine_multi_file_value("", ""), "");

@@ -32,13 +32,26 @@
 
 /**
  * Per-peer entry returned by the Rust command after a successful
- * pre-swap-then-merge. `count` is the number of records moved from
- * loser to winner for that peer object type.
+ * pre-swap-then-merge. `count` is the number of *new* winner-side
+ * associations the workaround created (i.e. excluding records that were
+ * already on the winner before the pre-swap ran). The remaining fields
+ * are diagnostic-only and may be absent on older payloads:
+ *
+ * - `loserBefore`: total peer records associated to the loser before
+ *   the workaround ran.
+ * - `overlap`: records that were already on the winner; archived from
+ *   the loser-side only (no winner-side create needed).
+ * - `detachedFromLoser`: records archived from the loser to bring the
+ *   `Creator → peer` cap into compliance. These records lose their
+ *   Creator link entirely (the winner's own records take priority).
  */
 export interface Reassignment {
   objectTypeId: string;
   objectTypeLabel: string;
   count: number;
+  loserBefore?: number;
+  overlap?: number;
+  detachedFromLoser?: number;
 }
 
 /**
@@ -68,31 +81,51 @@ export function isAssociationLimitError(message: string | null | undefined): boo
 
 /**
  * Build the one-line summary used in the success banner and the
- * `duplicate_pair_events` payload after a workaround merge. Produces:
+ * `duplicate_pair_events` payload after a workaround merge. Combines:
  *
- *   "Reassigned 47 External Clips and 3 Contacts before merging."
+ *   * Reassignments — records moved from loser to winner.
+ *     "Reassigned 47 External Clips and 3 Contacts before merging."
+ *   * Detachments — loser records dropped to honour a `Creator → peer`
+ *     cap. The winner's records always take priority, so the loser's
+ *     overflow loses its Creator link.
+ *     "Detached 1 Deals from the loser to honour per-Creator caps."
  *
- * Returns `null` when there's nothing to report (no peers reassigned),
- * so the caller can decide whether to render any banner at all.
+ * Both sentences are concatenated when both are non-empty. Returns
+ * `null` only when there is nothing of either kind to report, so the
+ * caller can decide whether to render any banner at all.
  */
 export function formatReassignmentSummary(
   reassignments: readonly Reassignment[],
 ): string | null {
-  const items = reassignments.filter((r) => r.count > 0);
-  if (items.length === 0) return null;
+  const moved = reassignments.filter((r) => r.count > 0);
+  const detached = reassignments.filter((r) => (r.detachedFromLoser ?? 0) > 0);
 
-  const parts = items.map((r) => `${r.count} ${r.objectTypeLabel}`);
-  let joined: string;
-  if (parts.length === 1) {
-    joined = parts[0];
-  } else if (parts.length === 2) {
-    joined = `${parts[0]} and ${parts[1]}`;
-  } else {
-    // Oxford comma — three-or-more peers reassigned in the same merge
-    // is rare, but reads cleaner than a trailing-and join.
-    joined = `${parts.slice(0, -1).join(", ")}, and ${parts[parts.length - 1]}`;
+  const sentences: string[] = [];
+  if (moved.length > 0) {
+    sentences.push(`Reassigned ${joinPeerCounts(moved, (r) => r.count)} before merging.`);
   }
-  return `Reassigned ${joined} before merging.`;
+  if (detached.length > 0) {
+    const labels = joinPeerCounts(detached, (r) => r.detachedFromLoser ?? 0);
+    sentences.push(`Detached ${labels} from the loser to honour per-Creator caps.`);
+  }
+  if (sentences.length === 0) return null;
+  return sentences.join(" ");
+}
+
+/**
+ * Join `"N Label"` fragments for a list of peer entries using an Oxford
+ * comma for three-or-more peers, a plain "and" for two, and a bare
+ * fragment for one. Extracted so reassignment and detachment summaries
+ * format identically.
+ */
+function joinPeerCounts(
+  items: readonly Reassignment[],
+  getCount: (r: Reassignment) => number,
+): string {
+  const parts = items.map((r) => `${getCount(r)} ${r.objectTypeLabel}`);
+  if (parts.length === 1) return parts[0];
+  if (parts.length === 2) return `${parts[0]} and ${parts[1]}`;
+  return `${parts.slice(0, -1).join(", ")}, and ${parts[parts.length - 1]}`;
 }
 
 /**
