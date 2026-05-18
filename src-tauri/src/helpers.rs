@@ -1271,6 +1271,90 @@ pub(crate) fn safe_storage_filename(name: &str) -> String {
         .collect()
 }
 
+/// HubSpot Files v3 endpoint for fetching a short-lived signed download URL.
+/// Private files (the default access level for License/Traceability uploads)
+/// return 401/403 when their `url` field is hit unauthenticated, so the
+/// backup flow must round-trip through this endpoint to get bytes.
+///
+/// `expiration_seconds` is clamped client-side because HubSpot rejects
+/// values outside `[1, 604800]` with a 400; defaulting to 60s keeps the
+/// signed URL alive long enough for a single download but short enough that
+/// a leaked URL is mostly harmless.
+pub(crate) fn hubspot_signed_url_endpoint(
+    file_id: &str,
+    expiration_seconds: u32,
+) -> String {
+    let clamped = expiration_seconds.clamp(1, 604_800);
+    format!(
+        "https://api.hubapi.com/files/v3/files/{}/signed-url?expirationSeconds={}",
+        file_id.trim(),
+        clamped
+    )
+}
+
+/// Supabase storage object endpoint used to PUT/POST the bytes we backed up
+/// from HubSpot. Extracted so the URL assembly is testable without spinning
+/// up a network client and so a stray trailing slash on `VITE_SUPABASE_URL`
+/// doesn't create a `//storage` path that some Supabase deployments reject.
+pub(crate) fn storage_object_url(
+    supabase_url: &str,
+    bucket: &str,
+    object_path: &str,
+) -> String {
+    let base = supabase_url.trim().trim_end_matches('/');
+    let bucket = bucket.trim().trim_matches('/');
+    let object = object_path.trim().trim_start_matches('/');
+    format!("{}/storage/v1/object/{}/{}", base, bucket, object)
+}
+
+/// Best-effort MIME type for a file extension.
+///
+/// HubSpot's `/files/v3/files/{id}` metadata endpoint exposes a `type` field
+/// (`IMG`, `DOCUMENT`, `MOVIE`, `AUDIO`, `OTHER`) that is a **category**, not
+/// a MIME type — sending `"IMG"` as `Content-Type` to Supabase Storage
+/// triggers a 415 `invalid_mime_type` rejection (observed in production
+/// against `creator-merge-files` for `.png` license-file backups). So we
+/// derive the Content-Type from the file extension instead. The list covers
+/// the actual extensions creator license / traceability files use today
+/// (screenshots, scanned PDFs, the occasional doc/video) and defaults to
+/// `application/octet-stream` for anything else so Supabase still accepts the
+/// upload as raw bytes.
+pub(crate) fn mime_from_extension(extension: &str) -> &'static str {
+    match extension.trim().trim_start_matches('.').to_ascii_lowercase().as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "bmp" => "image/bmp",
+        "heic" => "image/heic",
+        "tiff" | "tif" => "image/tiff",
+        "pdf" => "application/pdf",
+        "doc" => "application/msword",
+        "docx" => {
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        }
+        "xls" => "application/vnd.ms-excel",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "ppt" => "application/vnd.ms-powerpoint",
+        "pptx" => {
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        }
+        "txt" => "text/plain",
+        "csv" => "text/csv",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "zip" => "application/zip",
+        "mp4" => "video/mp4",
+        "mov" => "video/quicktime",
+        "webm" => "video/webm",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "" => "application/octet-stream",
+        _ => "application/octet-stream",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2837,5 +2921,132 @@ mod tests {
         assert_eq!(safe_storage_filename("hello world!.mp4"), "hello_world_.mp4");
         assert_eq!(safe_storage_filename("special/chars?\\"), "special_chars__");
         assert_eq!(safe_storage_filename("valid_name-1.2.3"), "valid_name-1.2.3");
+    }
+
+    // ── hubspot_signed_url_endpoint ─────────────────────────────────────
+
+    #[test]
+    fn signed_url_endpoint_uses_default_expiration_when_in_range() {
+        assert_eq!(
+            hubspot_signed_url_endpoint("12345", 60),
+            "https://api.hubapi.com/files/v3/files/12345/signed-url?expirationSeconds=60"
+        );
+    }
+
+    #[test]
+    fn signed_url_endpoint_trims_whitespace_in_file_id() {
+        // Defensive: the file id comes from HubSpot property values that
+        // were originally split on `[;,\s]+` in the frontend. A stray
+        // newline at the boundary would otherwise corrupt the URL.
+        assert_eq!(
+            hubspot_signed_url_endpoint("  98765\n", 60),
+            "https://api.hubapi.com/files/v3/files/98765/signed-url?expirationSeconds=60"
+        );
+    }
+
+    #[test]
+    fn signed_url_endpoint_clamps_expiration_to_hubspot_bounds() {
+        // HubSpot rejects expirationSeconds outside [1, 604800] with a 400.
+        // We clamp client-side so a programmer typo can't break the backup.
+        assert!(
+            hubspot_signed_url_endpoint("1", 0).ends_with("expirationSeconds=1"),
+            "zero must clamp up to 1"
+        );
+        assert!(
+            hubspot_signed_url_endpoint("1", 999_999_999).ends_with("expirationSeconds=604800"),
+            "huge values must clamp down to 1 week"
+        );
+    }
+
+    // ── storage_object_url ──────────────────────────────────────────────
+
+    #[test]
+    fn storage_object_url_assembles_canonical_path() {
+        assert_eq!(
+            storage_object_url(
+                "https://abc.supabase.co",
+                "creator-merge-files",
+                "pair_key/a/123_file.pdf"
+            ),
+            "https://abc.supabase.co/storage/v1/object/creator-merge-files/pair_key/a/123_file.pdf"
+        );
+    }
+
+    #[test]
+    fn storage_object_url_tolerates_trailing_slash_on_supabase_url() {
+        // VITE_SUPABASE_URL often arrives with or without a trailing slash
+        // depending on how the .env was filled in; both must produce the
+        // same URL because Supabase Storage returns 404 for `//storage/...`.
+        let with = storage_object_url(
+            "https://abc.supabase.co/",
+            "creator-merge-files",
+            "p/a/f.pdf",
+        );
+        let without = storage_object_url(
+            "https://abc.supabase.co",
+            "creator-merge-files",
+            "p/a/f.pdf",
+        );
+        assert_eq!(with, without);
+    }
+
+    #[test]
+    fn storage_object_url_strips_stray_slashes_around_bucket_and_path() {
+        assert_eq!(
+            storage_object_url(
+                "https://abc.supabase.co",
+                "/creator-merge-files/",
+                "/p/a/f.pdf"
+            ),
+            "https://abc.supabase.co/storage/v1/object/creator-merge-files/p/a/f.pdf"
+        );
+    }
+
+    // ── mime_from_extension ─────────────────────────────────────────────
+
+    #[test]
+    fn mime_from_extension_handles_common_image_types() {
+        // Regression for the production failure: a `.png` license file's
+        // upload was rejected because we previously sent HubSpot's category
+        // (`"IMG"`) as the Content-Type. Anything we'd realistically attach
+        // to a creator must map to a real MIME so Supabase accepts the bytes.
+        assert_eq!(mime_from_extension("png"), "image/png");
+        assert_eq!(mime_from_extension("jpg"), "image/jpeg");
+        assert_eq!(mime_from_extension("jpeg"), "image/jpeg");
+        assert_eq!(mime_from_extension("webp"), "image/webp");
+        assert_eq!(mime_from_extension("gif"), "image/gif");
+    }
+
+    #[test]
+    fn mime_from_extension_is_case_insensitive_and_tolerates_leading_dot() {
+        // HubSpot reports `extension` without a leading dot, but callers
+        // (or future call sites) might pass `".PDF"` — both forms must work.
+        assert_eq!(mime_from_extension("PDF"), "application/pdf");
+        assert_eq!(mime_from_extension(".pdf"), "application/pdf");
+        assert_eq!(mime_from_extension(".PnG"), "image/png");
+    }
+
+    #[test]
+    fn mime_from_extension_handles_docs_and_office_formats() {
+        assert_eq!(mime_from_extension("pdf"), "application/pdf");
+        assert_eq!(
+            mime_from_extension("docx"),
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        );
+        assert_eq!(mime_from_extension("doc"), "application/msword");
+    }
+
+    #[test]
+    fn mime_from_extension_defaults_to_octet_stream_for_unknown_or_empty() {
+        // Defaulting to a real MIME (instead of returning Option / panic) is
+        // deliberate: Supabase Storage accepts `application/octet-stream` as
+        // raw bytes, which is strictly better than failing the backup over
+        // an extension we don't know yet.
+        assert_eq!(
+            mime_from_extension("not-a-real-extension"),
+            "application/octet-stream"
+        );
+        assert_eq!(mime_from_extension(""), "application/octet-stream");
+        assert_eq!(mime_from_extension("   "), "application/octet-stream");
     }
 }

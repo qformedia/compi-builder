@@ -69,6 +69,28 @@ export async function backupMergeFiles(
     items,
   });
 
+  logFailedBackups(files);
   const failedCount = files.filter(f => f.status === "failed").length;
   return { files, failedCount };
+}
+
+/**
+ * Console-log every failed entry returned by `backup_hubspot_files_to_supabase`
+ * so the cause is visible in DevTools without having to query the
+ * `duplicate_pair_resolutions_snapshots.backed_up_files` audit column.
+ *
+ * The user-visible warning banner intentionally stays a one-liner with just a
+ * count — engineers reading the console can immediately tell which file failed
+ * and why (HubSpot 404, signed-url failure, Supabase upload error, etc.).
+ */
+function logFailedBackups(files: readonly BackedUpFile[]): void {
+  for (const file of files) {
+    if (file.status !== "failed") continue;
+    console.error(
+      `[duplicates] backup failed for HubSpot file ${file.hubspotFileId}` +
+        ` (side=${file.side}, property=${file.property}` +
+        (file.name ? `, name=${file.name}` : "") +
+        `): ${file.error ?? "<no error string>"}`,
+    );
+  }
 }

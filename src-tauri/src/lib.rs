@@ -2786,6 +2786,82 @@ pub struct BackedUpFile {
     pub error: Option<String>,
 }
 
+/// Mutable record threaded through the per-file backup pipeline. We collect
+/// any metadata we manage to recover (name, mime, size, storage path, signed
+/// URL) so that even a failure row is useful in the audit log and in DevTools.
+/// `finish_ok` / `finish_failed` consume this and produce the final
+/// `BackedUpFile` we return to the caller.
+struct BackupState {
+    side: String,
+    property: String,
+    file_id: String,
+    name: Option<String>,
+    extension: Option<String>,
+    mime: Option<String>,
+    size: Option<u64>,
+    storage_path: Option<String>,
+    hubspot_url: Option<String>,
+}
+
+impl BackupState {
+    fn new(item: &BackupItem) -> Self {
+        Self {
+            side: item.side.clone(),
+            property: item.property.clone(),
+            file_id: item.file_id.clone(),
+            name: None,
+            extension: None,
+            mime: None,
+            size: None,
+            storage_path: None,
+            hubspot_url: None,
+        }
+    }
+
+    fn finish_failed(self, error: impl Into<String>) -> BackedUpFile {
+        BackedUpFile {
+            side: self.side,
+            property: self.property,
+            hubspot_file_id: self.file_id,
+            name: self.name,
+            extension: self.extension,
+            mime: self.mime,
+            size: self.size,
+            storage_path: self.storage_path,
+            hubspot_url: self.hubspot_url,
+            status: "failed".to_string(),
+            error: Some(error.into()),
+        }
+    }
+
+    fn finish_ok(self) -> BackedUpFile {
+        BackedUpFile {
+            side: self.side,
+            property: self.property,
+            hubspot_file_id: self.file_id,
+            name: self.name,
+            extension: self.extension,
+            mime: self.mime,
+            size: self.size,
+            storage_path: self.storage_path,
+            hubspot_url: self.hubspot_url,
+            status: "ok".to_string(),
+            error: None,
+        }
+    }
+}
+
+/// Outcome of `backup_one_file`. `Skipped` is for files that no longer exist
+/// in HubSpot File Manager (404 on the metadata fetch). The property still
+/// references a stale id, but the user-facing record being lost is the file
+/// itself, not our backup, so we omit it from the result list entirely
+/// instead of inflating `failedCount`. Mirrors the benign-skip behaviour of
+/// the sibling `fetch_hubspot_files_metadata` helper.
+enum BackupOutcome {
+    Done(BackedUpFile),
+    Skipped,
+}
+
 #[tauri::command]
 async fn backup_hubspot_files_to_supabase(
     token: String,
@@ -2801,166 +2877,210 @@ async fn backup_hubspot_files_to_supabase(
         .map_err(|e| format!("Network error: {e}"))?;
 
     let mut results = Vec::new();
-
     for item in items {
-        let meta_url = format!("https://api.hubapi.com/files/v3/files/{}", item.file_id);
-        
-        let meta_res = match client.get(&meta_url).bearer_auth(&token).send().await {
-            Ok(res) => res,
-            Err(e) => {
-                results.push(BackedUpFile {
-                    side: item.side.clone(),
-                    property: item.property.clone(),
-                    hubspot_file_id: item.file_id.clone(),
-                    name: None, extension: None, mime: None, size: None, storage_path: None, hubspot_url: None,
-                    status: "failed".to_string(),
-                    error: Some(format!("HubSpot meta fetch failed: {}", e)),
-                });
-                continue;
-            }
-        };
-
-        if !meta_res.status().is_success() {
-            let status = meta_res.status();
-            results.push(BackedUpFile {
-                side: item.side.clone(),
-                property: item.property.clone(),
-                hubspot_file_id: item.file_id.clone(),
-                name: None, extension: None, mime: None, size: None, storage_path: None, hubspot_url: None,
-                status: "failed".to_string(),
-                error: Some(format!("HubSpot file lookup error ({}): {}", status, meta_res.text().await.unwrap_or_default())),
-            });
-            continue;
+        match backup_one_file(
+            &client,
+            &token,
+            &supabase_url,
+            &supabase_anon_key,
+            &bucket,
+            &pair_key,
+            item,
+        )
+        .await
+        {
+            BackupOutcome::Done(entry) => results.push(entry),
+            BackupOutcome::Skipped => {}
         }
-
-        let meta_json: serde_json::Value = match meta_res.json().await {
-            Ok(json) => json,
-            Err(e) => {
-                results.push(BackedUpFile {
-                    side: item.side.clone(),
-                    property: item.property.clone(),
-                    hubspot_file_id: item.file_id.clone(),
-                    name: None, extension: None, mime: None, size: None, storage_path: None, hubspot_url: None,
-                    status: "failed".to_string(),
-                    error: Some(format!("Failed to parse HubSpot file {}: {}", item.file_id, e)),
-                });
-                continue;
-            }
-        };
-
-        let name = meta_json.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let extension = meta_json.get("extension").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let size = meta_json.get("size").and_then(|v| v.as_u64());
-        let hubspot_url = meta_json.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-        let mime = meta_json.get("type").and_then(|v| v.as_str()).unwrap_or("application/octet-stream").to_string();
-
-        let safe_name = helpers::safe_storage_filename(&name);
-        let storage_path = format!("{}/{}/{}_{}.{}", pair_key, item.side, item.file_id, safe_name, extension);
-
-        if hubspot_url.is_empty() {
-            results.push(BackedUpFile {
-                side: item.side.clone(),
-                property: item.property.clone(),
-                hubspot_file_id: item.file_id.clone(),
-                name: Some(name), extension: Some(extension), mime: Some(mime), size, storage_path: None, hubspot_url: None,
-                status: "failed".to_string(),
-                error: Some("HubSpot returned empty URL".to_string()),
-            });
-            continue;
-        }
-
-        let bytes_res = match client.get(&hubspot_url).send().await {
-            Ok(res) => res,
-            Err(e) => {
-                results.push(BackedUpFile {
-                    side: item.side.clone(),
-                    property: item.property.clone(),
-                    hubspot_file_id: item.file_id.clone(),
-                    name: Some(name), extension: Some(extension), mime: Some(mime), size, storage_path: None, hubspot_url: Some(hubspot_url),
-                    status: "failed".to_string(),
-                    error: Some(format!("Failed to download from HubSpot URL: {}", e)),
-                });
-                continue;
-            }
-        };
-
-        if !bytes_res.status().is_success() {
-            let status = bytes_res.status();
-            results.push(BackedUpFile {
-                side: item.side.clone(),
-                property: item.property.clone(),
-                hubspot_file_id: item.file_id.clone(),
-                name: Some(name), extension: Some(extension), mime: Some(mime), size, storage_path: None, hubspot_url: Some(hubspot_url),
-                status: "failed".to_string(),
-                error: Some(format!("HubSpot download error ({}): {}", status, bytes_res.text().await.unwrap_or_default())),
-            });
-            continue;
-        }
-
-        let bytes = match bytes_res.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                results.push(BackedUpFile {
-                    side: item.side.clone(),
-                    property: item.property.clone(),
-                    hubspot_file_id: item.file_id.clone(),
-                    name: Some(name), extension: Some(extension), mime: Some(mime), size, storage_path: None, hubspot_url: Some(hubspot_url),
-                    status: "failed".to_string(),
-                    error: Some(format!("Failed to read bytes: {}", e)),
-                });
-                continue;
-            }
-        };
-
-        let sb_url = format!("{}/storage/v1/object/{}/{}", supabase_url, bucket, storage_path);
-        let sb_res = match client.post(&sb_url)
-            .bearer_auth(&supabase_anon_key)
-            .header("Content-Type", &mime)
-            .body(bytes)
-            .send().await {
-                Ok(res) => res,
-                Err(e) => {
-                    results.push(BackedUpFile {
-                        side: item.side.clone(),
-                        property: item.property.clone(),
-                        hubspot_file_id: item.file_id.clone(),
-                        name: Some(name), extension: Some(extension), mime: Some(mime), size, storage_path: Some(storage_path), hubspot_url: Some(hubspot_url),
-                        status: "failed".to_string(),
-                        error: Some(format!("Supabase upload failed: {}", e)),
-                    });
-                    continue;
-                }
-            };
-
-        if !sb_res.status().is_success() {
-            let status = sb_res.status();
-            results.push(BackedUpFile {
-                side: item.side.clone(),
-                property: item.property.clone(),
-                hubspot_file_id: item.file_id.clone(),
-                name: Some(name), extension: Some(extension), mime: Some(mime), size, storage_path: Some(storage_path), hubspot_url: Some(hubspot_url),
-                status: "failed".to_string(),
-                error: Some(format!("Supabase upload error ({}): {}", status, sb_res.text().await.unwrap_or_default())),
-            });
-            continue;
-        }
-
-        results.push(BackedUpFile {
-            side: item.side,
-            property: item.property,
-            hubspot_file_id: item.file_id,
-            name: Some(name),
-            extension: Some(extension),
-            mime: Some(mime),
-            size,
-            storage_path: Some(storage_path),
-            hubspot_url: Some(hubspot_url),
-            status: "ok".to_string(),
-            error: None,
-        });
     }
 
     Ok(results)
+}
+
+async fn backup_one_file(
+    client: &reqwest::Client,
+    token: &str,
+    supabase_url: &str,
+    supabase_anon_key: &str,
+    bucket: &str,
+    pair_key: &str,
+    item: BackupItem,
+) -> BackupOutcome {
+    let mut state = BackupState::new(&item);
+
+    let meta_url = format!("https://api.hubapi.com/files/v3/files/{}", item.file_id);
+    let meta_res = match client.get(&meta_url).bearer_auth(token).send().await {
+        Ok(res) => res,
+        Err(e) => {
+            return BackupOutcome::Done(
+                state.finish_failed(format!("HubSpot meta fetch failed: {}", e)),
+            );
+        }
+    };
+
+    if meta_res.status() == reqwest::StatusCode::NOT_FOUND {
+        return BackupOutcome::Skipped;
+    }
+    if !meta_res.status().is_success() {
+        let status = meta_res.status();
+        let body = meta_res.text().await.unwrap_or_default();
+        return BackupOutcome::Done(
+            state.finish_failed(format!("HubSpot file lookup error ({}): {}", status, body)),
+        );
+    }
+
+    let meta_json: serde_json::Value = match meta_res.json().await {
+        Ok(json) => json,
+        Err(e) => {
+            return BackupOutcome::Done(
+                state.finish_failed(format!(
+                    "Failed to parse HubSpot file {}: {}",
+                    item.file_id, e
+                )),
+            );
+        }
+    };
+
+    let name = meta_json
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let extension = meta_json
+        .get("extension")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let size = meta_json.get("size").and_then(|v| v.as_u64());
+    // HubSpot's `type` field is a CATEGORY (`IMG`, `DOCUMENT`, `MOVIE`,
+    // `AUDIO`, `OTHER`) — not a MIME type. Sending it as Content-Type was
+    // the actual cause of the previously-mysterious "Could not back up
+    // 1 file(s)" failures (Supabase rejected `Content-Type: IMG` with HTTP
+    // 415 `invalid_mime_type`). Derive a real MIME from the extension
+    // instead; falls back to `application/octet-stream` for unknown types.
+    let mime = helpers::mime_from_extension(&extension).to_string();
+
+    state.name = Some(name.clone());
+    state.extension = Some(extension.clone());
+    state.mime = Some(mime.clone());
+    state.size = size;
+
+    let safe_name = helpers::safe_storage_filename(&name);
+    let storage_path = format!(
+        "{}/{}/{}_{}.{}",
+        pair_key, item.side, item.file_id, safe_name, extension
+    );
+    state.storage_path = Some(storage_path.clone());
+
+    // Always round-trip through `/signed-url` instead of using the raw `url`
+    // field. Private files (the default for License/Traceability uploads)
+    // return 401/403 if hit unauthenticated, and even public files work via
+    // this path — so there's no benefit to forking the logic on access level.
+    let signed_url = match fetch_hubspot_signed_url(client, token, &item.file_id).await {
+        Ok(url) => url,
+        Err(e) => return BackupOutcome::Done(state.finish_failed(e)),
+    };
+    state.hubspot_url = Some(signed_url.clone());
+
+    let bytes_res = match client.get(&signed_url).send().await {
+        Ok(res) => res,
+        Err(e) => {
+            return BackupOutcome::Done(
+                state.finish_failed(format!("Failed to download from HubSpot URL: {}", e)),
+            );
+        }
+    };
+    if !bytes_res.status().is_success() {
+        let status = bytes_res.status();
+        let body = bytes_res.text().await.unwrap_or_default();
+        return BackupOutcome::Done(
+            state.finish_failed(format!("HubSpot download error ({}): {}", status, body)),
+        );
+    }
+
+    let bytes = match bytes_res.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            return BackupOutcome::Done(
+                state.finish_failed(format!("Failed to read bytes: {}", e)),
+            );
+        }
+    };
+
+    let sb_url = helpers::storage_object_url(supabase_url, bucket, &storage_path);
+    // Auth uses BOTH the Bearer header and the `apikey` header. The
+    // `apikey` header is the only one Supabase Storage understands for the
+    // new publishable-key format (`sb_publishable_*`), which is NOT a JWT
+    // and would otherwise fail Bearer auth with `Invalid Compact JWS`.
+    // Legacy JWT anon keys (`eyJ…`) still work because Bearer is parsed
+    // first when present. Mirrors the sibling pattern in `minimiki.rs`.
+    //
+    // `x-upsert: true` lets us safely retry a merge for the same pair_key
+    // without 409 "The resource already exists" from Supabase Storage.
+    let sb_res = match client
+        .post(&sb_url)
+        .bearer_auth(supabase_anon_key)
+        .header("apikey", supabase_anon_key)
+        .header("Content-Type", &mime)
+        .header("x-upsert", "true")
+        .body(bytes)
+        .send()
+        .await
+    {
+        Ok(res) => res,
+        Err(e) => {
+            return BackupOutcome::Done(
+                state.finish_failed(format!("Supabase upload failed: {}", e)),
+            );
+        }
+    };
+    if !sb_res.status().is_success() {
+        let status = sb_res.status();
+        let body = sb_res.text().await.unwrap_or_default();
+        return BackupOutcome::Done(
+            state.finish_failed(format!("Supabase upload error ({}): {}", status, body)),
+        );
+    }
+
+    BackupOutcome::Done(state.finish_ok())
+}
+
+/// Request a short-lived signed download URL for a HubSpot file.
+/// Centralised so the request shape (endpoint, auth, JSON parsing, error
+/// strings) lives in one place and the call sites stay readable.
+async fn fetch_hubspot_signed_url(
+    client: &reqwest::Client,
+    token: &str,
+    file_id: &str,
+) -> Result<String, String> {
+    let endpoint = helpers::hubspot_signed_url_endpoint(file_id, 60);
+    let res = client
+        .get(&endpoint)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| format!("HubSpot signed-url request failed: {}", e))?;
+    if !res.status().is_success() {
+        let status = res.status();
+        let body = res.text().await.unwrap_or_default();
+        return Err(format!(
+            "HubSpot signed-url error ({}): {}",
+            status, body
+        ));
+    }
+    let json: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse HubSpot signed-url response: {}", e))?;
+    let url = json
+        .get("url")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    if url.is_empty() {
+        return Err("HubSpot signed-url response had empty url".to_string());
+    }
+    Ok(url)
 }
 
 fn extension_from_mime(mime: &str) -> &'static str {
