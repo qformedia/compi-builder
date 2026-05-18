@@ -1335,36 +1335,15 @@ export function DuplicatePairDetail({
                       <>
                         All data from <span className="font-medium text-foreground">{loserName}</span>{" "}
                         will be merged into{" "}
-                        <span className="font-medium text-foreground">{winnerName}</span>.
+                        <span className="font-medium text-foreground">{winnerName}</span>.{" "}
+                        <span className="font-medium text-foreground">{loserName}</span> will be
+                        archived. This cannot be undone.
                       </>
                     ) : (
                       "Pick a winner first."
                     )}
                   </DialogDescription>
                 </DialogHeader>
-                <ul className="space-y-1.5 text-xs text-muted-foreground">
-                  <li>
-                    <span className="font-medium text-foreground">Conflicting field values:</span>{" "}
-                    kept from {winnerName || "the winner"}.
-                  </li>
-                  <li>
-                    <span className="font-medium text-foreground">Empty winner fields:</span>{" "}
-                    filled from {loserName || "the loser"}.
-                  </li>
-                  <li>
-                    <span className="font-medium text-foreground">Create date:</span>{" "}
-                    the older create date is kept, regardless of which record wins.
-                  </li>
-                  <li>
-                    <span className="font-medium text-foreground">All associations</span> (Contacts,
-                    External Clips, Video Projects, Send Link Actions, Social Interactions, Public
-                    Video Projects) move to {winnerName || "the winner"}.
-                  </li>
-                  <li>
-                    <span className="font-medium text-foreground">{loserName || "The loser"}</span>{" "}
-                    will be archived in HubSpot. <span className="font-medium">This cannot be undone.</span>
-                  </li>
-                </ul>
                 {mergePhase === "fallback" && (
                   <div className="flex flex-wrap items-start gap-2 rounded-md border border-amber-300 bg-amber-50/70 px-3 py-2 text-xs text-amber-900">
                     <Loader2 className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 animate-spin" />
