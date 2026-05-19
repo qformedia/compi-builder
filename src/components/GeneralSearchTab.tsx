@@ -144,6 +144,82 @@ function SearchTypeToggle({
   );
 }
 
+const PlatformIcon = ({ platform, className }: { platform: string; className?: string }) =>
+  platform === "instagram"
+    ? <Instagram className={className ?? "h-4 w-4 text-pink-500"} />
+    : <Music2 className={className ?? "h-4 w-4 text-cyan-500"} />;
+
+/**
+ * Lets the user verify a creator handle without opening the heavy Instagram
+ * profile page in their default browser. Instagram profile pages are known
+ * to leak memory in Chrome; the popover shows the resolved name, thumbnail,
+ * caption, and metrics so most verifications can stay in-app. The external
+ * profile link is kept as a deemphasized escape hatch.
+ */
+function HandleVerifyPopover({ entry }: { entry: ClipEntry }) {
+  const { handle, displayName, profileUrl, thumbnail, caption, likes, views, comments, platform } = entry;
+  const hasMetrics = likes != null || views != null || comments != null;
+
+  return (
+    <Popover>
+      <PopoverTrigger asChild>
+        <button
+          type="button"
+          className="text-xs font-medium hover:underline cursor-pointer truncate max-w-[120px] text-left"
+          title={`Verify @${handle}`}
+        >
+          @{handle}
+        </button>
+      </PopoverTrigger>
+      <PopoverContent className="w-72 p-3" align="start">
+        <div className="flex gap-2.5">
+          <div className="w-14 h-14 rounded bg-muted flex-shrink-0 overflow-hidden flex items-center justify-center">
+            {thumbnail ? (
+              <img src={thumbnail} alt="" className="h-full w-full object-cover" />
+            ) : (
+              <PlatformIcon platform={platform} className="h-5 w-5 text-muted-foreground" />
+            )}
+          </div>
+          <div className="min-w-0 flex-1 space-y-0.5">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <PlatformIcon platform={platform} className="h-3.5 w-3.5 flex-shrink-0" />
+              <span className="text-sm font-medium truncate">@{handle}</span>
+            </div>
+            {displayName && (
+              <p className="text-[11px] text-muted-foreground truncate">{displayName}</p>
+            )}
+            {hasMetrics && (
+              <div className="flex flex-wrap gap-x-2 text-[10px] text-muted-foreground">
+                {likes != null && <span>{likes.toLocaleString()} likes</span>}
+                {views != null && <span>{views.toLocaleString()} views</span>}
+                {comments != null && <span>{comments.toLocaleString()} comments</span>}
+              </div>
+            )}
+          </div>
+        </div>
+        {caption && (
+          <p className="mt-2 text-[11px] text-muted-foreground line-clamp-3 leading-snug whitespace-pre-wrap">
+            {caption}
+          </p>
+        )}
+        {profileUrl && (
+          <div className="mt-3 flex items-center justify-end border-t pt-2">
+            <button
+              type="button"
+              onClick={() => openUrl(profileUrl)}
+              className="inline-flex items-center gap-1 text-[10px] text-muted-foreground hover:text-foreground cursor-pointer"
+              title="Open profile in your default browser"
+            >
+              <ExternalLink className="h-3 w-3" />
+              Open profile externally
+            </button>
+          </div>
+        )}
+      </PopoverContent>
+    </Popover>
+  );
+}
+
 export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
   const [rawUrls, setRawUrls] = useState("");
   const [entries, setEntries] = useState<ClipEntry[]>([]);
@@ -936,11 +1012,6 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
   const metricsDone = entries.filter((e) => e.metricStatus === "done").length;
   const metricsFailed = entries.filter((e) => e.metricStatus === "failed").length;
 
-  const PlatformIcon = ({ platform }: { platform: string }) =>
-    platform === "instagram"
-      ? <Instagram className="h-4 w-4 text-pink-500" />
-      : <Music2 className="h-4 w-4 text-cyan-500" />;
-
   const StatusBadge = ({ status }: { status: CreatorStatus }) => {
     switch (status) {
       case "resolving":
@@ -1416,13 +1487,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
                     ) : (
                       <>
                         {entry.handle ? (
-                          <button
-                            onClick={() => entry.profileUrl && openUrl(entry.profileUrl)}
-                            className="text-xs font-medium hover:underline cursor-pointer truncate max-w-[120px]"
-                            title={entry.profileUrl ?? undefined}
-                          >
-                            @{entry.handle}
-                          </button>
+                          <HandleVerifyPopover entry={entry} />
                         ) : (
                           <span className="text-xs text-muted-foreground italic">unknown</span>
                         )}

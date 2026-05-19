@@ -786,11 +786,7 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
                 </button>
                 <span className="text-border">|</span>
                 <button
-                  onClick={() => {
-                    let url = selectedClip.link;
-                    if (url.includes("instagram.com")) url = url.replace(/\/reels?\//i, "/p/");
-                    openUrl(url);
-                  }}
+                  onClick={() => openUrl(selectedClip.link)}
                   className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground cursor-pointer transition-colors"
                 >
                   <PlatformIcon platform={platform} className="h-3 w-3" />

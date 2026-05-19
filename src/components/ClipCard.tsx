@@ -722,11 +722,7 @@ export function ClipCard({
         <button
           onClick={(e) => {
             e.stopPropagation();
-            let url = clip.link;
-            if (url.includes("instagram.com")) {
-              url = url.replace(/\/reels?\//i, "/p/");
-            }
-            openUrl(url);
+            openUrl(clip.link);
           }}
           className="flex items-center justify-center px-2 py-1.5 border-l cursor-pointer transition-colors hover:bg-muted"
           title={`Open on ${platform}`}
