@@ -5,6 +5,19 @@ The latest release is at the top.
 
 <!-- changelog-entries -->
 
+## v2.1.1 - 2026-05-18
+
+### What got better
+
+- Merging duplicate creators now correctly backs up license and traceability files before the merge completes. Previously, every file backup was silently failing, so the files were not being preserved.
+- Merging no longer aborts when the loser has more associations than the winner's cap allows. The excess associations are automatically detached from the loser before the merge proceeds.
+- The merge confirmation dialog is shorter and clearer.
+
+### Behind the scenes
+
+- File backups now use HubSpot signed URLs to download private files, derive the correct MIME type from the file extension, and authenticate to Supabase Storage with the right header for the new key format.
+- HubSpot files that no longer exist are silently skipped instead of counted as failures, and merge retries no longer collide with earlier uploads.
+
 ## v2.1.0 - 2026-05-14
 
 ### What's new
