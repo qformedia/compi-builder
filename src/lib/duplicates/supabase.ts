@@ -21,9 +21,6 @@
 import { createClient, type RealtimeChannel, type SupabaseClient } from "@supabase/supabase-js";
 import { invoke } from "@tauri-apps/api/core";
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-
 /**
  * One stable client instance for this module. Realtime channels need a
  * persistent socket connection, so we don't want to recreate the client on
@@ -32,12 +29,16 @@ const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
  */
 let cachedClient: SupabaseClient | null = null;
 /**
- * Internal accessor used by every write/read path in this module. Lazily
- * builds the client so tests that mock `import.meta.env` won't pay for an
- * eager connection. Exposed to sibling modules (`resolve.ts`) via
- * `getDuplicatesSupabaseClient` so we keep a single WebSocket instance.
+ * Internal accessor used by every write/read path in this module. Reads
+ * `import.meta.env` lazily on first use so tests that mutate the env in
+ * `beforeEach` (and CI runs without a `.env` file) take the same code
+ * path as a real desktop launch. Exposed to sibling modules
+ * (`resolve.ts`) via `getDuplicatesSupabaseClient` so we keep a single
+ * WebSocket instance.
  */
 function getClient(): SupabaseClient {
+  const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+  const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
   if (!supabaseUrl || !supabaseAnonKey) {
     throw new Error(
       "Supabase is not configured. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY.",
