@@ -1169,6 +1169,8 @@ function App() {
             licenseChecked: noVal(cr?.license_checked),
             licenseType: noVal(cr?.license_type),
             availableAskFirst: c.availableAskFirst ? "Yes" : "",
+            availableChannels: noVal(cr?.available_channels),
+            availablePlatforms: noVal(cr?.available_platforms),
             score: c.score ?? "",
             externalClipId: c.hubspotId,
             creatorId: c.creatorId ?? "",

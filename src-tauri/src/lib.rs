@@ -1455,7 +1455,7 @@ async fn generate_clips_csv(
     };
 
     let mut csv_content = String::from(
-        "Order,Duration,Editing Notes,Link,Main Link,Main Account,Name,Douyin ID,Kuaishou ID,Xiaohongshu ID,Clip Mix Links,Special Requests,Notes,License Checked,License Type,Available Ask First,Score,External Clip ID,Creator ID,Video Project ID\n"
+        "Order,Duration,Link,Main Link,Name,Editing Notes,Douyin ID,Kuaishou ID,Xiaohongshu ID,Clip Mix Links,Special Requests,Notes,License Checked,License Type,Available Ask First,Available Channels,Available Platforms,Score,External Clip ID,Creator ID,Video Project ID,Main Account\n"
     );
 
     for (i, clip) in clips.iter().enumerate() {
@@ -1486,11 +1486,10 @@ async fn generate_clips_csv(
             let fields = [
                 format!("{}", order),
                 String::new(),         // Duration
-                escape(&warning_note), // Editing Notes (warning)
                 escape(&get(clip, "link")),
                 escape(&get(clip, "mainLink")),
-                escape(&get(clip, "mainAccount")),
                 escape(&get(clip, "name")),
+                escape(&warning_note), // Editing Notes (warning)
                 escape(&get(clip, "douyinId")),
                 escape(&get(clip, "kuaishouId")),
                 escape(&get(clip, "xiaohongshuId")),
@@ -1500,10 +1499,13 @@ async fn generate_clips_csv(
                 escape(&get(clip, "licenseChecked")),
                 escape(&get(clip, "licenseType")),
                 escape(&get(clip, "availableAskFirst")),
+                escape(&get(clip, "availableChannels")),
+                escape(&get(clip, "availablePlatforms")),
                 escape(&get(clip, "score")),
                 escape(&get(clip, "externalClipId")),
                 escape(&get(clip, "creatorId")),
                 escape(&get(clip, "videoProjectId")),
+                escape(&get(clip, "mainAccount")),
             ];
             csv_content.push_str(&fields.join(","));
         } else {
@@ -1516,11 +1518,10 @@ async fn generate_clips_csv(
             let fields = [
                 format!("{}", order),
                 escape(&duration),
-                escape(&get(clip, "editingNotes")),
                 escape(&get(clip, "link")),
                 escape(&get(clip, "mainLink")),
-                escape(&get(clip, "mainAccount")),
                 escape(&get(clip, "name")),
+                escape(&get(clip, "editingNotes")),
                 escape(&get(clip, "douyinId")),
                 escape(&get(clip, "kuaishouId")),
                 escape(&get(clip, "xiaohongshuId")),
@@ -1530,10 +1531,13 @@ async fn generate_clips_csv(
                 escape(&get(clip, "licenseChecked")),
                 escape(&get(clip, "licenseType")),
                 escape(&get(clip, "availableAskFirst")),
+                escape(&get(clip, "availableChannels")),
+                escape(&get(clip, "availablePlatforms")),
                 escape(&get(clip, "score")),
                 escape(&get(clip, "externalClipId")),
                 escape(&get(clip, "creatorId")),
                 escape(&get(clip, "videoProjectId")),
+                escape(&get(clip, "mainAccount")),
             ];
             csv_content.push_str(&fields.join(","));
         }
@@ -8039,7 +8043,7 @@ mod tests {
         };
 
         let mut out = String::from(
-            "Order,Duration,Editing Notes,Link,Main Link,Main Account,Name,Douyin ID,Kuaishou ID,Xiaohongshu ID,Clip Mix Links,Special Requests,Notes,License Checked,License Type,Available Ask First,Score,External Clip ID,Creator ID,Video Project ID\n"
+            "Order,Duration,Link,Main Link,Name,Editing Notes,Douyin ID,Kuaishou ID,Xiaohongshu ID,Clip Mix Links,Special Requests,Notes,License Checked,License Type,Available Ask First,Available Channels,Available Platforms,Score,External Clip ID,Creator ID,Video Project ID,Main Account\n"
         );
 
         for (i, clip) in clips.iter().enumerate() {
@@ -8065,11 +8069,10 @@ mod tests {
                 let row = [
                     format!("{}", order),
                     String::new(),
-                    escape(&warning),
                     escape(&get(clip, "link")),
                     escape(&get(clip, "mainLink")),
-                    escape(&get(clip, "mainAccount")),
                     escape(&get(clip, "name")),
+                    escape(&warning),
                     escape(&get(clip, "douyinId")),
                     escape(&get(clip, "kuaishouId")),
                     escape(&get(clip, "xiaohongshuId")),
@@ -8079,10 +8082,13 @@ mod tests {
                     escape(&get(clip, "licenseChecked")),
                     escape(&get(clip, "licenseType")),
                     escape(&get(clip, "availableAskFirst")),
+                    escape(&get(clip, "availableChannels")),
+                    escape(&get(clip, "availablePlatforms")),
                     escape(&get(clip, "score")),
                     escape(&get(clip, "externalClipId")),
                     escape(&get(clip, "creatorId")),
                     escape(&get(clip, "videoProjectId")),
+                    escape(&get(clip, "mainAccount")),
                 ];
                 out.push_str(&row.join(","));
             } else {
@@ -8094,11 +8100,10 @@ mod tests {
                 let row = [
                     format!("{}", order),
                     escape(&duration),
-                    escape(&get(clip, "editingNotes")),
                     escape(&get(clip, "link")),
                     escape(&get(clip, "mainLink")),
-                    escape(&get(clip, "mainAccount")),
                     escape(&get(clip, "name")),
+                    escape(&get(clip, "editingNotes")),
                     escape(&get(clip, "douyinId")),
                     escape(&get(clip, "kuaishouId")),
                     escape(&get(clip, "xiaohongshuId")),
@@ -8108,10 +8113,13 @@ mod tests {
                     escape(&get(clip, "licenseChecked")),
                     escape(&get(clip, "licenseType")),
                     escape(&get(clip, "availableAskFirst")),
+                    escape(&get(clip, "availableChannels")),
+                    escape(&get(clip, "availablePlatforms")),
                     escape(&get(clip, "score")),
                     escape(&get(clip, "externalClipId")),
                     escape(&get(clip, "creatorId")),
                     escape(&get(clip, "videoProjectId")),
+                    escape(&get(clip, "mainAccount")),
                 ];
                 out.push_str(&row.join(","));
             }
@@ -8150,8 +8158,8 @@ mod tests {
 
         // Row 1 is normal
         assert!(data_rows[0].starts_with("1,"));
-        // Row 2 has order 2, empty duration, and warning in Editing Notes
-        assert!(data_rows[1].starts_with("2,,"));
+        // Row 2 has order 2, empty duration, link in col 3, and warning in Editing Notes (col 6)
+        assert!(data_rows[1].starts_with("2,,https://instagram.com/b,"));
         assert!(data_rows[1].contains("MISSING"));
         assert!(data_rows[1].contains("failed"));
         // Row 3 still has order 3 (not shifted to 2)
@@ -8198,6 +8206,8 @@ mod tests {
             "licenseChecked": "TRUE",
             "licenseType": "Recurrent",
             "availableAskFirst": "Yes",
+            "availableChannels": "All;Quantastic",
+            "availablePlatforms": "YouTube;Instagram",
             "score": "98",
             "externalClipId": "clip_42",
             "creatorId": "creator_12",
@@ -8207,7 +8217,7 @@ mod tests {
         let csv = build_csv(&clips);
         let row = csv.lines().nth(1).unwrap();
 
-        assert!(row.starts_with("1,,"));
+        assert!(row.starts_with("1,,https://instagram.com/reel/ABC/,"));
         assert!(row.contains("MISSING"));
         assert!(row.contains("failed"));
         assert!(row.contains("https://www.instagram.com/creator"));
@@ -8222,6 +8232,8 @@ mod tests {
         assert!(row.contains("TRUE"));
         assert!(row.contains("Recurrent"));
         assert!(row.contains("Yes"));
+        assert!(row.contains("All;Quantastic"));
+        assert!(row.contains("YouTube;Instagram"));
         assert!(row.contains("98"));
         assert!(row.contains("clip_42"));
         assert!(row.contains("creator_12"));
