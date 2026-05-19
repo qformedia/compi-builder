@@ -156,6 +156,79 @@ pub async fn resolve_via_socialkit_instagram_stats(
     })
 }
 
+/// Pick the YouTube handle from a SocialKit `/youtube/channel-stats` payload.
+///
+/// SocialKit returns the bare handle on `data.username` (no leading `@`).
+/// `data.profileUrl` (e.g. `https://www.youtube.com/@socialkit-dev`) is used
+/// as a fallback in case `username` is absent for some channels.
+pub(crate) fn pick_socialkit_youtube_handle(data: &serde_json::Value) -> Option<String> {
+    let username = data
+        .get("username")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if let Some(u) = username {
+        return Some(u.to_string());
+    }
+    let profile_url = data
+        .get("profileUrl")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| s.starts_with("http"))?;
+    crate::helpers::extract_youtube_handle_from_url(profile_url)
+}
+
+/// GET `/youtube/channel-stats` and return the channel's handle.
+///
+/// Used by [`crate::operativo`] to resolve YouTube `/channel/UC...` URLs into
+/// `@handle` form for the Operativo CSV column. Errors are classified the
+/// same way as the Instagram path so the waterfall can fall through to
+/// SocialFetch on the recoverable cases.
+pub async fn resolve_youtube_handle_socialkit(
+    channel_url: &str,
+    api_key: &str,
+) -> Result<String, SocialkitError> {
+    let mut u = Url::parse("https://api.socialkit.dev/youtube/channel-stats")
+        .map_err(|e| SocialkitError::Network(e.to_string()))?;
+    u.query_pairs_mut()
+        .append_pair("url", channel_url)
+        .append_pair("access_key", api_key)
+        .append_pair("cache", "true")
+        .append_pair("cache_ttl", "2592000");
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| SocialkitError::Network(e.to_string()))?;
+
+    let res = client
+        .get(u)
+        .header("User-Agent", "CompiBuilder/1.0 (Tauri; operativo)")
+        .send()
+        .await
+        .map_err(|e| SocialkitError::Network(e.to_string()))?;
+
+    let status = res.status();
+    if !status.is_success() {
+        let status_code = status.as_u16();
+        let body_preview = res.text().await.unwrap_or_default();
+        let body_short: String = body_preview.chars().take(200).collect();
+        return Err(match status_code {
+            401 | 403 => SocialkitError::BadApiKey(format!("HTTP {status_code}: {body_short}")),
+            404 => SocialkitError::NeedsLogin(format!("HTTP 404: {body_short}")),
+            429 => SocialkitError::RateLimited(format!("HTTP 429: {body_short}")),
+            _ => SocialkitError::Network(format!("HTTP {status_code}: {body_short}")),
+        });
+    }
+
+    let json: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| SocialkitError::Network(format!("json: {e}")))?;
+    let data = json.get("data").unwrap_or(&json);
+    pick_socialkit_youtube_handle(data).ok_or(SocialkitError::UnresolvableData)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -214,5 +287,49 @@ mod tests {
     fn socialkit_handle_returns_none_when_fields_missing() {
         let data = serde_json::json!({});
         assert_eq!(pick_socialkit_ig_handle(&data), None);
+    }
+
+    // ── pick_socialkit_youtube_handle ─────────────────────────────────────
+
+    #[test]
+    fn socialkit_youtube_handle_uses_username_field() {
+        let data = serde_json::json!({
+            "username": "entroisdimensions",
+            "profileUrl": "https://www.youtube.com/@entroisdimensions",
+        });
+        assert_eq!(
+            pick_socialkit_youtube_handle(&data),
+            Some("entroisdimensions".into())
+        );
+    }
+
+    #[test]
+    fn socialkit_youtube_handle_falls_back_to_profile_url() {
+        let data = serde_json::json!({
+            "username": "",
+            "profileUrl": "https://www.youtube.com/@entroisdimensions",
+        });
+        assert_eq!(
+            pick_socialkit_youtube_handle(&data),
+            Some("entroisdimensions".into())
+        );
+    }
+
+    #[test]
+    fn socialkit_youtube_handle_returns_none_when_unusable() {
+        let data = serde_json::json!({});
+        assert_eq!(pick_socialkit_youtube_handle(&data), None);
+    }
+
+    #[test]
+    fn socialkit_youtube_handle_skips_non_handle_profile_url() {
+        // A profileUrl that isn't an @handle URL (e.g. a channel-id URL)
+        // gives us nothing usable — fall through to None so the waterfall
+        // tries SocialFetch.
+        let data = serde_json::json!({
+            "username": "",
+            "profileUrl": "https://www.youtube.com/channel/UC2YgTFZyJr1j6fft_ywS7mg",
+        });
+        assert_eq!(pick_socialkit_youtube_handle(&data), None);
     }
 }

@@ -266,6 +266,7 @@ function App() {
   const [finishPhase, setFinishPhase] = useState<FinishPhase>("confirm");
   const [stepStatuses, setStepStatuses] = useState<[StepStatus, StepStatus, StepStatus]>(["pending", "pending", "pending"]);
   const [stepErrors, setStepErrors] = useState<[string?, string?, string?]>([]);
+  const [stepSubLabels, setStepSubLabels] = useState<[string?, string?, string?]>([]);
   const [hubspotProjectId, setHubspotProjectId] = useState<string>();
   const [csvPath, setCsvPath] = useState<string>();
   const [clipsDir, setClipsDir] = useState<string>();
@@ -1087,6 +1088,7 @@ function App() {
     setFinishPhase("working");
     setStepStatuses(["working", "working", "working"]);
     setStepErrors([]);
+    setStepSubLabels([]);
     setHubspotProjectId(undefined);
     setCsvPath(undefined);
     setClipsDir(undefined);
@@ -1106,6 +1108,22 @@ function App() {
           return next;
         });
       }
+      // A step that's no longer working has no live status message — clear it
+      // so completed/errored steps don't keep showing "Fetching YouTube handles…".
+      if (status !== "working") {
+        setStepSubLabels((prev) => {
+          const next = [...prev] as [string?, string?, string?];
+          next[idx] = undefined;
+          return next;
+        });
+      }
+    };
+    const setStepSubLabel = (idx: 0 | 1 | 2, label?: string) => {
+      setStepSubLabels((prev) => {
+        const next = [...prev] as [string?, string?, string?];
+        next[idx] = label;
+        return next;
+      });
     };
 
     // Step 1: Verify Video Project exists in HubSpot (already created + clips already associated)
@@ -1146,23 +1164,54 @@ function App() {
 
         const vpId = project.hubspotVideoProjectId ?? "";
 
+        // Collect YouTube /channel/UC... URLs that need an `@handle` lookup
+        // for the Operativo column. `@handle` URLs already carry the handle
+        // and are parsed inline by the Rust CSV writer.
+        const youtubeChannelUrls = Array.from(
+          new Set(
+            allClipsSorted
+              .map((c) => (c.creatorId ? creatorMap.get(c.creatorId)?.main_link : undefined))
+              .filter((u): u is string => !!u && /youtube\.com\/channel\/UC/i.test(u))
+          )
+        );
+        let youtubeHandleMap = new Map<string, string>();
+        if (youtubeChannelUrls.length > 0) {
+          setStepSubLabel(1, `Fetching YouTube handles (${youtubeChannelUrls.length})…`);
+          try {
+            const resolved = await invoke<Record<string, string>>("resolve_youtube_handles", {
+              channelUrls: youtubeChannelUrls,
+              socialkitKey: settings.socialkitApiKey ?? "",
+              socialfetchKey: settings.socialfetchApiKey ?? "",
+            });
+            youtubeHandleMap = new Map(Object.entries(resolved));
+          } catch {
+            // Best-effort: leave Operativo blank for unresolved YouTube
+            // channels rather than failing the whole CSV step.
+            youtubeHandleMap = new Map();
+          } finally {
+            setStepSubLabel(1, undefined);
+          }
+        }
+
         // Build one row per clip in project order; missing clips get missing:true
         const clipsData = allClipsSorted.map((c, idx) => {
           const isMissing = c.downloadStatus !== "complete" || !c.localFile;
           const cr = c.creatorId ? creatorMap.get(c.creatorId) : undefined;
           const noVal = (v?: string | null) => v || "";
+          const mainLink = noVal(cr?.main_link);
           return {
             order: idx + 1,
             missing: isMissing,
             downloadStatus: c.downloadStatus,
             duration: isMissing ? null : (c.editedDuration ?? c.localDuration ?? null),
             link: c.link,
-            mainLink: noVal(cr?.main_link),
+            mainLink,
             mainAccount: noVal(cr?.main_account),
             name: noVal(cr?.name),
             douyinId: noVal(cr?.douyin_id),
             kuaishouId: noVal(cr?.kuaishou_id),
             xiaohongshuId: noVal(cr?.xiaohongshu_id),
+            youtubeHandle: youtubeHandleMap.get(mainLink) ?? "",
             clipMixLinks: (c.clipMixLinks ?? []).join(", "),
             specialRequests: noVal(cr?.special_requests),
             notes: noVal(cr?.notes),
@@ -1815,6 +1864,9 @@ function App() {
                     {/* Step label */}
                     <div className="flex-1 min-w-0">
                       <p className={status === "done" ? "text-muted-foreground" : ""}>{step.label}</p>
+                      {status === "working" && stepSubLabels[i] && (
+                        <p className="text-[11px] text-muted-foreground mt-0.5 leading-tight">{stepSubLabels[i]}</p>
+                      )}
                       {error && <p className="text-[11px] text-destructive mt-0.5 leading-tight">{error}</p>}
                     </div>
 
@@ -1915,6 +1967,7 @@ function App() {
                     setFinishPhase(getInitialFinishPhase(projectRef.current));
                     setStepStatuses(["pending", "pending", "pending"]);
                     setStepErrors([]);
+                    setStepSubLabels([]);
                     setHubspotProjectId(undefined);
                     setCsvPath(undefined);
                     setClipsDir(undefined);

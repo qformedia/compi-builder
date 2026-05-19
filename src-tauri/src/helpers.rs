@@ -537,6 +537,63 @@ pub(crate) fn extract_tiktok_handle(url: &str) -> Option<String> {
     Some(caps.get(1)?.as_str().to_string())
 }
 
+/// Inputs needed to compute the Operativo column for a creator.
+///
+/// Each platform pulls Operativo from a different source:
+/// - Instagram / TikTok: parse the handle out of `main_link`
+/// - YouTube `@handle` URLs: regex-extract from `main_link`
+/// - YouTube `/channel/UC...` URLs: use the pre-resolved `youtube_handle`
+///   (filled by the SocialKit/SocialFetch waterfall in [`crate::operativo`]
+///   before the CSV is generated; empty when both fall throughs failed)
+/// - Bilibili: creator display `name`
+/// - Douyin / Kuaishou / Xiaohongshu: dedicated `*_id` HubSpot fields
+pub(crate) struct OperativoInputs<'a> {
+    pub main_link: &'a str,
+    pub name: &'a str,
+    pub douyin_id: &'a str,
+    pub kuaishou_id: &'a str,
+    pub xiaohongshu_id: &'a str,
+    pub youtube_handle: &'a str,
+}
+
+/// Extract the Operativo handle from a creator's Main Link plus per-platform fields.
+///
+/// The Operativo value is the per-creator identifier used by Quantastic ops to
+/// quickly look up creators across spreadsheets and tools — historically built
+/// in Google Sheets via `REGEXEXTRACT` on Main Link. CompiFlow generates it
+/// directly into the Finish Video CSV.
+pub(crate) fn extract_operativo_handle(inputs: OperativoInputs<'_>) -> String {
+    if inputs.main_link.trim().is_empty() {
+        return String::new();
+    }
+    if let Some(h) = extract_tiktok_handle(inputs.main_link) {
+        return h;
+    }
+    if let Some(h) = username_from_ig_profile_url(inputs.main_link) {
+        return h;
+    }
+    if let Some(h) = extract_youtube_handle_from_url(inputs.main_link) {
+        return h;
+    }
+    match platform_key(inputs.main_link) {
+        "bilibili" => inputs.name.to_string(),
+        "douyin" => inputs.douyin_id.to_string(),
+        "kuaishou" => inputs.kuaishou_id.to_string(),
+        "xiaohongshu" => inputs.xiaohongshu_id.to_string(),
+        "youtube" => inputs.youtube_handle.to_string(),
+        _ => String::new(),
+    }
+}
+
+/// Pull the `@handle` out of a YouTube vanity URL like `youtube.com/@entroisdimensions`.
+///
+/// Channel-ID URLs (`youtube.com/channel/UC<22>`) are NOT handled here — those
+/// require a network resolution step that lives in [`crate::operativo`].
+pub(crate) fn extract_youtube_handle_from_url(url: &str) -> Option<String> {
+    let re = regex::Regex::new(r"youtube\.com/@([A-Za-z0-9._\-]+)").ok()?;
+    Some(re.captures(url)?.get(1)?.as_str().to_string())
+}
+
 /// Extract the Instagram shortcode from a reel/post URL
 pub(crate) fn extract_instagram_shortcode(url: &str) -> Option<String> {
     let re = regex::Regex::new(r"/(reel|reels|p)/([^/?]+)").ok()?;
@@ -2062,6 +2119,134 @@ mod tests {
     #[test]
     fn tiktok_handle_no_at_sign() {
         assert_eq!(extract_tiktok_handle("https://tiktok.com/t/ZTR123/"), None);
+    }
+
+    // ── extract_operativo_handle ──────────────────────────────────────
+
+    /// Helper for tests — most cases only care about main_link, so this lets
+    /// us avoid spelling out every empty field.
+    fn op(main_link: &str) -> OperativoInputs<'_> {
+        OperativoInputs {
+            main_link,
+            name: "",
+            douyin_id: "",
+            kuaishou_id: "",
+            xiaohongshu_id: "",
+            youtube_handle: "",
+        }
+    }
+
+    #[test]
+    fn operativo_tiktok_url() {
+        assert_eq!(
+            extract_operativo_handle(op("https://www.tiktok.com/@cooluser/video/7123456")),
+            "cooluser"
+        );
+    }
+
+    #[test]
+    fn operativo_instagram_url() {
+        assert_eq!(
+            extract_operativo_handle(op("https://www.instagram.com/yuumi_cat9/")),
+            "yuumi_cat9"
+        );
+    }
+
+    #[test]
+    fn operativo_youtube_at_handle_url() {
+        assert_eq!(
+            extract_operativo_handle(op("https://www.youtube.com/@entroisdimensions")),
+            "entroisdimensions"
+        );
+    }
+
+    #[test]
+    fn operativo_youtube_at_handle_ignores_youtube_handle_field() {
+        // @handle URLs resolve directly from the URL — don't consult the
+        // pre-resolved field even if it's populated.
+        let inputs = OperativoInputs {
+            youtube_handle: "different_handle",
+            ..op("https://www.youtube.com/@entroisdimensions")
+        };
+        assert_eq!(extract_operativo_handle(inputs), "entroisdimensions");
+    }
+
+    #[test]
+    fn operativo_youtube_channel_url_uses_pre_resolved_handle() {
+        let inputs = OperativoInputs {
+            youtube_handle: "entroisdimensions",
+            ..op("https://www.youtube.com/channel/UC2YgTFZyJr1j6fft_ywS7mg")
+        };
+        assert_eq!(extract_operativo_handle(inputs), "entroisdimensions");
+    }
+
+    #[test]
+    fn operativo_youtube_channel_url_returns_empty_when_unresolved() {
+        // Network resolution failed and youtube_handle is left empty.
+        assert_eq!(
+            extract_operativo_handle(op(
+                "https://www.youtube.com/channel/UC2YgTFZyJr1j6fft_ywS7mg"
+            )),
+            ""
+        );
+    }
+
+    #[test]
+    fn operativo_bilibili_uses_creator_name() {
+        let inputs = OperativoInputs {
+            name: "是怼子吖",
+            ..op("https://space.bilibili.com/297270292")
+        };
+        assert_eq!(extract_operativo_handle(inputs), "是怼子吖");
+    }
+
+    #[test]
+    fn operativo_kuaishou_uses_kuaishou_id() {
+        let inputs = OperativoInputs {
+            kuaishou_id: "yezishougong520",
+            ..op("https://live.kuaishou.com/profile/yezishougong520")
+        };
+        assert_eq!(extract_operativo_handle(inputs), "yezishougong520");
+    }
+
+    #[test]
+    fn operativo_xiaohongshu_uses_xiaohongshu_id() {
+        let inputs = OperativoInputs {
+            xiaohongshu_id: "zm15547629",
+            ..op("https://www.xiaohongshu.com/user/profile/67655c550000000015005e8b")
+        };
+        assert_eq!(extract_operativo_handle(inputs), "zm15547629");
+    }
+
+    #[test]
+    fn operativo_douyin_uses_douyin_id() {
+        let inputs = OperativoInputs {
+            douyin_id: "SAPDXMB",
+            ..op("https://www.douyin.com/user/MS4wLjABAAAA1D1Z9Shz3KYkr1sUR3CL6pNqZIJ6hWZs1rn74rV8NXA")
+        };
+        assert_eq!(extract_operativo_handle(inputs), "SAPDXMB");
+    }
+
+    #[test]
+    fn operativo_unknown_platform_returns_empty() {
+        assert_eq!(
+            extract_operativo_handle(op("https://www.facebook.com/someone")),
+            ""
+        );
+    }
+
+    #[test]
+    fn operativo_empty_input_returns_empty() {
+        assert_eq!(extract_operativo_handle(op("")), "");
+        assert_eq!(extract_operativo_handle(op("   ")), "");
+    }
+
+    #[test]
+    fn operativo_ig_reserved_path_returns_empty() {
+        assert_eq!(
+            extract_operativo_handle(op("https://www.instagram.com/reel/ABC")),
+            ""
+        );
     }
 
     // ── extract_instagram_shortcode ──────────────────────────────────────

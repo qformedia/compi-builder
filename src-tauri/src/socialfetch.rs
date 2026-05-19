@@ -459,6 +459,44 @@ fn profile_url_for(platform: SfPlatform, handle: &str) -> String {
     }
 }
 
+/// Pull the YouTube handle from a `/v1/youtube/channel` payload.
+///
+/// SocialFetch puts the bare handle (no leading `@`) on `data.channel.handle`,
+/// per their OpenAPI contract. Falls back to `data.channel.profileUrl` if
+/// present so we can recover the handle from the canonical URL when the
+/// dedicated field is absent.
+fn extract_youtube_channel_handle(data: &Value) -> Option<String> {
+    if let Some(s) = walk_string(data, &["channel", "handle"]) {
+        let trimmed = s.trim().trim_start_matches('@');
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    let profile_url = walk_string(data, &["channel", "profileUrl"])?;
+    crate::helpers::extract_youtube_handle_from_url(profile_url)
+}
+
+/// Resolve a YouTube channel URL to its `@handle` via SocialFetch's
+/// `/v1/youtube/channel` endpoint.
+///
+/// Used by [`crate::operativo`] as the second step of the
+/// SocialKit -> SocialFetch waterfall when populating the Operativo CSV column.
+pub async fn resolve_youtube_handle_socialfetch(
+    channel_url: &str,
+    api_key: &str,
+) -> Result<String, SocialfetchError> {
+    let request_url = format!(
+        "{SF_BASE}/youtube/channel?url={}",
+        urlencoding::encode(channel_url)
+    );
+    let json = call_get_json(&request_url, api_key).await?;
+    let data = payload_data(&json);
+    if let Some(err) = check_lookup_status(data) {
+        return Err(err);
+    }
+    extract_youtube_channel_handle(data).ok_or(SocialfetchError::UnresolvableData)
+}
+
 /// Single point for HTTP + auth + classification.
 async fn call_get_json(request_url: &str, api_key: &str) -> Result<Value, SocialfetchError> {
     let client = reqwest::Client::builder()
@@ -625,6 +663,48 @@ mod tests {
     fn extract_handle_skips_empty_strings() {
         let ig = serde_json::json!({ "author": { "username": "   " } });
         assert_eq!(extract_handle(SfPlatform::Instagram, &ig), None);
+    }
+
+    // ── extract_youtube_channel_handle ────────────────────────────────────
+
+    #[test]
+    fn yt_channel_handle_uses_handle_field() {
+        let data = serde_json::json!({
+            "channel": { "handle": "MrBeast", "displayName": "MrBeast" }
+        });
+        assert_eq!(
+            extract_youtube_channel_handle(&data),
+            Some("MrBeast".to_string())
+        );
+    }
+
+    #[test]
+    fn yt_channel_handle_strips_leading_at() {
+        let data = serde_json::json!({
+            "channel": { "handle": "@entroisdimensions" }
+        });
+        assert_eq!(
+            extract_youtube_channel_handle(&data),
+            Some("entroisdimensions".to_string())
+        );
+    }
+
+    #[test]
+    fn yt_channel_handle_falls_back_to_profile_url() {
+        // `handle` missing but `profileUrl` is the canonical @handle URL.
+        let data = serde_json::json!({
+            "channel": { "profileUrl": "http://www.youtube.com/@entroisdimensions" }
+        });
+        assert_eq!(
+            extract_youtube_channel_handle(&data),
+            Some("entroisdimensions".to_string())
+        );
+    }
+
+    #[test]
+    fn yt_channel_handle_returns_none_when_unusable() {
+        let data = serde_json::json!({ "channel": null });
+        assert_eq!(extract_youtube_channel_handle(&data), None);
     }
 
     #[test]

@@ -2,6 +2,7 @@ mod cascade;
 mod download_log;
 mod helpers;
 mod minimiki;
+mod operativo;
 mod resolver;
 mod socialfetch;
 mod socialkit;
@@ -1424,6 +1425,25 @@ async fn order_clips(
     }))
 }
 
+/// Resolve YouTube `/channel/UC...` URLs into bare `@handle` strings.
+///
+/// Used by the Finish Video flow to populate the Operativo CSV column for
+/// YouTube creators whose Main Link is a channel-id URL (which doesn't
+/// expose the handle in the URL itself). Each URL is run through the
+/// SocialKit -> SocialFetch waterfall in [`crate::operativo::resolve_all`]
+/// with bounded parallelism and per-URL timeouts.
+///
+/// The returned map only includes URLs that resolved successfully; missing
+/// keys mean the lookup failed and the CSV row should leave Operativo blank.
+#[tauri::command]
+async fn resolve_youtube_handles(
+    channel_urls: Vec<String>,
+    socialkit_key: String,
+    socialfetch_key: String,
+) -> Result<std::collections::HashMap<String, String>, String> {
+    Ok(operativo::resolve_all(channel_urls, socialkit_key, socialfetch_key).await)
+}
+
 /// Generate a CSV file matching the HubSpot workspace report format.
 /// The frontend passes pre-merged clip+creator data as JSON objects.
 /// Clips with `"missing": true` get a warning row while preserving HubSpot metadata.
@@ -1455,7 +1475,7 @@ async fn generate_clips_csv(
     };
 
     let mut csv_content = String::from(
-        "Order,Duration,Link,Main Link,Name,Editing Notes,Douyin ID,Kuaishou ID,Xiaohongshu ID,Clip Mix Links,Special Requests,Notes,License Checked,License Type,Available Ask First,Available Channels,Available Platforms,Score,External Clip ID,Creator ID,Video Project ID,Main Account\n"
+        "Order,Duration,Link,Main Link,Operativo,Name,Editing Notes,Douyin ID,Kuaishou ID,Xiaohongshu ID,Clip Mix Links,Special Requests,Notes,License Checked,License Type,Available Ask First,Available Channels,Available Platforms,Score,External Clip ID,Creator ID,Video Project ID,Main Account\n"
     );
 
     for (i, clip) in clips.iter().enumerate() {
@@ -1471,6 +1491,14 @@ async fn generate_clips_csv(
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         let download_status = get(clip, "downloadStatus");
+        let operativo = helpers::extract_operativo_handle(helpers::OperativoInputs {
+            main_link: &get(clip, "mainLink"),
+            name: &get(clip, "name"),
+            douyin_id: &get(clip, "douyinId"),
+            kuaishou_id: &get(clip, "kuaishouId"),
+            xiaohongshu_id: &get(clip, "xiaohongshuId"),
+            youtube_handle: &get(clip, "youtubeHandle"),
+        });
 
         if is_missing {
             // Warning row: keep missing-state in Editing Notes, preserve metadata fields,
@@ -1488,6 +1516,7 @@ async fn generate_clips_csv(
                 String::new(),         // Duration
                 escape(&get(clip, "link")),
                 escape(&get(clip, "mainLink")),
+                escape(&operativo),
                 escape(&get(clip, "name")),
                 escape(&warning_note), // Editing Notes (warning)
                 escape(&get(clip, "douyinId")),
@@ -1520,6 +1549,7 @@ async fn generate_clips_csv(
                 escape(&duration),
                 escape(&get(clip, "link")),
                 escape(&get(clip, "mainLink")),
+                escape(&operativo),
                 escape(&get(clip, "name")),
                 escape(&get(clip, "editingNotes")),
                 escape(&get(clip, "douyinId")),
@@ -7955,6 +7985,7 @@ pub fn run() {
             associate_clips_to_project,
             disassociate_clip_from_project,
             generate_clips_csv,
+            resolve_youtube_handles,
             order_and_zip_clips,
             order_clips,
             import_clip_file,
@@ -8043,7 +8074,7 @@ mod tests {
         };
 
         let mut out = String::from(
-            "Order,Duration,Link,Main Link,Name,Editing Notes,Douyin ID,Kuaishou ID,Xiaohongshu ID,Clip Mix Links,Special Requests,Notes,License Checked,License Type,Available Ask First,Available Channels,Available Platforms,Score,External Clip ID,Creator ID,Video Project ID,Main Account\n"
+            "Order,Duration,Link,Main Link,Operativo,Name,Editing Notes,Douyin ID,Kuaishou ID,Xiaohongshu ID,Clip Mix Links,Special Requests,Notes,License Checked,License Type,Available Ask First,Available Channels,Available Platforms,Score,External Clip ID,Creator ID,Video Project ID,Main Account\n"
         );
 
         for (i, clip) in clips.iter().enumerate() {
@@ -8056,6 +8087,14 @@ mod tests {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
             let download_status = get(clip, "downloadStatus");
+            let operativo = super::helpers::extract_operativo_handle(super::helpers::OperativoInputs {
+                main_link: &get(clip, "mainLink"),
+                name: &get(clip, "name"),
+                douyin_id: &get(clip, "douyinId"),
+                kuaishou_id: &get(clip, "kuaishouId"),
+                xiaohongshu_id: &get(clip, "xiaohongshuId"),
+                youtube_handle: &get(clip, "youtubeHandle"),
+            });
 
             if is_missing {
                 let warning = format!(
@@ -8071,6 +8110,7 @@ mod tests {
                     String::new(),
                     escape(&get(clip, "link")),
                     escape(&get(clip, "mainLink")),
+                    escape(&operativo),
                     escape(&get(clip, "name")),
                     escape(&warning),
                     escape(&get(clip, "douyinId")),
@@ -8102,6 +8142,7 @@ mod tests {
                     escape(&duration),
                     escape(&get(clip, "link")),
                     escape(&get(clip, "mainLink")),
+                    escape(&operativo),
                     escape(&get(clip, "name")),
                     escape(&get(clip, "editingNotes")),
                     escape(&get(clip, "douyinId")),
@@ -8194,7 +8235,7 @@ mod tests {
             "missing": true,
             "downloadStatus": "failed",
             "link": "https://instagram.com/reel/ABC/",
-            "mainLink": "https://www.instagram.com/creator",
+            "mainLink": "https://www.instagram.com/yuumi_cat9/",
             "mainAccount": "creator_account",
             "name": "Creator Name",
             "douyinId": "douyin_1",
@@ -8220,7 +8261,8 @@ mod tests {
         assert!(row.starts_with("1,,https://instagram.com/reel/ABC/,"));
         assert!(row.contains("MISSING"));
         assert!(row.contains("failed"));
-        assert!(row.contains("https://www.instagram.com/creator"));
+        assert!(row.contains("https://www.instagram.com/yuumi_cat9/"));
+        assert!(row.contains("yuumi_cat9"));
         assert!(row.contains("creator_account"));
         assert!(row.contains("Creator Name"));
         assert!(row.contains("douyin_1"));
@@ -8238,6 +8280,98 @@ mod tests {
         assert!(row.contains("clip_42"));
         assert!(row.contains("creator_12"));
         assert!(row.contains("vp_7"));
+    }
+
+    #[test]
+    fn csv_operativo_column_extracts_handle_from_main_link() {
+        let clips = vec![
+            // Instagram — handle parsed from URL
+            serde_json::json!({
+                "order": 1,
+                "duration": 30.0,
+                "mainLink": "https://www.instagram.com/yuumi_cat9/",
+            }),
+            // TikTok — handle parsed from URL
+            serde_json::json!({
+                "order": 2,
+                "duration": 25.0,
+                "mainLink": "https://www.tiktok.com/@cooluser/video/1",
+            }),
+            // YouTube `@handle` — extracted from URL, no field needed
+            serde_json::json!({
+                "order": 3,
+                "duration": 20.0,
+                "mainLink": "https://www.youtube.com/@entroisdimensions",
+            }),
+            // YouTube `/channel/UC...` — uses the resolved `youtubeHandle`
+            serde_json::json!({
+                "order": 4,
+                "duration": 22.0,
+                "mainLink": "https://www.youtube.com/channel/UC2YgTFZyJr1j6fft_ywS7mg",
+                "youtubeHandle": "entroisdimensions",
+            }),
+            // YouTube `/channel/UC...` with no resolved handle — Operativo blank
+            serde_json::json!({
+                "order": 5,
+                "duration": 22.0,
+                "mainLink": "https://www.youtube.com/channel/UC_unresolved",
+            }),
+            // Bilibili — pulls creator display name
+            serde_json::json!({
+                "order": 6,
+                "duration": 18.0,
+                "mainLink": "https://space.bilibili.com/297270292",
+                "name": "是怼子吖",
+            }),
+            // Douyin — pulls douyin_id
+            serde_json::json!({
+                "order": 7,
+                "duration": 19.0,
+                "mainLink": "https://www.douyin.com/user/MS4wLjABAAAA1D",
+                "douyinId": "SAPDXMB",
+            }),
+            // Kuaishou — pulls kuaishou_id
+            serde_json::json!({
+                "order": 8,
+                "duration": 21.0,
+                "mainLink": "https://live.kuaishou.com/profile/yezishougong520",
+                "kuaishouId": "yezishougong520",
+            }),
+            // Xiaohongshu — pulls xiaohongshu_id
+            serde_json::json!({
+                "order": 9,
+                "duration": 23.0,
+                "mainLink": "https://www.xiaohongshu.com/user/profile/abc",
+                "xiaohongshuId": "zm15547629",
+            }),
+        ];
+        let csv = build_csv(&clips);
+        let rows: Vec<_> = csv.lines().skip(1).collect();
+        let cols: Vec<Vec<&str>> = rows.iter().map(|r| r.split(',').collect()).collect();
+        assert_eq!(cols[0][4], "yuumi_cat9", "Operativo column for Instagram");
+        assert_eq!(cols[1][4], "cooluser", "Operativo column for TikTok");
+        assert_eq!(
+            cols[2][4], "entroisdimensions",
+            "Operativo column for YouTube @handle"
+        );
+        assert_eq!(
+            cols[3][4], "entroisdimensions",
+            "Operativo column for YouTube /channel/UC with resolved handle"
+        );
+        assert_eq!(
+            cols[4][4], "",
+            "Operativo column for YouTube /channel/UC with no resolved handle"
+        );
+        assert_eq!(cols[5][4], "是怼子吖", "Operativo column for Bilibili");
+        assert_eq!(cols[6][4], "SAPDXMB", "Operativo column for Douyin");
+        assert_eq!(
+            cols[7][4], "yezishougong520",
+            "Operativo column for Kuaishou"
+        );
+        assert_eq!(
+            cols[8][4], "zm15547629",
+            "Operativo column for Xiaohongshu"
+        );
     }
 
     #[test]
