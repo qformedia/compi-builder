@@ -5,6 +5,19 @@ The latest release is at the top.
 
 <!-- changelog-entries -->
 
+## v2.2.0 - 2026-05-20
+
+### What's new
+
+- The Operativo column in the Finish Video CSV now fills in automatically for all platforms: Instagram, TikTok, YouTube, Bilibili, Douyin, Kuaishou, and Xiaohongshu.
+- YouTube channels that use the older `/channel/UC...` URL format are resolved to their handle behind the scenes during export, so the Operativo column is correct even when the handle isn't visible in the URL.
+- The Data Integrity page can now flag potential duplicate creator pairs from the Integrity check results, giving the team an earlier heads-up before duplicates cause problems downstream.
+- Search reduces Chrome memory usage by deferring Instagram profile page opens and avoiding an unnecessary URL rewrite.
+
+### What got better
+
+- The CSV export now includes Available Channels and Available Platforms columns, and the column order has been updated to better match the team's workflow.
+
 ## v2.1.1 - 2026-05-18
 
 ### What got better
