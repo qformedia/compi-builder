@@ -64,14 +64,35 @@ export interface DuplicatePairSide {
 export interface DuplicatePair {
   /** Stable across runs and across networks: `${min(rid_a,rid_b)}:${max(rid_a,rid_b)}`. */
   pairKey: string;
-  network: DuplicatePairNetwork;
-  canonicalUrl: string;
+  /** Network the collision was found on. `null` for manually-flagged pairs
+   *  where the detector didn't produce a canonical URL — for example a
+   *  pair flagged by an external cleanup script across totally different
+   *  handles. */
+  network: DuplicatePairNetwork | null;
+  /** Canonical URL the two records collide on. `null` for manually-flagged
+   *  pairs — the user is asserting "same person" without telling us the
+   *  matching URL. */
+  canonicalUrl: string | null;
   /** Patterns that contributed to flagging this pair (deduplicated, sorted). */
   source: DuplicatePairSource[];
   /** "Broken" side for Patterns 3/bare-handle when applicable; otherwise the
    *  smaller record id by lexicographic order. */
   a: DuplicatePairSide;
   b: DuplicatePairSide;
+  /** How this pair entered the Duplicates list. `'detected'` means the
+   *  on-the-fly canonical-URL detector found it; `'flagged'` means it
+   *  came from a `duplicate_pair_resolutions` row inserted by the
+   *  Integrity "Mark as potential duplicate" button or an external
+   *  cleanup script. Omitted = `'detected'` for backwards compatibility. */
+  kind?: "detected" | "flagged";
+  /** When `kind === 'flagged'`, the provenance string the caller wrote
+   *  to `duplicate_pair_resolutions.source` (`integrity-mark`,
+   *  `integrity-mark-bulk`, `external-script:<name>`). Null on
+   *  detected pairs. */
+  flaggedSource?: string | null;
+  /** When `kind === 'flagged'`, the moment the pair was added to the
+   *  queue. Drives the "Flagged x ago" sort. */
+  flaggedAt?: Date | null;
 }
 
 /**
@@ -237,15 +258,72 @@ export function findDuplicatePairs(creators: CreatorRowFull[]): DuplicatePair[] 
   // Two pairs may exist for the same (a, b) across different networks (rare
   // but possible). Keep them — same pairKey, but the user may want to see
   // both findings. Deterministic sort: network → canonical URL → pairKey.
+  // (Detected pairs always have non-null network/canonicalUrl; we use ""
+  // as the comparison fallback for safety even though it can't trigger
+  // here.)
   pairs.sort((p, q) => {
-    if (p.network !== q.network) return p.network < q.network ? -1 : 1;
-    if (p.canonicalUrl !== q.canonicalUrl) {
-      return p.canonicalUrl < q.canonicalUrl ? -1 : 1;
-    }
+    const pNet = p.network ?? "";
+    const qNet = q.network ?? "";
+    if (pNet !== qNet) return pNet < qNet ? -1 : 1;
+    const pUrl = p.canonicalUrl ?? "";
+    const qUrl = q.canonicalUrl ?? "";
+    if (pUrl !== qUrl) return pUrl < qUrl ? -1 : 1;
     return p.pairKey < q.pairKey ? -1 : p.pairKey > q.pairKey ? 1 : 0;
   });
 
   return pairs;
+}
+
+/**
+ * Build a synthetic {@link DuplicatePair} for a manually-flagged
+ * resolution row that the on-the-fly detector did NOT find. Used by the
+ * Duplicates page to surface pairs flagged by the Integrity "Mark as
+ * potential duplicate" button or by an external cleanup script.
+ *
+ * The function never fabricates collision evidence. `network` and
+ * `canonicalUrl` are left null, columns are empty, and `source` is
+ * empty — the UI is responsible for showing the "Flagged" badge and the
+ * provenance label so the user knows this pair didn't come from the
+ * detector. Returns `null` when both records are missing from the
+ * provided index (no creators to render at all — the caller should
+ * either skip the pair or render an "exported data is stale" placeholder).
+ *
+ * `recordIndex` is a Map of HubSpot record id → creator row from
+ * `parseCreatorsCsvFull(...)`. Pass null when the caller doesn't have
+ * the CSV (e.g. during initial load); the function falls back to using
+ * the record ids as display names.
+ */
+export function buildFlaggedPair(args: {
+  pairKey: string;
+  recordIdA: string;
+  recordIdB: string;
+  flaggedSource: string | null;
+  flaggedAt: Date | null;
+  /** Map of recordId → display name. Pass an empty Map to fall back to
+   *  showing the bare record id for both sides. */
+  nameByRecordId?: Map<string, string>;
+}): DuplicatePair {
+  const nameOf = (rid: string) =>
+    args.nameByRecordId?.get(rid) ?? rid;
+  return {
+    pairKey: args.pairKey,
+    network: null,
+    canonicalUrl: null,
+    source: [],
+    a: {
+      rid: args.recordIdA,
+      name: nameOf(args.recordIdA),
+      columns: [],
+    },
+    b: {
+      rid: args.recordIdB,
+      name: nameOf(args.recordIdB),
+      columns: [],
+    },
+    kind: "flagged",
+    flaggedSource: args.flaggedSource,
+    flaggedAt: args.flaggedAt,
+  };
 }
 
 function aggregateSide(rid: string, slots: Slot[]): DuplicatePairSide {

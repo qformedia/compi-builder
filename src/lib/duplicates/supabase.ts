@@ -71,33 +71,58 @@ export type DuplicatePairStatus =
 
 export interface DuplicatePairResolution {
   pairKey: string;
+  recordIdA: string;
+  recordIdB: string;
   status: DuplicatePairStatus;
   resolvedBy: string | null;
   resolvedAt: Date | null;
   resolutionNotes: string | null;
   winnerRecordId: string | null;
   updatedAt: Date;
+  /** Provenance for manually flagged pairs (`integrity-mark`,
+   *  `integrity-mark-bulk`, `external-script:<name>`). Null on legacy
+   *  rows created before the flag feature shipped. */
+  source: string | null;
+  /** When the pair was first marked as a potential duplicate. Distinct
+   *  from `created_at` which historically aligns with the merge/dismiss
+   *  timestamp on resolved rows. Null on legacy rows. */
+  flaggedAt: Date | null;
 }
 
 interface ResolutionRow {
   pair_key: string;
+  record_id_a: string;
+  record_id_b: string;
   status: DuplicatePairStatus;
   resolved_by: string | null;
   resolved_at: string | null;
   resolution_notes: string | null;
   winner_record_id: string | null;
   updated_at: string;
+  source: string | null;
+  flagged_at: string | null;
 }
+
+/** Columns we read for the resolution shape. Centralised so the two
+ *  fetchers (`fetchResolutions` keyed lookup and `fetchActiveResolutions`
+ *  whole-table scan) stay in sync — adding a column here exposes it to
+ *  both callers without a second edit. */
+const RESOLUTION_COLUMNS =
+  "pair_key, record_id_a, record_id_b, status, resolved_by, resolved_at, resolution_notes, winner_record_id, updated_at, source, flagged_at";
 
 function mapResolution(r: ResolutionRow): DuplicatePairResolution {
   return {
     pairKey: r.pair_key,
+    recordIdA: r.record_id_a,
+    recordIdB: r.record_id_b,
     status: r.status,
     resolvedBy: r.resolved_by,
     resolvedAt: r.resolved_at ? new Date(r.resolved_at) : null,
     resolutionNotes: r.resolution_notes,
     winnerRecordId: r.winner_record_id,
     updatedAt: new Date(r.updated_at),
+    source: r.source ?? null,
+    flaggedAt: r.flagged_at ? new Date(r.flagged_at) : null,
   };
 }
 
@@ -151,11 +176,39 @@ function isMissingTableError(err: unknown): boolean {
   // 42P01 = Postgres "undefined_table"
   if (e.code === "PGRST205" || e.code === "42P01") return true;
   const msg = typeof e.message === "string" ? e.message.toLowerCase() : "";
+  // Match table-specific phrasing only — bare "does not exist" / "schema
+  // cache" would also catch missing-column errors, which have their own
+  // helper (isMissingColumnError) and a different remediation.
   return (
     msg.includes("could not find the table") ||
-    msg.includes("does not exist") ||
-    msg.includes("schema cache")
+    (msg.includes("table") && msg.includes("does not exist"))
   );
+}
+
+/** True when a Supabase error means "the column referenced doesn't exist on
+ *  this table" — typically because a migration that adds the column hasn't
+ *  been applied yet. We treat this distinct from missing-table because the
+ *  remediation is different (apply the specific migration), and also so the
+ *  user-facing error message can name it. */
+function isMissingColumnError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { code?: unknown; message?: unknown };
+  // 42703 = Postgres "undefined_column"
+  // PGRST204 = PostgREST "Column not found in schema cache"
+  if (e.code === "42703" || e.code === "PGRST204") return true;
+  const msg = typeof e.message === "string" ? e.message.toLowerCase() : "";
+  return (
+    msg.includes("column") &&
+    (msg.includes("does not exist") || msg.includes("not found"))
+  );
+}
+
+/** Migration the flag feature depends on. Surfaced verbatim in the
+ *  user-facing error string so the operator knows exactly what to apply. */
+const FLAG_MIGRATION = "20260519090000_flag_potential_duplicate_pairs.sql";
+
+function migrationNeededMessage(): string {
+  return `Supabase migration ${FLAG_MIGRATION} is not applied. Run \`supabase db push\` (or paste it into the SQL editor) and try again.`;
 }
 
 /**
@@ -329,6 +382,265 @@ export async function recordMergeResolution(
       backed_up_files: args.snapshot.backedUpFiles || [],
     });
   if (snapErr) throw snapErr;
+}
+
+// ──────────────────────────────────────────────────────────────────────
+// Flagging — Integrity button + external cleanup scripts
+// ──────────────────────────────────────────────────────────────────────
+
+/**
+ * Canonicalize a pair into the (record_id_a, record_id_b, pair_key) shape
+ * the table CHECK constraint demands (`record_id_a < record_id_b`, with
+ * `pair_key = "${min}:${max}"`). Centralised so every caller — flag,
+ * bulk-flag, merge — uses the exact same ordering rule.
+ */
+function canonicalPair(rid1: string, rid2: string): {
+  recordIdA: string;
+  recordIdB: string;
+  pairKey: string;
+} {
+  const [recordIdA, recordIdB] = rid1 < rid2 ? [rid1, rid2] : [rid2, rid1];
+  return { recordIdA, recordIdB, pairKey: `${recordIdA}:${recordIdB}` };
+}
+
+export interface FlagPotentialDuplicateArgs {
+  recordIdA: string;
+  recordIdB: string;
+  /** Provenance label. By convention: `integrity-mark`,
+   *  `integrity-mark-bulk`, `external-script:<name>`. Kept as free-form
+   *  text so external callers can identify their source without a
+   *  schema migration. */
+  source: string;
+  actor: string;
+  /** Optional free-form note about why this pair was flagged. */
+  note?: string;
+}
+
+export type FlagPotentialDuplicateResult =
+  | { kind: "flagged"; pairKey: string }
+  | { kind: "skipped"; pairKey: string; reason: "already-resolved" | "already-dismissed" | "already-flagged" }
+  | { kind: "error"; pairKey: string; message: string };
+
+/**
+ * Flag two HubSpot creator records as a potential duplicate pair.
+ *
+ * Upserts a `status='pending'` row in `duplicate_pair_resolutions` with
+ * `source` and `flagged_at` set, then appends an immutable
+ * `event_type='flagged'` row to `duplicate_pair_events`. The two writes
+ * are NOT in a transaction (PostgREST doesn't expose one) but the event
+ * insert runs first — if the audit fails we don't pollute the state row,
+ * if the state upsert fails we leave only an audit row which is the
+ * safer half to keep.
+ *
+ * Skip rules (returns `kind: 'skipped'`, no writes performed):
+ *   - The pair is already `resolved` or `dismissed`. Re-flagging would
+ *     reopen a closed decision; the user can do that explicitly via the
+ *     Duplicates page if they really want to.
+ *   - The pair is already `pending` or `reopened` with a non-null
+ *     `source`. Idempotent — repeated flag calls (e.g. external script
+ *     re-runs) don't double-write or bump `flagged_at`.
+ */
+export async function flagPotentialDuplicate(
+  args: FlagPotentialDuplicateArgs,
+): Promise<FlagPotentialDuplicateResult> {
+  const { recordIdA, recordIdB, pairKey } = canonicalPair(args.recordIdA, args.recordIdB);
+  if (recordIdA === recordIdB) {
+    return { kind: "error", pairKey, message: "Cannot flag a record as a duplicate of itself" };
+  }
+
+  const client = getClient();
+  const now = new Date().toISOString();
+
+  // Skip-check: read the current row first so we don't reopen closed
+  // decisions and stay idempotent across re-runs.
+  const { data: existing, error: readErr } = await client
+    .from("duplicate_pair_resolutions")
+    .select("status, source")
+    .eq("pair_key", pairKey)
+    .maybeSingle();
+  if (readErr) {
+    // Missing-table: degrade to "no rows persisted yet" so the writes
+    // below try to land. Missing-column: the flag migration isn't
+    // applied; fail fast with a clear, actionable message rather than
+    // letting the upsert below echo a raw PostgREST blob 185 times.
+    if (isMissingColumnError(readErr)) {
+      return { kind: "error", pairKey, message: migrationNeededMessage() };
+    }
+    if (!isMissingTableError(readErr)) {
+      return { kind: "error", pairKey, message: describeSupabaseError(readErr) };
+    }
+  }
+  if (existing) {
+    if (existing.status === "resolved") {
+      return { kind: "skipped", pairKey, reason: "already-resolved" };
+    }
+    if (existing.status === "dismissed") {
+      return { kind: "skipped", pairKey, reason: "already-dismissed" };
+    }
+    if ((existing.status === "pending" || existing.status === "reopened") && existing.source) {
+      return { kind: "skipped", pairKey, reason: "already-flagged" };
+    }
+  }
+
+  // Audit first — if this fails we leave the state row untouched.
+  const { error: eventErr } = await client.from("duplicate_pair_events").insert({
+    pair_key: pairKey,
+    actor: args.actor || null,
+    event_type: "flagged",
+    payload: {
+      record_id_a: recordIdA,
+      record_id_b: recordIdB,
+      source: args.source,
+      ...(args.note ? { note: args.note } : {}),
+    },
+  });
+  if (eventErr) {
+    // If the CHECK constraint for `flagged` isn't applied yet (older
+    // Supabase project), we still want the state row to land — the
+    // audit row is best-effort. Log and continue.
+    if (isCheckConstraintError(eventErr)) {
+      console.warn(
+        "[duplicates] duplicate_pair_events rejected event_type='flagged' — apply the migration to enable the flag audit trail.",
+      );
+    } else {
+      return { kind: "error", pairKey, message: describeSupabaseError(eventErr) };
+    }
+  }
+
+  const { error: resErr } = await client
+    .from("duplicate_pair_resolutions")
+    .upsert(
+      {
+        pair_key: pairKey,
+        record_id_a: recordIdA,
+        record_id_b: recordIdB,
+        status: "pending",
+        source: args.source,
+        flagged_at: now,
+        resolution_notes: args.note ?? null,
+      },
+      { onConflict: "pair_key" },
+    );
+  if (resErr) {
+    // Same migration-detection pattern as the read step: when the
+    // `source` / `flagged_at` columns are missing, the user just needs
+    // to apply the flag migration. Echoing the raw PostgREST blob
+    // ("Could not find the 'flagged_at' column…") in 185 rows hides
+    // the actual remediation.
+    if (isMissingColumnError(resErr)) {
+      return { kind: "error", pairKey, message: migrationNeededMessage() };
+    }
+    return { kind: "error", pairKey, message: describeSupabaseError(resErr) };
+  }
+
+  return { kind: "flagged", pairKey };
+}
+
+export interface FlagPotentialDuplicatesBulkItem {
+  recordIdA: string;
+  recordIdB: string;
+  source: string;
+  note?: string;
+}
+
+export interface FlagPotentialDuplicatesBulkArgs {
+  items: FlagPotentialDuplicatesBulkItem[];
+  actor: string;
+  /** Override concurrency cap. Defaults to 4 — matches the auto-fix runner. */
+  concurrency?: number;
+  /** Called after each item completes with the cumulative count. */
+  onProgress?: (done: number, total: number) => void;
+}
+
+/**
+ * Flag many pairs in parallel. Each item is independent — one failure
+ * doesn't abort the batch. Returns results in the same order as the
+ * input so callers can line up outcomes 1:1 with the UI rows they
+ * clicked on.
+ */
+export async function flagPotentialDuplicatesBulk(
+  args: FlagPotentialDuplicatesBulkArgs,
+): Promise<FlagPotentialDuplicateResult[]> {
+  const { items } = args;
+  if (items.length === 0) return [];
+  const concurrency = Math.max(1, args.concurrency ?? 4);
+  const results: FlagPotentialDuplicateResult[] = new Array(items.length);
+  let cursor = 0;
+  let done = 0;
+  args.onProgress?.(0, items.length);
+
+  async function worker() {
+    while (true) {
+      const idx = cursor++;
+      if (idx >= items.length) return;
+      const item = items[idx];
+      try {
+        results[idx] = await flagPotentialDuplicate({
+          recordIdA: item.recordIdA,
+          recordIdB: item.recordIdB,
+          source: item.source,
+          actor: args.actor,
+          note: item.note,
+        });
+      } catch (err) {
+        const { pairKey } = canonicalPair(item.recordIdA, item.recordIdB);
+        results[idx] = {
+          kind: "error",
+          pairKey,
+          message: describeSupabaseError(err),
+        };
+      }
+      done++;
+      args.onProgress?.(done, items.length);
+    }
+  }
+
+  const workers: Promise<void>[] = [];
+  for (let i = 0; i < Math.min(concurrency, items.length); i++) {
+    workers.push(worker());
+  }
+  await Promise.all(workers);
+  return results;
+}
+
+/**
+ * Read every active (pending/reopened) resolution row. Used by the
+ * Duplicates page to surface manually-flagged pairs that the on-the-fly
+ * detector doesn't find on its own (different URLs but same person,
+ * pairs pushed by an external cleanup script, etc.). Counterpart to
+ * {@link fetchResolutions} which only fetches rows for pairKeys the
+ * detector already emitted.
+ */
+export async function fetchActiveResolutions(): Promise<DuplicatePairResolution[]> {
+  const client = getClient();
+  const { data, error } = await client
+    .from("duplicate_pair_resolutions")
+    .select(RESOLUTION_COLUMNS)
+    .in("status", ["pending", "reopened"]);
+  if (error) {
+    if (isMissingTableError(error)) {
+      console.warn(
+        "[duplicates] duplicate_pair_resolutions table not found; treating active list as empty.",
+      );
+      return [];
+    }
+    throw error;
+  }
+  return (data ?? []).map((row) => mapResolution(row as ResolutionRow));
+}
+
+/** True when a Supabase error indicates a CHECK constraint failure. The
+ *  `flagged` event_type only became allowed in migration
+ *  20260519090000_flag_potential_duplicate_pairs — desktop builds on
+ *  older Supabase projects shouldn't hard-fail when the audit insert
+ *  hits the previous CHECK. */
+function isCheckConstraintError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { code?: unknown; message?: unknown };
+  // 23514 = Postgres "check_violation"
+  if (e.code === "23514") return true;
+  const msg = typeof e.message === "string" ? e.message.toLowerCase() : "";
+  return msg.includes("check constraint") || msg.includes("violates check");
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -536,9 +848,7 @@ export async function fetchResolutions(
     const chunk = pairKeys.slice(i, i + CHUNK);
     const { data, error } = await client
       .from("duplicate_pair_resolutions")
-      .select(
-        "pair_key, status, resolved_by, resolved_at, resolution_notes, winner_record_id, updated_at",
-      )
+      .select(RESOLUTION_COLUMNS)
       .in("pair_key", chunk);
     if (error) {
       // The migration in

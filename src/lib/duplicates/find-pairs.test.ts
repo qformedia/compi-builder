@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { findDuplicatePairs } from "./find-pairs";
+import { buildFlaggedPair, findDuplicatePairs } from "./find-pairs";
 import type { CreatorRowFull } from "@/lib/data-integrity/creator-csv";
 
 function creator(
@@ -144,5 +144,66 @@ describe("findDuplicatePairs — output sort order", () => {
       "instagram|https://www.instagram.com/zzz/",
       "tiktok|https://www.tiktok.com/@aaa",
     ]);
+  });
+});
+
+describe("buildFlaggedPair", () => {
+  it("builds a synthetic pair with kind='flagged' and null network/canonicalUrl", () => {
+    const nameByRecordId = new Map([
+      ["100", "alice"],
+      ["200", "bob"],
+    ]);
+    const flaggedAt = new Date("2026-05-19T09:00:00Z");
+    const pair = buildFlaggedPair({
+      pairKey: "100:200",
+      recordIdA: "100",
+      recordIdB: "200",
+      flaggedSource: "external-script:cleanup",
+      flaggedAt,
+      nameByRecordId,
+    });
+    expect(pair.kind).toBe("flagged");
+    expect(pair.network).toBeNull();
+    expect(pair.canonicalUrl).toBeNull();
+    expect(pair.source).toEqual([]);
+    expect(pair.flaggedSource).toBe("external-script:cleanup");
+    expect(pair.flaggedAt).toBe(flaggedAt);
+    expect(pair.a.rid).toBe("100");
+    expect(pair.a.name).toBe("alice");
+    expect(pair.b.rid).toBe("200");
+    expect(pair.b.name).toBe("bob");
+    expect(pair.a.columns).toEqual([]);
+    expect(pair.b.columns).toEqual([]);
+  });
+
+  it("falls back to bare record id when the creator is missing from the index", () => {
+    // Realistic when an external script flagged a record that has since
+    // been merged or archived in HubSpot — the export no longer has a
+    // row for it. The UI should still render the pair so the user can
+    // dismiss it.
+    const nameByRecordId = new Map([["100", "alice"]]);
+    const pair = buildFlaggedPair({
+      pairKey: "100:9999",
+      recordIdA: "100",
+      recordIdB: "9999",
+      flaggedSource: "integrity-mark",
+      flaggedAt: null,
+      nameByRecordId,
+    });
+    expect(pair.a.name).toBe("alice");
+    expect(pair.b.name).toBe("9999");
+  });
+
+  it("uses the bare record id when no nameByRecordId map is provided", () => {
+    const pair = buildFlaggedPair({
+      pairKey: "100:200",
+      recordIdA: "100",
+      recordIdB: "200",
+      flaggedSource: null,
+      flaggedAt: null,
+    });
+    expect(pair.a.name).toBe("100");
+    expect(pair.b.name).toBe("200");
+    expect(pair.flaggedSource).toBeNull();
   });
 });

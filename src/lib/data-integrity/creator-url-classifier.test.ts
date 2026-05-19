@@ -33,14 +33,19 @@ function resolution(
   status: DuplicatePairResolution["status"],
   winnerRecordId: string | null = null,
 ): DuplicatePairResolution {
+  const [recordIdA, recordIdB] = pairKey.split(":");
   return {
     pairKey,
+    recordIdA: recordIdA ?? "",
+    recordIdB: recordIdB ?? "",
     status,
     resolvedBy: "tester",
     resolvedAt: new Date("2026-05-13T10:00:00Z"),
     resolutionNotes: null,
     winnerRecordId,
     updatedAt: new Date("2026-05-13T10:00:00Z"),
+    source: null,
+    flaggedAt: null,
   };
 }
 
@@ -306,6 +311,47 @@ describe("classifyCreatorUrls — resolution-aware filtering", () => {
       resolutions,
     });
     expect(issues[0].bucket).toBe("duplicate-after-fix");
+  });
+
+  it("surfaces flaggedSource and flaggedAt on the colliding side when the pending row was manually marked", () => {
+    // Creator 100 has a fixable URL (missing www.), creator 200 has the
+    // canonical form already. Only the fixable side emits a
+    // duplicate-after-fix issue; the valid-canonical side stays silent
+    // because it isn't broken. We assert the flag info propagates
+    // through that one issue's `collidesWith[0]`.
+    const flaggedAt = new Date("2026-05-19T09:30:00Z");
+    const pending = resolution("100:200", "pending");
+    pending.source = "integrity-mark";
+    pending.flaggedAt = flaggedAt;
+    const resolutions = new Map<string, DuplicatePairResolution>([
+      ["100:200", pending],
+    ]);
+    const { issues } = classifyCreatorUrls({
+      creators: [
+        creator("100", "alice", { Instagram: "https://instagram.com/foo/" }),
+        creator("200", "bob", { Instagram: "https://www.instagram.com/foo/" }),
+      ],
+      resolutions,
+    });
+    const dup = only(issues, "duplicate-after-fix");
+    expect(dup).toHaveLength(1);
+    expect(dup[0].creatorId).toBe("100");
+    expect(dup[0].collidesWith?.[0]?.creatorId).toBe("200");
+    expect(dup[0].collidesWith?.[0]?.flaggedSource).toBe("integrity-mark");
+    expect(dup[0].collidesWith?.[0]?.flaggedAt).toEqual(flaggedAt);
+  });
+
+  it("leaves flaggedSource/flaggedAt null when no resolution row exists yet", () => {
+    const { issues } = classifyCreatorUrls({
+      creators: [
+        creator("100", "alice", { Instagram: "https://instagram.com/foo/" }),
+        creator("200", "bob", { Instagram: "https://www.instagram.com/foo/" }),
+      ],
+    });
+    const dup = only(issues, "duplicate-after-fix");
+    expect(dup).toHaveLength(1);
+    expect(dup[0].collidesWith?.[0]?.flaggedSource).toBeNull();
+    expect(dup[0].collidesWith?.[0]?.flaggedAt).toBeNull();
   });
 
   it("keeps a duplicate-after-fix row when the pair was reopened", () => {

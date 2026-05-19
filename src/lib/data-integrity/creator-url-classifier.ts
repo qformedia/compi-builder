@@ -70,6 +70,13 @@ export interface ClassifiedCollision {
   /** Stable pair key `${min(rid_a,rid_b)}:${max(rid_a,rid_b)}` matching the
    *  shape used everywhere else (find-pairs.ts, duplicate_pair_resolutions). */
   pairKey: string;
+  /** Non-null when the pair has been manually flagged as a potential
+   *  duplicate (via the Integrity Mark button or an external script).
+   *  The UI uses this to swap the "Mark as potential duplicate" button
+   *  for a "Marked — resolve in Duplicates" indicator. */
+  flaggedSource?: string | null;
+  /** When the flag was added, paired with `flaggedSource`. */
+  flaggedAt?: Date | null;
 }
 
 export interface ClassifiedIssue {
@@ -325,6 +332,11 @@ export function classifyCreatorUrls(input: ClassifierInput): ClassifierResult {
           field: other.field,
           rawValue: other.rawValue,
           pairKey: pk,
+          // Carry the flag provenance so the Integrity row can switch
+          // its action button to "Marked — resolve in Duplicates"
+          // without a second Supabase fetch.
+          flaggedSource: res?.source ?? null,
+          flaggedAt: res?.flaggedAt ?? null,
         });
         allDismissed = false;
         continue;

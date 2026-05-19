@@ -40,9 +40,14 @@ import {
   type CreatorExportResult,
 } from "@/lib/creator-export";
 import { parseCreatorsCsvFull } from "@/lib/data-integrity/creator-csv";
-import { findDuplicatePairs, type DuplicatePair } from "@/lib/duplicates/find-pairs";
+import {
+  buildFlaggedPair,
+  findDuplicatePairs,
+  type DuplicatePair,
+} from "@/lib/duplicates/find-pairs";
 import {
   describeSupabaseError,
+  fetchActiveResolutions,
   fetchMergeHistory,
   fetchResolutions,
   joinDuplicatesRoom,
@@ -73,6 +78,10 @@ interface Props {
 
 interface AnalysisResult {
   pairs: DuplicatePair[];
+  /** Lookup from HubSpot record id → creator display name. Built once
+   *  from the parsed CSV so the page can hydrate synthetic flagged
+   *  pairs without re-walking the rows. */
+  nameByRecordId: Map<string, string>;
   generatedAt: Date;
   source: CreatorExportResult["source"];
 }
@@ -89,7 +98,16 @@ function analyze(result: CreatorExportResult): AnalysisResult {
   if (cachedAnalysis && cachedSourceKey === key) return cachedAnalysis;
   const rows = parseCreatorsCsvFull(result.csv);
   const pairs = findDuplicatePairs(rows);
-  cachedAnalysis = { pairs, generatedAt: result.generatedAt, source: result.source };
+  const nameByRecordId = new Map<string, string>();
+  for (const row of rows) {
+    if (row.id) nameByRecordId.set(row.id, row.name || row.id);
+  }
+  cachedAnalysis = {
+    pairs,
+    nameByRecordId,
+    generatedAt: result.generatedAt,
+    source: result.source,
+  };
   cachedSourceKey = key;
   return cachedAnalysis;
 }
@@ -160,7 +178,24 @@ export function DuplicatesPage({
         const next = analyze(result);
         setAnalysis(next);
         try {
-          const map = await fetchResolutions(next.pairs.map((p) => p.pairKey));
+          // Parallel fetch: resolutions for detected pairs (used to
+          // filter resolved/dismissed out of the list) AND every active
+          // row in the table (used to surface manually-flagged pairs
+          // the detector didn't find). The two queries hit the same
+          // table; running them concurrently keeps the load time close
+          // to a single round-trip.
+          const [map, active] = await Promise.all([
+            fetchResolutions(next.pairs.map((p) => p.pairKey)),
+            fetchActiveResolutions(),
+          ]);
+          // Merge active rows that don't have a detected pair into the
+          // resolutions map so the rest of the page sees a single
+          // unified status lookup. The active-row data already carries
+          // record ids + source + flagged_at which the detected path
+          // didn't have, so prefer the active row when both exist.
+          for (const a of active) {
+            map.set(a.pairKey, a);
+          }
           setResolutions(map);
         } catch (err) {
           // Fetch failure shouldn't block the list — surface as a banner
@@ -275,13 +310,74 @@ export function DuplicatesPage({
   }, [analysis, sessionResolvedKeys, resolutions]);
 
   const pendingPairs = useMemo(() => {
-    const all = analysis?.pairs ?? [];
-    return all.filter((p) => {
-      if (sessionResolvedKeys.has(p.pairKey)) return false;
+    const detected = analysis?.pairs ?? [];
+    const nameByRecordId = analysis?.nameByRecordId ?? new Map<string, string>();
+
+    // Step 1: detected pairs, filtered by resolutions and session state.
+    // Same logic as before — pairs without a row or with pending/reopened
+    // status stay in the list; resolved/dismissed get hidden.
+    const detectedKeys = new Set<string>();
+    const detectedPending: DuplicatePair[] = [];
+    for (const p of detected) {
+      detectedKeys.add(p.pairKey);
+      if (sessionResolvedKeys.has(p.pairKey)) continue;
       const r = resolutions.get(p.pairKey);
-      if (!r) return true;
-      return r.status !== "resolved" && r.status !== "dismissed";
-    });
+      if (!r) {
+        detectedPending.push(p);
+        continue;
+      }
+      if (r.status === "resolved" || r.status === "dismissed") continue;
+      // Hydrate `flaggedSource` / `flaggedAt` onto the detected pair if
+      // an external script (or the Integrity button) also flagged it.
+      // That keeps the "Flagged via ..." badge visible even when the
+      // detector found the same collision.
+      detectedPending.push(
+        r.source
+          ? { ...p, flaggedSource: r.source, flaggedAt: r.flaggedAt }
+          : p,
+      );
+    }
+
+    // Step 2: synthetic pairs for active (pending/reopened) rows the
+    // detector didn't emit. These come from external scripts or from
+    // the Integrity Mark button when the collision URL isn't in the
+    // current CSV (e.g. one record's URL was just edited but the
+    // export is stale). We hydrate display names from the CSV when
+    // available; missing records fall back to showing the bare record
+    // id so the user can still see + dismiss the entry.
+    const synthetic: DuplicatePair[] = [];
+    for (const r of resolutions.values()) {
+      if (detectedKeys.has(r.pairKey)) continue;
+      if (sessionResolvedKeys.has(r.pairKey)) continue;
+      if (r.status === "resolved" || r.status === "dismissed") continue;
+      synthetic.push(
+        buildFlaggedPair({
+          pairKey: r.pairKey,
+          recordIdA: r.recordIdA,
+          recordIdB: r.recordIdB,
+          flaggedSource: r.source,
+          flaggedAt: r.flaggedAt,
+          nameByRecordId,
+        }),
+      );
+    }
+
+    // Step 3: sort flagged pairs to the top by flagged_at desc so the
+    // explicit queue (manual marks, external pushes) is the first thing
+    // the user sees. Detected pairs keep their canonical sort.
+    const flaggedFirst = (a: DuplicatePair, b: DuplicatePair) => {
+      const aFlagged = a.kind === "flagged" || !!a.flaggedSource;
+      const bFlagged = b.kind === "flagged" || !!b.flaggedSource;
+      if (aFlagged !== bFlagged) return aFlagged ? -1 : 1;
+      if (aFlagged && bFlagged) {
+        const aAt = a.flaggedAt?.getTime() ?? 0;
+        const bAt = b.flaggedAt?.getTime() ?? 0;
+        if (aAt !== bAt) return bAt - aAt; // most recent first
+      }
+      return 0;
+    };
+
+    return [...detectedPending, ...synthetic].sort(flaggedFirst);
   }, [analysis, resolutions, sessionResolvedKeys]);
 
   // Look in both lists so the user can reopen a session-resolved pair to
@@ -380,12 +476,16 @@ export function DuplicatesPage({
             } else {
               next.set(pairKey, {
                 pairKey,
+                recordIdA: selectedPair.a.rid < selectedPair.b.rid ? selectedPair.a.rid : selectedPair.b.rid,
+                recordIdB: selectedPair.a.rid < selectedPair.b.rid ? selectedPair.b.rid : selectedPair.a.rid,
                 status: event.status,
                 resolvedBy: localUser || null,
                 resolvedAt: new Date(),
                 resolutionNotes: event.notes,
                 winnerRecordId: event.winnerRecordId,
                 updatedAt: new Date(),
+                source: null,
+                flaggedAt: null,
               });
             }
             return next;
@@ -424,12 +524,16 @@ export function DuplicatesPage({
             const next = new Map(prev);
             next.set(pairKey, {
               pairKey,
+              recordIdA: selectedPair.a.rid < selectedPair.b.rid ? selectedPair.a.rid : selectedPair.b.rid,
+              recordIdB: selectedPair.a.rid < selectedPair.b.rid ? selectedPair.b.rid : selectedPair.a.rid,
               status: "resolved",
               resolvedBy: localUser || null,
               resolvedAt: new Date(),
               resolutionNotes: "Merged via Duplicates page",
               winnerRecordId: winnerRid,
               updatedAt: new Date(),
+              source: null,
+              flaggedAt: null,
             });
             return next;
           });
@@ -649,13 +753,26 @@ export function DuplicatesPage({
                 Detection ran on the {analysis.source} cache from{" "}
                 {analysis.generatedAt.toLocaleString()}. Detected{" "}
                 {analysis.pairs.length} pairs total
-                {analysis.pairs.length - pendingPairs.length > 0 && (
+                {pendingPairs.filter((p) => p.kind === "flagged").length > 0 && (
                   <>
                     ;{" "}
-                    {analysis.pairs.length - pendingPairs.length} hidden as
-                    resolved or dismissed
+                    {pendingPairs.filter((p) => p.kind === "flagged").length}{" "}
+                    flagged manually
                   </>
                 )}
+                {(() => {
+                  // "Hidden" counts only detected pairs the user actively
+                  // resolved or dismissed. Synthetic flagged pairs don't
+                  // contribute since they have no detected counterpart.
+                  const hidden = analysis.pairs.filter((p) => {
+                    if (sessionResolvedKeys.has(p.pairKey)) return true;
+                    const r = resolutions.get(p.pairKey);
+                    return r?.status === "resolved" || r?.status === "dismissed";
+                  }).length;
+                  return hidden > 0 ? (
+                    <>; {hidden} hidden as resolved or dismissed</>
+                  ) : null;
+                })()}
                 .
               </div>
             )}
@@ -698,9 +815,20 @@ function PairRow({
             <span className="truncate">{aName}</span>
             <span className="text-muted-foreground">↔</span>
             <span className="truncate">{bName}</span>
-            <Badge variant="outline" className="h-5 px-1.5 text-[10px] capitalize">
-              {pair.network}
-            </Badge>
+            {pair.network && (
+              <Badge variant="outline" className="h-5 px-1.5 text-[10px] capitalize">
+                {pair.network}
+              </Badge>
+            )}
+            {pair.flaggedSource && (
+              <Badge
+                variant="outline"
+                className="h-5 border-violet-300 bg-violet-50 px-1.5 text-[10px] text-violet-700"
+                title={pair.flaggedAt ? `Flagged ${pair.flaggedAt.toLocaleString()}` : undefined}
+              >
+                {humanizeFlaggedSource(pair.flaggedSource)}
+              </Badge>
+            )}
             {pair.source.includes("multi_url_collision") && (
               <Badge variant="outline" className="h-5 px-1.5 text-[10px] text-amber-700">
                 multi-URL cell
@@ -779,9 +907,11 @@ function ResolvedPairRow({
             <span className="truncate">{aName}</span>
             <span className="text-muted-foreground">↔</span>
             <span className="truncate">{bName}</span>
-            <Badge variant="outline" className="h-5 px-1.5 text-[10px] capitalize">
-              {pair.network}
-            </Badge>
+            {pair.network && (
+              <Badge variant="outline" className="h-5 px-1.5 text-[10px] capitalize">
+                {pair.network}
+              </Badge>
+            )}
           </div>
           <div className="mt-0.5 truncate text-[11px] text-muted-foreground">{summary}</div>
         </div>
@@ -811,9 +941,34 @@ function ResolvedPairRow({
  * canonical URL + columns + sources.
  */
 function describePairReason(pair: DuplicatePair): string {
+  // Manually-flagged pairs have no detector columns / canonical URL —
+  // show the provenance instead so the user knows why it's on the list.
+  if (pair.kind === "flagged" && !pair.canonicalUrl) {
+    if (pair.flaggedSource) {
+      return `Flagged for review · ${humanizeFlaggedSource(pair.flaggedSource).toLowerCase()}`;
+    }
+    return "Flagged for review";
+  }
   const aCols = pair.a.columns.join(" / ") || "—";
   const bCols = pair.b.columns.join(" / ") || "—";
-  return `${aCols} ↔ ${bCols} · ${pair.canonicalUrl}`;
+  return `${aCols} ↔ ${bCols} · ${pair.canonicalUrl ?? ""}`;
+}
+
+/**
+ * Render the `duplicate_pair_resolutions.source` label as a short badge.
+ * Convention follows what callers write:
+ *   - `integrity-mark`      → "Flagged via Integrity"
+ *   - `integrity-mark-bulk` → "Flagged via Integrity"
+ *   - `external-script:<n>` → "Flagged by <n>"
+ *   - anything else         → "Flagged by <source>" (verbatim)
+ */
+function humanizeFlaggedSource(source: string): string {
+  if (source.startsWith("integrity-mark")) return "Flagged via Integrity";
+  if (source.startsWith("external-script:")) {
+    const rest = source.slice("external-script:".length).trim();
+    return rest ? `Flagged by ${rest}` : "Flagged by external script";
+  }
+  return `Flagged by ${source}`;
 }
 
 /**

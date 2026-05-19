@@ -32,6 +32,7 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import {
   AlertTriangle,
   ArrowRight,
+  Bookmark,
   CheckCircle2,
   ExternalLink,
   Loader2,
@@ -62,7 +63,13 @@ import {
   type CreatorExportResult,
 } from "@/lib/creator-export";
 import { hubspotCreatorUrl } from "@/lib/hubspot-urls";
-import { describeSupabaseError, fetchResolutions } from "@/lib/duplicates/supabase";
+import {
+  describeSupabaseError,
+  fetchResolutions,
+  flagPotentialDuplicate,
+  flagPotentialDuplicatesBulk,
+  type FlagPotentialDuplicateResult,
+} from "@/lib/duplicates/supabase";
 import type { DuplicatePairResolution } from "@/lib/duplicates/supabase";
 import {
   CREATOR_URL_RULES,
@@ -90,6 +97,7 @@ import type {
   IntegritySectionPage,
   Severity,
 } from "../types";
+import type { AppSettings } from "@/types";
 
 interface CachedAnalysis {
   generatedAt: Date;
@@ -375,11 +383,12 @@ function CreatorUrlRow({
   item,
   token,
   onFixed,
+  settings,
 }: {
   item: ClassifiedIssue;
   token: string;
   onFixed: (id: string, summary?: string) => void;
-  settings: unknown;
+  settings: AppSettings;
 }) {
   if (item.bucket === "fixed-this-session") {
     return <FixedThisSessionRow item={item} />;
@@ -390,7 +399,7 @@ function CreatorUrlRow({
     );
   }
   if (item.bucket === "duplicate-after-fix") {
-    return <DuplicateAfterFixRow item={item} />;
+    return <DuplicateAfterFixRow item={item} settings={settings} />;
   }
   return <ManualRow item={item} />;
 }
@@ -518,39 +527,149 @@ function AutoFixableRow({
   );
 }
 
-function DuplicateAfterFixRow({ item }: { item: ClassifiedIssue }) {
+function DuplicateAfterFixRow({
+  item,
+  settings,
+}: {
+  item: ClassifiedIssue;
+  settings: AppSettings;
+}) {
   const other = item.collidesWith?.[0];
+  // Optimistic flag state. Starts mirroring the classifier-derived value
+  // so a teammate's flag (loaded with the resolutions fetch) is visible
+  // immediately; flips after the local click so the user sees the
+  // "Marked" indicator without waiting for the next reclassify cycle.
+  const [optimisticFlag, setOptimisticFlag] = useState<{
+    source: string;
+    flaggedAt: Date;
+  } | null>(null);
+  const [marking, setMarking] = useState(false);
+  const [markError, setMarkError] = useState<string | null>(null);
+
+  const flagged = optimisticFlag ?? (other?.flaggedSource
+    ? { source: other.flaggedSource, flaggedAt: other.flaggedAt ?? new Date() }
+    : null);
+
   const onOpenDuplicates = () => {
     if (!other) return;
     window.dispatchEvent(
       new CustomEvent("duplicates:open-pair", { detail: { pairKey: other.pairKey } }),
     );
   };
+
+  const onMark = async () => {
+    if (!other || marking) return;
+    setMarking(true);
+    setMarkError(null);
+    try {
+      const result = await flagPotentialDuplicate({
+        recordIdA: item.creatorId,
+        recordIdB: other.creatorId,
+        source: "integrity-mark",
+        actor: settings.ownerEmail || "",
+      });
+      if (result.kind === "error") {
+        setMarkError(result.message);
+        return;
+      }
+      // Treat "skipped: already-flagged" the same as "flagged" — the
+      // row should still show the Marked state.
+      setOptimisticFlag({ source: "integrity-mark", flaggedAt: new Date() });
+      // Nudge the integrity provider to re-fetch resolutions so other
+      // rows (and the bulk-action counts) catch up.
+      window.dispatchEvent(
+        new CustomEvent("creator-urls:reclassify", { detail: "creator-urls" }),
+      );
+    } catch (err) {
+      setMarkError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setMarking(false);
+    }
+  };
+
   return (
     <ClassifiedRowShell
       item={item}
       bucketLabel={
-        <Badge
-          variant="outline"
-          className="h-4 flex-shrink-0 rounded px-1.5 text-[10px] font-normal text-amber-700"
-        >
-          Resolve first
-        </Badge>
+        flagged ? (
+          <Badge
+            variant="outline"
+            className="h-4 flex-shrink-0 rounded border-violet-300 bg-violet-50 px-1.5 text-[10px] font-normal text-violet-700"
+            title={`Flagged ${flagged.flaggedAt.toLocaleString()}`}
+          >
+            <Bookmark className="mr-0.5 h-3 w-3 inline-block" />
+            Marked
+          </Badge>
+        ) : (
+          <Badge
+            variant="outline"
+            className="h-4 flex-shrink-0 rounded px-1.5 text-[10px] font-normal text-amber-700"
+          >
+            Resolve first
+          </Badge>
+        )
       }
       actions={
         <>
-          <Button
-            type="button"
-            variant="outline"
-            size="sm"
-            className="h-7 cursor-pointer px-2 text-xs"
-            disabled={!other}
-            onClick={onOpenDuplicates}
-            title="Jump to this pair in the Duplicates page"
-          >
-            <Users className="mr-1 h-3 w-3" />
-            Open in Duplicates
-          </Button>
+          {markError && (
+            <span
+              className="max-w-[180px] truncate text-[10px] text-destructive"
+              title={markError}
+            >
+              {markError}
+            </span>
+          )}
+          {flagged ? (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 cursor-pointer px-2 text-xs"
+              disabled={!other}
+              onClick={onOpenDuplicates}
+              title="Open this pair in the Duplicates page"
+            >
+              <Users className="mr-1 h-3 w-3" />
+              Resolve in Duplicates
+              <ArrowRight className="ml-1 h-3 w-3" />
+            </Button>
+          ) : (
+            <>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                className="h-7 cursor-pointer px-2 text-xs"
+                disabled={!other || marking}
+                onClick={() => void onMark()}
+                title="Add this pair to the Duplicates page queue"
+              >
+                {marking ? (
+                  <>
+                    <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                    Marking…
+                  </>
+                ) : (
+                  <>
+                    <Bookmark className="mr-1 h-3 w-3" />
+                    Mark as potential duplicate
+                  </>
+                )}
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className="h-7 cursor-pointer px-2 text-xs"
+                disabled={!other}
+                onClick={onOpenDuplicates}
+                title="Jump to this pair in the Duplicates page"
+              >
+                <Users className="mr-1 h-3 w-3" />
+                Open in Duplicates
+              </Button>
+            </>
+          )}
           <Button
             type="button"
             variant="ghost"
@@ -606,10 +725,12 @@ function CreatorUrlsStatusLine() {
 function CreatorUrlsBulkActions({
   sections,
   token,
+  settings,
   onFixed,
 }: {
   sections: IntegritySection<ClassifiedIssue>[];
   token: string;
+  settings: AppSettings;
   onFixed: (id: string, summary?: string) => void;
 }) {
   const [progress, setProgress] = useState<CreatorExportProgress>({ phase: "idle" });
@@ -620,6 +741,20 @@ function CreatorUrlsBulkActions({
   const [fixProgress, setFixProgress] = useState({ done: 0, total: 0 });
   const [fixOutcomes, setFixOutcomes] = useState<BulkAutoFixOutcome[] | null>(null);
   const [previouslyRan, setPreviouslyRan] = useState<boolean>(hasCompletedAutofixRun());
+  // Bulk-mark state — separate from the bulk auto-fix dialog because
+  // marking is a much lighter operation (Supabase-only, no HubSpot
+  // writes) and doesn't need a confirmation modal.
+  const [marking, setMarking] = useState(false);
+  const [markProgress, setMarkProgress] = useState({ done: 0, total: 0 });
+  const [markOutcome, setMarkOutcome] = useState<{
+    flagged: number;
+    skipped: number;
+    errors: number;
+    /** First per-row error message captured from the bulk run. Surfaced
+     *  inline so a fully-failed run (e.g. missing migration) doesn't
+     *  read as "nothing happened". */
+    firstErrorMessage?: string;
+  } | null>(null);
 
   useEffect(() => {
     return subscribeCreatorExportProgress(setProgress);
@@ -634,6 +769,17 @@ function CreatorUrlsBulkActions({
     const cap = previouslyRan ? autoFixable.length : Math.min(autoFixable.length, AUTOFIX_FIRST_RUN_CAP);
     return autoFixable.slice(0, cap);
   }, [autoFixable, previouslyRan]);
+
+  // Duplicate-after-fix rows that haven't been flagged yet. The classifier
+  // already populates `collidesWith[0].flaggedSource`, so anything still
+  // null here is fresh work for the bulk-mark button.
+  const markable = useMemo(() => {
+    const items = sections.find((s) => s.id === "duplicate-after-fix")?.items ?? [];
+    return items.filter((item) => {
+      const other = item.collidesWith?.[0];
+      return !!other && !other.flaggedSource;
+    });
+  }, [sections]);
 
   const generatedAt = progress.generatedAt ?? cachedAnalysis?.generatedAt;
   const isStale = generatedAt ? isCreatorExportStale(generatedAt) : true;
@@ -695,6 +841,63 @@ function CreatorUrlsBulkActions({
     }
   };
 
+  const onClickMarkAll = () => {
+    if (markable.length === 0 || marking) return;
+    setMarkOutcome(null);
+    void runMarkAll();
+  };
+
+  const runMarkAll = async () => {
+    setMarking(true);
+    setMarkProgress({ done: 0, total: markable.length });
+    try {
+      // Deduplicate by pair_key in case the same collision appears
+      // multiple times (e.g. a creator's primary + secondary both
+      // collide with the same other record). Without this, the bulk
+      // helper would issue redundant upserts.
+      const seen = new Set<string>();
+      const items = markable
+        .map((item) => {
+          const other = item.collidesWith?.[0];
+          if (!other) return null;
+          if (seen.has(other.pairKey)) return null;
+          seen.add(other.pairKey);
+          return {
+            recordIdA: item.creatorId,
+            recordIdB: other.creatorId,
+            source: "integrity-mark-bulk",
+          };
+        })
+        .filter((x): x is NonNullable<typeof x> => x !== null);
+
+      const results: FlagPotentialDuplicateResult[] = await flagPotentialDuplicatesBulk({
+        items,
+        actor: settings.ownerEmail || "",
+        onProgress: (done) => setMarkProgress({ done, total: items.length }),
+      });
+      let flagged = 0;
+      let skipped = 0;
+      let errors = 0;
+      let firstErrorMessage: string | undefined;
+      for (const r of results) {
+        if (r.kind === "flagged") flagged++;
+        else if (r.kind === "skipped") skipped++;
+        else {
+          errors++;
+          if (!firstErrorMessage) firstErrorMessage = r.message;
+        }
+      }
+      setMarkOutcome({ flagged, skipped, errors, firstErrorMessage });
+      if (flagged > 0) {
+        window.dispatchEvent(
+          new CustomEvent("creator-urls:reclassify", { detail: "creator-urls" }),
+        );
+      }
+    } finally {
+      setMarking(false);
+    }
+  };
+
   const ageLabel = generatedAt ? `Last export: ${formatAge(generatedAt)}` : "No cached export";
   const isExportBusy =
     refreshing ||
@@ -735,6 +938,29 @@ function CreatorUrlsBulkActions({
               )}
             </Button>
           )}
+          {markable.length > 0 && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-7 cursor-pointer border-violet-300 px-2 text-xs text-violet-700 hover:bg-violet-50 hover:text-violet-700"
+              disabled={marking}
+              onClick={onClickMarkAll}
+              title="Add every unmarked duplicate-after-fix pair to the Duplicates queue"
+            >
+              {marking ? (
+                <>
+                  <Loader2 className="mr-1 h-3 w-3 animate-spin" />
+                  Marking {markProgress.done}/{markProgress.total}
+                </>
+              ) : (
+                <>
+                  <Bookmark className="mr-1 h-3 w-3" />
+                  Mark all as potential duplicate ({markable.length})
+                </>
+              )}
+            </Button>
+          )}
           <Button
             type="button"
             variant="outline"
@@ -748,6 +974,29 @@ function CreatorUrlsBulkActions({
             Force re-export
           </Button>
         </div>
+        {markOutcome && (
+          <div className="flex max-w-[420px] flex-col items-end gap-0.5">
+            <span
+              className={cn(
+                "text-[11px]",
+                markOutcome.errors > 0 ? "text-destructive" : "text-muted-foreground",
+              )}
+              title="Last bulk-mark run"
+            >
+              Marked {markOutcome.flagged}
+              {markOutcome.skipped > 0 && ` · ${markOutcome.skipped} already marked`}
+              {markOutcome.errors > 0 && ` · ${markOutcome.errors} failed`}
+            </span>
+            {markOutcome.errors > 0 && markOutcome.firstErrorMessage && (
+              <span
+                className="max-w-full truncate text-[11px] text-destructive"
+                title={markOutcome.firstErrorMessage}
+              >
+                {markOutcome.firstErrorMessage}
+              </span>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Re-export confirmation (warns if cache is fresh). */}

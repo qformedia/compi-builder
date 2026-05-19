@@ -549,8 +549,8 @@ export function DuplicatePairDetail({
         loserRecordId: loserRid,
         actor: localUser,
         snapshot: {
-          network: pair.network,
-          canonicalUrl: pair.canonicalUrl,
+          network: pair.network ?? "",
+          canonicalUrl: pair.canonicalUrl ?? "",
           winnerName: winnerSide === "a" ? aName : bName,
           loserName: winnerSide === "a" ? bName : aName,
           winnerProps,
@@ -684,21 +684,34 @@ export function DuplicatePairDetail({
           <CardHeader className="gap-1.5">
             <CardTitle className="text-base">Why this is a potential duplicate</CardTitle>
             <CardDescription className="text-xs">
-              The same canonical {pair.network} URL was found across both records.
+              {pair.kind === "flagged"
+                ? pair.flaggedSource
+                  ? `This pair was flagged manually for review (source: ${pair.flaggedSource}).`
+                  : "This pair was flagged manually for review."
+                : `The same canonical ${pair.network ?? ""} URL was found across both records.`}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3 text-sm">
             <div className="flex flex-wrap items-center gap-2">
-              <Badge variant="outline" className="capitalize">{pair.network}</Badge>
-              <button
-                type="button"
-                onClick={() => void openUrl(pair.canonicalUrl)}
-                className="inline-flex items-center gap-1 truncate text-primary hover:underline"
-                title="Open canonical URL"
-              >
-                <span className="truncate">{pair.canonicalUrl}</span>
-                <ExternalLink className="h-3 w-3 flex-shrink-0" />
-              </button>
+              {pair.network && (
+                <Badge variant="outline" className="capitalize">{pair.network}</Badge>
+              )}
+              {pair.canonicalUrl && (
+                <button
+                  type="button"
+                  onClick={() => void openUrl(pair.canonicalUrl as string)}
+                  className="inline-flex items-center gap-1 truncate text-primary hover:underline"
+                  title="Open canonical URL"
+                >
+                  <span className="truncate">{pair.canonicalUrl}</span>
+                  <ExternalLink className="h-3 w-3 flex-shrink-0" />
+                </button>
+              )}
+              {pair.kind === "flagged" && (
+                <Badge variant="secondary" className="text-[10px]">
+                  Flagged
+                </Badge>
+              )}
               {pair.source.map((s) => (
                 <Badge key={s} variant="secondary" className="text-[10px]">
                   {humanizeSource(s)}
