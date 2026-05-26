@@ -23,6 +23,8 @@ import {
   Check,
   AlertCircle,
   ChevronsUpDown,
+  Instagram,
+  Music2,
 } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { cn } from "@/lib/utils";
@@ -36,9 +38,12 @@ import {
   searchVideoProjects,
   fetchVideoProjectClips,
   findClipByLink,
+  searchClipsByLinkToken,
   DEFAULT_CREATOR_CLIP_CAP,
 } from "@/lib/hubspot";
 import { checkUrlCompliance } from "@/lib/url-compliance";
+import { extractCodeFromUrl, looksLikeCode, looksLikeUrl } from "@/lib/clip-code";
+import { Badge } from "@/components/ui/badge";
 import type { CreatorOption, VideoProjectSummary } from "@/lib/hubspot";
 import { fetchTagOptions } from "@/lib/tags";
 import type { TagOption } from "@/lib/tags";
@@ -1047,14 +1052,32 @@ function CreatorRow({
   );
 }
 
-// ── AddClipByLink: lookup an External Clip by URL and add it to the project ──
+// ── AddClipByLink: lookup an External Clip by URL or code and preview it ──
 
 type LinkLookupState =
   | { kind: "idle" }
   | { kind: "checking" }
   | { kind: "invalid"; message: string }
-  | { kind: "found"; clip: Clip }
+  | { kind: "found-exact"; clip: Clip }
+  | { kind: "found-by-code"; clip: Clip }
+  | { kind: "multi-by-code"; clips: Clip[] }
   | { kind: "not-found" };
+
+function clipLinkPlatformIcon(link: string) {
+  const lower = link.toLowerCase();
+  if (lower.includes("instagram.com")) {
+    return <Instagram className="h-3.5 w-3.5 flex-shrink-0 text-pink-500" />;
+  }
+  if (lower.includes("tiktok.com")) {
+    return <Music2 className="h-3.5 w-3.5 flex-shrink-0 text-cyan-500" />;
+  }
+  return <LinkIcon className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground" />;
+}
+
+function truncateClipLink(link: string, max = 36): string {
+  const stripped = link.replace(/^https?:\/\/(www\.)?/, "");
+  return stripped.length > max ? `${stripped.slice(0, max)}…` : stripped;
+}
 
 interface AddClipByLinkProps {
   token: string;
@@ -1066,7 +1089,21 @@ function AddClipByLink({ token, onPreviewClip }: AddClipByLinkProps) {
   const [input, setInput] = useState("");
   const [state, setState] = useState<LinkLookupState>({ kind: "idle" });
 
-  // Debounce: normalize via url-compliance, then look up in HubSpot.
+  const resetAndPreview = useCallback(
+    (clip: Clip) => {
+      onPreviewClip(clip);
+      setInput("");
+      setState({ kind: "idle" });
+      setOpen(false);
+    },
+    [onPreviewClip],
+  );
+
+  const canViewSingle = state.kind === "found-exact" || state.kind === "found-by-code";
+  const singleClip =
+    state.kind === "found-exact" || state.kind === "found-by-code" ? state.clip : null;
+
+  // Debounce: URL exact match first, then fallback to code search.
   useEffect(() => {
     const trimmed = input.trim();
     if (!trimmed) {
@@ -1076,19 +1113,69 @@ function AddClipByLink({ token, onPreviewClip }: AddClipByLinkProps) {
     setState({ kind: "checking" });
     let cancelled = false;
     const timer = setTimeout(async () => {
-      const compliance = checkUrlCompliance(trimmed);
-      if (compliance.status === "invalid") {
-        if (!cancelled) {
-          setState({ kind: "invalid", message: compliance.issues[0] ?? "invalid URL" });
+      const applyCodeResults = (clips: Clip[]) => {
+        if (cancelled) return;
+        if (clips.length === 0) setState({ kind: "not-found" });
+        else if (clips.length === 1) setState({ kind: "found-by-code", clip: clips[0]! });
+        else setState({ kind: "multi-by-code", clips });
+      };
+
+      const searchByCode = async (code: string) => {
+        try {
+          const clips = await searchClipsByLinkToken(token, code);
+          applyCodeResults(clips);
+        } catch (e) {
+          if (!cancelled) {
+            setState({
+              kind: "invalid",
+              message: e instanceof Error ? e.message : String(e),
+            });
+          }
+        }
+      };
+
+      if (looksLikeUrl(trimmed)) {
+        const compliance = checkUrlCompliance(trimmed);
+        if (compliance.status === "invalid") {
+          if (!cancelled) {
+            setState({
+              kind: "invalid",
+              message: compliance.issues[0] ?? "invalid URL",
+            });
+          }
+          return;
+        }
+        try {
+          const res = await findClipByLink(token, compliance.fixedUrl);
+          if (cancelled) return;
+          if (res.found && res.clip) {
+            setState({ kind: "found-exact", clip: res.clip });
+            return;
+          }
+          const code = extractCodeFromUrl(compliance.fixedUrl, compliance.network);
+          if (!code) {
+            setState({ kind: "not-found" });
+            return;
+          }
+          await searchByCode(code);
+        } catch (e) {
+          if (!cancelled) {
+            setState({
+              kind: "invalid",
+              message: e instanceof Error ? e.message : String(e),
+            });
+          }
         }
         return;
       }
-      try {
-        const res = await findClipByLink(token, compliance.fixedUrl);
-        if (cancelled) return;
-        setState(res.found && res.clip ? { kind: "found", clip: res.clip } : { kind: "not-found" });
-      } catch (e) {
-        if (!cancelled) setState({ kind: "invalid", message: e instanceof Error ? e.message : String(e) });
+
+      if (looksLikeCode(trimmed)) {
+        await searchByCode(trimmed);
+        return;
+      }
+
+      if (!cancelled) {
+        setState({ kind: "invalid", message: "Enter a valid URL or video code" });
       }
     }, 400);
     return () => {
@@ -1098,11 +1185,8 @@ function AddClipByLink({ token, onPreviewClip }: AddClipByLinkProps) {
   }, [input, token]);
 
   const handleView = () => {
-    if (state.kind !== "found") return;
-    onPreviewClip(state.clip);
-    setInput("");
-    setState({ kind: "idle" });
-    setOpen(false);
+    if (!singleClip) return;
+    resetAndPreview(singleClip);
   };
 
   return (
@@ -1112,7 +1196,7 @@ function AddClipByLink({ token, onPreviewClip }: AddClipByLinkProps) {
           variant="outline"
           size="xs"
           className="font-normal"
-          title="Look up an existing External Clip by its source URL and preview it"
+          title="Look up an existing External Clip by its source URL or video code and preview it"
         >
           <LinkIcon className="mr-1 h-3.5 w-3.5" />
           EC by Link
@@ -1121,30 +1205,38 @@ function AddClipByLink({ token, onPreviewClip }: AddClipByLinkProps) {
       <PopoverContent className="w-96 p-3" align="end">
         <div className="flex flex-col gap-2">
           <label className="text-xs font-medium text-muted-foreground">
-            Paste an External Clip URL — we'll verify it exists in HubSpot and show a preview.
+            Paste an External Clip URL or code — we'll verify it exists in HubSpot and show a preview.
           </label>
           <div className="flex gap-2">
             <Input
               autoFocus
-              placeholder="https://www.instagram.com/reel/..."
+              placeholder="https://www.instagram.com/reel/... or Cn3xyzAbc"
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && state.kind === "found") handleView();
+                if (e.key === "Enter" && canViewSingle) handleView();
               }}
             />
-            <Button size="sm" onClick={handleView} disabled={state.kind !== "found"}>
-              View
-            </Button>
+            {state.kind !== "multi-by-code" && (
+              <Button size="sm" onClick={handleView} disabled={!canViewSingle}>
+                View
+              </Button>
+            )}
           </div>
-          <LinkLookupStatus state={state} />
+          <LinkLookupStatus state={state} onSelectClip={resetAndPreview} />
         </div>
       </PopoverContent>
     </Popover>
   );
 }
 
-function LinkLookupStatus({ state }: { state: LinkLookupState }) {
+function LinkLookupStatus({
+  state,
+  onSelectClip,
+}: {
+  state: LinkLookupState;
+  onSelectClip: (clip: Clip) => void;
+}) {
   if (state.kind === "idle") return null;
   if (state.kind === "checking") {
     return (
@@ -1166,15 +1258,53 @@ function LinkLookupStatus({ state }: { state: LinkLookupState }) {
     return (
       <p className="flex items-start gap-1.5 text-xs text-destructive">
         <AlertCircle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
-        Not in HubSpot — verify the link or create the clip via General Search.
+        Not in HubSpot — no clip with that URL or code. Verify the input or create the clip via General Search.
       </p>
     );
   }
+  if (state.kind === "multi-by-code") {
+    return (
+      <div className="space-y-2">
+        <p className="text-xs font-medium text-muted-foreground">
+          Found {state.clips.length} clips matching that code
+        </p>
+        <div className="max-h-40 space-y-1 overflow-y-auto">
+          {state.clips.map((clip) => (
+            <div
+              key={clip.id}
+              className="flex items-center gap-2 rounded-md border px-2 py-1.5 text-xs"
+            >
+              {clipLinkPlatformIcon(clip.link)}
+              <div className="min-w-0 flex-1">
+                <p className="truncate font-medium">{clip.creatorName}</p>
+                <p className="truncate text-[10px] text-muted-foreground" title={clip.link}>
+                  {truncateClipLink(clip.link)}
+                </p>
+              </div>
+              <Button
+                size="xs"
+                variant="outline"
+                className="h-6 shrink-0 px-2 text-[10px]"
+                onClick={() => onSelectClip(clip)}
+              >
+                View
+              </Button>
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  }
   return (
-    <p className="flex items-center gap-1.5 text-xs text-green-600 dark:text-green-400">
+    <p className="flex flex-wrap items-center gap-1.5 text-xs text-green-600 dark:text-green-400">
       <Check className="h-3.5 w-3.5" />
       Found — {state.clip.creatorName}
       {state.clip.score ? ` · ${state.clip.score}` : ""}
+      {state.kind === "found-by-code" && (
+        <Badge variant="secondary" className="h-4 px-1.5 text-[9px] font-normal">
+          by code
+        </Badge>
+      )}
     </p>
   );
 }

@@ -162,6 +162,17 @@ export async function findClipByLink(
   return { found: true, clip: parseClip(data.result) };
 }
 
+/** Search External Clips whose stored link contains the given video code token. */
+export async function searchClipsByLinkToken(
+  token: string,
+  query: string,
+): Promise<Clip[]> {
+  const data = await invoke<{
+    results: Array<{ id: string; properties: Record<string, string | null> }>;
+  }>("search_clips_by_link_token", { token, query });
+  return (data.results ?? []).map(parseClip);
+}
+
 /** Fetch all External Clips associated with a Video Project */
 export async function fetchVideoProjectClips(
   token: string,

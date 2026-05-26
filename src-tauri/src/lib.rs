@@ -4991,6 +4991,53 @@ async fn find_clip_by_link(token: String, link: String) -> Result<serde_json::Va
     }))
 }
 
+/// Search External Clips whose stored `link` contains the given video code token.
+#[tauri::command]
+async fn search_clips_by_link_token(
+    token: String,
+    query: String,
+) -> Result<serde_json::Value, String> {
+    let trimmed = query.trim();
+    if trimmed.is_empty() {
+        return Ok(serde_json::json!({ "results": [] }));
+    }
+
+    let client = reqwest::Client::new();
+    let search_url = format!(
+        "https://api.hubapi.com/crm/v3/objects/{}/search",
+        EXTERNAL_CLIPS_OBJECT_ID
+    );
+
+    let body = helpers::build_search_clips_by_link_token_body(trimmed, CLIP_PROPERTIES, 5);
+
+    let res = client
+        .post(&search_url)
+        .bearer_auth(&token)
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("Clip search failed: {e}"))?;
+
+    if !res.status().is_success() {
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        return Err(format!("HubSpot search error ({}): {}", status, text));
+    }
+
+    let data: serde_json::Value = res
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse search response: {e}"))?;
+
+    let results = data
+        .get("results")
+        .and_then(|r| r.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    Ok(serde_json::json!({ "results": results }))
+}
+
 /// Create a new External Clip in HubSpot (only link + owner, creator fields are synced via association)
 #[tauri::command]
 async fn create_external_clip(
@@ -8028,6 +8075,7 @@ pub fn run() {
             list_owners,
             fetch_hubspot_files_batch,
             find_clip_by_link,
+            search_clips_by_link_token,
             create_external_clip,
             resolve_creator_from_clip_url,
             match_creators_for_handle,

@@ -116,6 +116,33 @@ pub(crate) fn build_filter_groups(
     }
 }
 
+/// Build HubSpot search body for External Clips whose `link` contains a video code.
+/// Wildcards around `query` keep codes with `-` / `_` matching when HubSpot tokenizes URLs.
+pub(crate) fn build_search_clips_by_link_token_body(
+    query: &str,
+    clip_properties: &[&str],
+    limit: u64,
+) -> serde_json::Value {
+    let trimmed = query.trim();
+    let token = format!("*{trimmed}*");
+    let props: Vec<serde_json::Value> = clip_properties
+        .iter()
+        .map(|p| serde_json::json!(p))
+        .collect();
+
+    serde_json::json!({
+        "filterGroups": [{
+            "filters": [{
+                "propertyName": "link",
+                "operator": "CONTAINS_TOKEN",
+                "value": token
+            }]
+        }],
+        "properties": props,
+        "limit": limit
+    })
+}
+
 // ── File Helpers ─────────────────────────────────────────────────────────────
 
 /// Strip existing prefixes: "3 - ", "unused_", or both.
@@ -1785,6 +1812,26 @@ mod tests {
     }
 
     // ── build_filter_groups ──────────────────────────────────────────────
+
+    #[test]
+    fn search_clips_by_link_token_body_wraps_query_with_wildcards() {
+        let props = &["link", "creator_name"];
+        let body = build_search_clips_by_link_token_body("Cn3-_xyzAbc", props, 5);
+        let filters = body["filterGroups"][0]["filters"].as_array().unwrap();
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0]["propertyName"], "link");
+        assert_eq!(filters[0]["operator"], "CONTAINS_TOKEN");
+        assert_eq!(filters[0]["value"], "*Cn3-_xyzAbc*");
+        assert_eq!(body["limit"], 5);
+        assert_eq!(body["properties"], serde_json::json!(["link", "creator_name"]));
+    }
+
+    #[test]
+    fn search_clips_by_link_token_body_trims_query() {
+        let body = build_search_clips_by_link_token_body("  dQw4w9WgXcQ  ", &["link"], 5);
+        let filters = body["filterGroups"][0]["filters"].as_array().unwrap();
+        assert_eq!(filters[0]["value"], "*dQw4w9WgXcQ*");
+    }
 
     #[test]
     fn filter_groups_empty_tags_single_group() {
