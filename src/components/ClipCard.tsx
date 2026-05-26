@@ -22,6 +22,8 @@ import {
   Play,
   Heart,
   MessageCircle,
+  Copy,
+  ClipboardCheck,
 } from "lucide-react";
 
 import { getPersistedThumb, persistThumb, clearPersistedThumb, isPersistableThumbUrl } from "@/lib/thumb-cache";
@@ -277,6 +279,8 @@ export function ClipCard({
   const cardRef = useRef<HTMLDivElement>(null);
   const isActiveRef = useRef(isActive);
   isActiveRef.current = isActive;
+
+  const [copiedLink, setCopiedLink] = useState(false);
 
   // "Used Xx" popover state
   const [vpOpen, setVpOpen] = useState(false);
@@ -838,6 +842,27 @@ export function ClipCard({
           title="Open in HubSpot"
         >
           <HubSpotIcon className="h-3.5 w-3.5" />
+        </button>
+
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            navigator.clipboard
+              .writeText(clip.link)
+              .then(() => {
+                setCopiedLink(true);
+                setTimeout(() => setCopiedLink(false), 2000);
+              })
+              .catch(() => {});
+          }}
+          className="flex items-center justify-center px-2 py-1.5 border-l cursor-pointer transition-colors hover:bg-muted"
+          title={copiedLink ? "Copied" : "Copy link"}
+        >
+          {copiedLink ? (
+            <ClipboardCheck className="h-3.5 w-3.5 text-green-600" />
+          ) : (
+            <Copy className="h-3.5 w-3.5" />
+          )}
         </button>
 
         {/* Open in browser */}
