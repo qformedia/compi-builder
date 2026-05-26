@@ -136,7 +136,7 @@ function SearchTypeToggle({
     { key: "Specific Search", activeBg: "bg-[rgb(0,164,189)]" },
   ];
   return (
-    <div className="flex shrink-0 rounded-md overflow-hidden border bg-muted">
+    <div className="flex w-full shrink-0 rounded-md overflow-hidden border bg-muted">
       {options.map(({ key, activeBg }, i) => {
         const active = value === key;
         return (
@@ -1245,10 +1245,10 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
   return (
     <div className="flex flex-col h-full p-4 gap-4">
       {phase === "input" && (
-        <div className="flex flex-col gap-4 w-full px-6 pt-8 overflow-y-auto flex-1 min-h-0 [&>*]:shrink-0">
-          <div className="space-y-3">
+        <div className="flex flex-col gap-5 w-full px-6 pt-8 overflow-y-auto flex-1 min-h-0 [&>*]:shrink-0">
+          <div className="space-y-2">
             <h2 className="text-lg font-semibold">Create Clips</h2>
-            <p className="text-sm text-muted-foreground">
+            <p className="text-sm text-muted-foreground max-w-prose">
               Paste Instagram and TikTok clip URLs (one per line). The app will extract artist handles, check HubSpot for existing creators, and create everything for you.
             </p>
           </div>
@@ -1263,59 +1263,72 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
               rows={12}
               className="font-mono text-xs"
             />
-            {rawUrls.trim() && (
-              <p className="text-xs text-muted-foreground">
-                {rawUrls.trim().split("\n").filter((l) => l.trim()).length} URLs detected
-              </p>
-            )}
+            {rawUrls.trim() && (() => {
+              const urlCount = rawUrls.trim().split("\n").filter((l) => l.trim()).length;
+              return (
+                <p className="text-xs text-muted-foreground">
+                  {urlCount} URL{urlCount === 1 ? "" : "s"} detected
+                </p>
+              );
+            })()}
           </div>
 
           <SearchTypeToggle value={searchType} onChange={handleSearchTypeChange} />
 
           {searchType === "Specific Search" && (
-            <div className="grid gap-4 md:grid-cols-2">
-              <div className="grid gap-2">
-                <Label>Apply tags to clips in this session</Label>
-                <TagPicker
-                  options={tagOptions}
-                  selected={sessionTags}
-                  onChange={handleSessionTagsChange}
-                />
-                <p className="text-xs text-muted-foreground">
-                  Only newly created clips will be tagged. Existing clips found in HubSpot are left as-is.
-                </p>
-              </div>
-              <div className="grid gap-2">
-                <div className="flex items-center justify-between gap-2">
-                  <Label>Apply tags to creators in this session</Label>
-                  <CreatorTagModeToggle
-                    value={creatorTagMode}
-                    onChange={setCreatorTagMode}
+            <div className="rounded-lg border bg-muted/30 p-4 space-y-4">
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="grid gap-2">
+                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                    Clip tags
+                  </p>
+                  <TagPicker
+                    variant="inline"
+                    options={tagOptions}
+                    selected={sessionTags}
+                    onChange={handleSessionTagsChange}
                   />
+                  <p className="text-xs text-muted-foreground leading-snug">
+                    Only newly created clips will be tagged. Existing clips found in HubSpot are left as-is.
+                  </p>
                 </div>
-                <TagPicker
-                  options={creatorTagOptions}
-                  selected={sessionCreatorTags}
-                  onChange={setSessionCreatorTags}
-                />
-                <p className="text-xs text-muted-foreground">
-                  {creatorTagMode === "new_untagged"
-                    ? "New creators and existing creators with no tags will be tagged."
-                    : "Selected tags will be appended to every creator (new and existing)."}
-                </p>
+                <div className="grid gap-2">
+                  <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">
+                    Creator tags
+                  </p>
+                  <TagPicker
+                    variant="inline"
+                    options={creatorTagOptions}
+                    selected={sessionCreatorTags}
+                    onChange={setSessionCreatorTags}
+                  />
+                  <div className="flex items-center justify-between gap-2">
+                    <p className="text-xs text-muted-foreground leading-snug min-w-0">
+                      {creatorTagMode === "new_untagged"
+                        ? "New creators and existing creators with no tags will be tagged."
+                        : "Selected tags will be appended to every creator (new and existing)."}
+                    </p>
+                    <CreatorTagModeToggle
+                      value={creatorTagMode}
+                      onChange={setCreatorTagMode}
+                    />
+                  </div>
+                </div>
               </div>
             </div>
           )}
 
-          <Button
-            onClick={handleParse}
-            disabled={!rawUrls.trim() || !token}
-            className="cursor-pointer"
-          >
-            <Clipboard className="mr-2 h-4 w-4" />
-            Process URLs
-            <ArrowRight className="ml-2 h-4 w-4" />
-          </Button>
+          <div className="flex">
+            <Button
+              onClick={handleParse}
+              disabled={!rawUrls.trim() || !token}
+              className="cursor-pointer w-fit bg-emerald-600 text-white shadow-none hover:bg-emerald-600/90 dark:bg-emerald-600 dark:hover:bg-emerald-600/90"
+            >
+              <Clipboard className="mr-2 h-4 w-4" />
+              Process URLs
+              <ArrowRight className="ml-2 h-4 w-4" />
+            </Button>
+          </div>
 
           {!token && (
             <p className="text-xs text-destructive">Set your HubSpot token in Settings first.</p>
