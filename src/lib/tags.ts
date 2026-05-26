@@ -7,6 +7,7 @@ export interface TagOption {
 }
 
 let cachedOptions: TagOption[] | null = null;
+let cachedCreatorOptions: TagOption[] | null = null;
 
 /** Reactive accessor for the tag taxonomy. Cached once globally; safe to call from any row. */
 export function useTagOptions(token: string): TagOption[] {
@@ -66,6 +67,32 @@ export async function fetchTagOptions(token: string): Promise<TagOption[]> {
 /** Invalidate the cached tag options so the next fetchTagOptions call re-fetches */
 export function invalidateTagCache() {
   cachedOptions = null;
+}
+
+/**
+ * Fetch the curated `Creators.tags` option list from HubSpot.
+ *
+ * Cached independently from the External Clip taxonomy because the two
+ * properties live on different HubSpot objects and have different option
+ * sets. Same shape as `fetchTagOptions` so consumers can swap them freely.
+ */
+export async function fetchCreatorTagOptions(token: string): Promise<TagOption[]> {
+  if (cachedCreatorOptions) return cachedCreatorOptions;
+
+  const data = await invoke<Array<{ label: string; value: string }>>(
+    "fetch_creator_tag_options",
+    { token },
+  );
+
+  cachedCreatorOptions = data
+    .filter((o) => o.label && o.value)
+    .sort((a, b) => a.label.localeCompare(b.label));
+
+  return cachedCreatorOptions;
+}
+
+export function invalidateCreatorTagCache() {
+  cachedCreatorOptions = null;
 }
 
 /** Build a value→label map for display purposes */

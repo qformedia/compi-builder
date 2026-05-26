@@ -53,7 +53,7 @@ import {
 } from "lucide-react";
 import type { AppSettings } from "@/types";
 import { TagPicker } from "@/components/TagPicker";
-import { fetchTagOptions, type TagOption } from "@/lib/tags";
+import { fetchTagOptions, fetchCreatorTagOptions, type TagOption } from "@/lib/tags";
 
 interface ParsedEntry {
   url: string;
@@ -73,6 +73,10 @@ interface ClipEntry {
   creatorStatus: CreatorStatus;
   creatorId: string | null;
   creatorName: string | null;
+  /** Tags currently set on the matched HubSpot creator (existing-creator only).
+   * Empty array means HubSpot returned the creator with no tags; null means
+   * we have not looked them up yet (new creator or pre-resolution state). */
+  existingCreatorTags: string[] | null;
   // Metadata from resolution
   caption: string | null;
   thumbnail: string | null;
@@ -99,6 +103,16 @@ interface ClipEntry {
 type Phase = "input" | "review" | "creating" | "done";
 
 type SearchType = "General Search" | "Specific Search";
+/**
+ * Controls how the creator-tag picker is applied during a Specific Search run.
+ *
+ * - `new_untagged` (default): tag newly created creators, and existing
+ *   creators whose `tags` property is empty. Existing creators that already
+ *   have any tag are left untouched.
+ * - `append_all`: append the selected tags to every creator (new + existing),
+ *   merging with whatever they already have. Never overwrites.
+ */
+type CreatorTagMode = "new_untagged" | "append_all";
 
 interface Props {
   settings: AppSettings;
@@ -139,6 +153,56 @@ function SearchTypeToggle({
             }`}
           >
             {key}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * Compact two-pill toggle that picks how creator tags are applied during the
+ * run. Mirrors `SearchTypeToggle`'s shape but rendered smaller so it fits on
+ * the same row as the creator-picker label without dominating it.
+ */
+function CreatorTagModeToggle({
+  value,
+  onChange,
+}: {
+  value: CreatorTagMode;
+  onChange: (next: CreatorTagMode) => void;
+}) {
+  const options: Array<{ key: CreatorTagMode; label: string; title: string }> = [
+    {
+      key: "new_untagged",
+      label: "New + untagged",
+      title: "Tag new creators and existing creators with no tags.",
+    },
+    {
+      key: "append_all",
+      label: "Append to all",
+      title: "Append the selected tags to every creator (new and existing).",
+    },
+  ];
+  return (
+    <div className="flex shrink-0 rounded-md overflow-hidden border bg-muted text-[10px] leading-none">
+      {options.map(({ key, label, title }, i) => {
+        const active = value === key;
+        return (
+          <button
+            key={key}
+            type="button"
+            title={title}
+            onClick={() => onChange(key)}
+            className={`px-2 py-1 font-medium cursor-pointer transition-colors ${
+              i > 0 ? "border-l" : ""
+            } ${
+              active
+                ? "bg-[rgb(0,164,189)] text-white"
+                : "bg-background text-foreground hover:bg-accent"
+            }`}
+          >
+            {label}
           </button>
         );
       })}
@@ -246,6 +310,9 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
   const [searchType, setSearchType] = useState<SearchType>("General Search");
   const [sessionTags, setSessionTags] = useState<string[]>([]);
   const [tagOptions, setTagOptions] = useState<TagOption[]>([]);
+  const [sessionCreatorTags, setSessionCreatorTags] = useState<string[]>([]);
+  const [creatorTagOptions, setCreatorTagOptions] = useState<TagOption[]>([]);
+  const [creatorTagMode, setCreatorTagMode] = useState<CreatorTagMode>("new_untagged");
   const [sessionHistory, setSessionHistory] = useState<ClipSessionRecord[]>([]);
   const [historyVisible, setHistoryVisible] = useState(5);
   const [expandedSession, setExpandedSession] = useState<string | null>(null);
@@ -308,7 +375,16 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
 
   useEffect(() => {
     if (!token) return;
-    fetchTagOptions(token).then(setTagOptions).catch(() => {});
+    fetchTagOptions(token)
+      .then(setTagOptions)
+      .catch((err) => {
+        console.error("[GeneralSearchTab] fetchTagOptions failed:", err);
+      });
+    fetchCreatorTagOptions(token)
+      .then(setCreatorTagOptions)
+      .catch((err) => {
+        console.error("[GeneralSearchTab] fetchCreatorTagOptions failed:", err);
+      });
   }, [token]);
 
   useEffect(() => {
@@ -322,6 +398,8 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
     setSearchType(next);
     if (next === "General Search") {
       setSessionTags([]);
+      setSessionCreatorTags([]);
+      setCreatorTagMode("new_untagged");
     }
   }, []);
 
@@ -332,6 +410,40 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
       ),
     [sessionTags, tagOptions],
   );
+
+  /**
+   * Applied to the clip TagPicker. Whenever the clip selection changes AND
+   * the creator picker is empty, pre-select the subset of clip tags whose
+   * label also exists in the creator-tag taxonomy. Matching is case- and
+   * whitespace-insensitive on label, since `Creators.tags` and
+   * `External Clips.tags` are independent HubSpot enums whose internal
+   * values can drift even when the human-facing label is identical.
+   *
+   * Once the creator picker has any tag (synced or manual), syncing stops —
+   * the user is in control. If they clear the creator picker back to empty,
+   * the next clip-tag change re-syncs.
+   */
+  const handleSessionTagsChange = useCallback((next: string[]) => {
+    setSessionTags(next);
+    if (sessionCreatorTags.length !== 0) return;
+    if (next.length === 0) return;
+    const clipLabelByValue = new Map(
+      tagOptions.map((o) => [o.value, o.label.trim().toLowerCase()]),
+    );
+    const creatorByLabel = new Map(
+      creatorTagOptions.map((o) => [o.label.trim().toLowerCase(), o.value]),
+    );
+    const overlap: string[] = [];
+    for (const v of next) {
+      const label = clipLabelByValue.get(v);
+      if (!label) continue;
+      const creatorValue = creatorByLabel.get(label);
+      if (creatorValue && !overlap.includes(creatorValue)) {
+        overlap.push(creatorValue);
+      }
+    }
+    if (overlap.length > 0) setSessionCreatorTags(overlap);
+  }, [sessionCreatorTags, tagOptions, creatorTagOptions]);
 
   const loadLatestClips = useCallback(async () => {
     if (!token) {
@@ -396,6 +508,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
       creatorStatus: "pending",
       creatorId: null,
       creatorName: null,
+      existingCreatorTags: null,
       caption: null,
       thumbnail: null,
       likes: null,
@@ -606,6 +719,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
             creatorId?: string;
             name?: string;
             status?: string;
+            tags?: string[];
           }>;
         } = await invoke("lookup_creators_by_social", {
           token,
@@ -627,12 +741,14 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
               creatorStatus: "existing",
               creatorId: lookup.creatorId ?? null,
               creatorName: lookup.name ?? null,
+              existingCreatorTags: Array.isArray(lookup.tags) ? lookup.tags : [],
             };
           } else {
             updated[idx] = {
               ...updated[idx],
               creatorStatus: "new",
               creatorName: updated[idx].handle,
+              existingCreatorTags: null,
             };
           }
         }
@@ -676,6 +792,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
             found: boolean;
             creatorId?: string;
             name?: string;
+            tags?: string[];
           }>;
         } = await invoke("lookup_creators_by_social", {
           token,
@@ -690,6 +807,9 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
           creatorStatus: lookup?.found ? "existing" : "new",
           creatorId: lookup?.creatorId ?? null,
           creatorName: lookup?.found ? (lookup.name ?? newHandle) : newHandle,
+          existingCreatorTags: lookup?.found
+            ? (Array.isArray(lookup.tags) ? lookup.tags : [])
+            : null,
         };
         setEntries(reUpdated);
       } catch { /* leave as pending */ }
@@ -743,6 +863,9 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
 
     // Group entries by unique profile URL to avoid creating duplicate creators
     const creatorMap = new Map<string, string>(); // profileUrl -> creatorId
+    // Tracks which creators have already had their tags applied this run
+    // so multi-clip sessions referencing the same creator don't double-PATCH.
+    const creatorTaggedSet = new Set<string>();
 
     // Pre-populate with existing creators
     for (const entry of updated) {
@@ -751,23 +874,83 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
       }
     }
 
+    const isSpecificSearch = searchType === "Specific Search";
+    const hasCreatorTags = isSpecificSearch && sessionCreatorTags.length > 0;
+
     for (let i = 0; i < updated.length; i++) {
       if (isStale()) return;
       const entry = updated[i];
       try {
         let creatorId = entry.profileUrl ? creatorMap.get(entry.profileUrl) : null;
+        const wasNewCreator = entry.creatorStatus === "new";
 
         // Create creator if new and not already created for another clip
-        if (!creatorId && entry.creatorStatus === "new" && entry.profileUrl && entry.handle) {
+        if (!creatorId && wasNewCreator && entry.profileUrl && entry.handle) {
           const created: { id: string; name: string } = await invoke("create_creator", {
             token,
             name: entry.displayName || entry.handle,
             platform: entry.platform,
             profileUrl: entry.profileUrl,
             ownerId: null,
+            ...(hasCreatorTags ? { tags: sessionCreatorTags } : {}),
           });
           creatorId = created.id;
           creatorMap.set(entry.profileUrl, creatorId);
+          if (hasCreatorTags) {
+            creatorTaggedSet.add(creatorId);
+          }
+        }
+
+        // Apply session creator tags to existing HubSpot creators per the
+        // selected mode. Skip if this creator was tagged already in this
+        // run (e.g. it appears on multiple clips) or if no tags selected.
+        if (
+          hasCreatorTags &&
+          creatorId &&
+          !wasNewCreator &&
+          !creatorTaggedSet.has(creatorId)
+        ) {
+          const existingTags = entry.existingCreatorTags ?? [];
+          let nextTags: string[] | null = null;
+
+          if (creatorTagMode === "new_untagged") {
+            if (existingTags.length === 0) {
+              nextTags = [...sessionCreatorTags];
+            }
+          } else {
+            // append_all: merge existing + selected, dropping duplicates
+            // (case-insensitive on the value to be safe with HubSpot's
+            // own casing differences between properties).
+            const seen = new Set<string>();
+            const merged: string[] = [];
+            for (const t of existingTags) {
+              const key = t.trim().toLowerCase();
+              if (!key || seen.has(key)) continue;
+              seen.add(key);
+              merged.push(t);
+            }
+            for (const t of sessionCreatorTags) {
+              const key = t.trim().toLowerCase();
+              if (!key || seen.has(key)) continue;
+              seen.add(key);
+              merged.push(t);
+            }
+            // Skip the PATCH when the merge would be a no-op.
+            if (merged.length !== existingTags.length) {
+              nextTags = merged;
+            }
+          }
+
+          if (nextTags && nextTags.length > 0) {
+            try {
+              await invoke("update_creator_properties", {
+                token,
+                creatorId,
+                properties: { tags: nextTags.join(";") },
+              });
+            } catch { /* best-effort creator tag update */ }
+          }
+          creatorTaggedSet.add(creatorId);
         }
 
         // Use existing clip or create new one
@@ -1090,16 +1273,37 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
           <SearchTypeToggle value={searchType} onChange={handleSearchTypeChange} />
 
           {searchType === "Specific Search" && (
-            <div className="grid gap-2">
-              <Label>Apply tags to clips in this session</Label>
-              <TagPicker
-                options={tagOptions}
-                selected={sessionTags}
-                onChange={setSessionTags}
-              />
-              <p className="text-xs text-muted-foreground">
-                Only newly created clips will be tagged. Existing clips found in HubSpot are left as-is.
-              </p>
+            <div className="grid gap-4 md:grid-cols-2">
+              <div className="grid gap-2">
+                <Label>Apply tags to clips in this session</Label>
+                <TagPicker
+                  options={tagOptions}
+                  selected={sessionTags}
+                  onChange={handleSessionTagsChange}
+                />
+                <p className="text-xs text-muted-foreground">
+                  Only newly created clips will be tagged. Existing clips found in HubSpot are left as-is.
+                </p>
+              </div>
+              <div className="grid gap-2">
+                <div className="flex items-center justify-between gap-2">
+                  <Label>Apply tags to creators in this session</Label>
+                  <CreatorTagModeToggle
+                    value={creatorTagMode}
+                    onChange={setCreatorTagMode}
+                  />
+                </div>
+                <TagPicker
+                  options={creatorTagOptions}
+                  selected={sessionCreatorTags}
+                  onChange={setSessionCreatorTags}
+                />
+                <p className="text-xs text-muted-foreground">
+                  {creatorTagMode === "new_untagged"
+                    ? "New creators and existing creators with no tags will be tagged."
+                    : "Selected tags will be appended to every creator (new and existing)."}
+                </p>
+              </div>
             </div>
           )}
 

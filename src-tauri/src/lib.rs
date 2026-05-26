@@ -153,10 +153,26 @@ const CLIP_PROPERTIES: &[&str] = &[
 /// Fetch the options for the "tags" property (label + internal value)
 #[tauri::command]
 async fn fetch_tag_options(token: String) -> Result<serde_json::Value, String> {
+    fetch_enum_property_options(&token, EXTERNAL_CLIPS_OBJECT_ID, "tags").await
+}
+
+/// Fetch the options for the Creators "tags" property (label + internal value).
+/// Mirrors `fetch_tag_options` but targets the curated `Creators.tags`
+/// enumeration, which is independent from the External Clip taxonomy.
+#[tauri::command]
+async fn fetch_creator_tag_options(token: String) -> Result<serde_json::Value, String> {
+    fetch_enum_property_options(&token, CREATORS_OBJECT_ID, "tags").await
+}
+
+async fn fetch_enum_property_options(
+    token: &str,
+    object_id: &str,
+    property_name: &str,
+) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
     let url = format!(
-        "https://api.hubapi.com/crm/v3/properties/{}/tags",
-        EXTERNAL_CLIPS_OBJECT_ID
+        "https://api.hubapi.com/crm/v3/properties/{}/{}",
+        object_id, property_name
     );
 
     let res = client
@@ -4639,7 +4655,7 @@ async fn lookup_creators_by_social(
                     "value": profile_url
                 }]
             }],
-            "properties": ["name", "instagram", "tiktok", "main_link", "main_account", "status"],
+            "properties": ["name", "instagram", "tiktok", "main_link", "main_account", "status", "tags"],
             "limit": 1
         });
 
@@ -4662,12 +4678,23 @@ async fn lookup_creators_by_social(
                 .and_then(|r| r.as_array())
                 .and_then(|arr| arr.first())
             {
+                let tags_raw = first
+                    .get("properties")
+                    .and_then(|p| p.get("tags"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let tags: Vec<&str> = tags_raw
+                    .split(';')
+                    .map(|s| s.trim())
+                    .filter(|s| !s.is_empty())
+                    .collect();
                 results.push(serde_json::json!({
                     "profileUrl": profile_url,
                     "found": true,
                     "creatorId": first.get("id").and_then(|v| v.as_str()),
                     "name": first.get("properties").and_then(|p| p.get("name")).and_then(|v| v.as_str()),
                     "status": first.get("properties").and_then(|p| p.get("status")).and_then(|v| v.as_str()),
+                    "tags": tags,
                 }));
             } else {
                 results.push(serde_json::json!({
@@ -4698,6 +4725,7 @@ async fn create_creator(
     platform: String,
     profile_url: String,
     owner_id: Option<String>,
+    tags: Option<Vec<String>>,
 ) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
     let url = format!(
@@ -4722,6 +4750,17 @@ async fn create_creator(
     if let Some(ref oid) = owner_id {
         if !oid.is_empty() {
             properties["hubspot_owner_id"] = serde_json::Value::String(oid.clone());
+        }
+    }
+
+    if let Some(t) = tags.as_ref() {
+        let cleaned: Vec<&str> = t
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !cleaned.is_empty() {
+            properties["tags"] = serde_json::Value::String(cleaned.join(";"));
         }
     }
 
@@ -8032,6 +8071,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             backup_hubspot_files_to_supabase,
             fetch_tag_options,
+            fetch_creator_tag_options,
             create_tag_option,
             search_clips,
             search_creator_clips,
