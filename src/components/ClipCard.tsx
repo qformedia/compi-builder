@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useEffect, useLayoutEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { Badge } from "@/components/ui/badge";
@@ -107,6 +107,129 @@ export interface ClipCardProps {
   thumbRetryKey?: number;
   // When true + originalClip exists, use HubSpot video instead of social embed
   preferHubSpotPreview?: boolean;
+}
+
+// ── Tags row (single-line with dynamic overflow) ─────────────────────────────
+
+function tagBadgeClassName(isSearched: boolean): string {
+  return `text-[10px] px-1 py-0 ${
+    isSearched
+      ? "border-green-400 bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300 dark:border-green-700"
+      : ""
+  }`;
+}
+
+function isTagSearched(tag: string, searchTags: string[]): boolean {
+  return searchTags.some((t) => t.toLowerCase() === tag.toLowerCase());
+}
+
+function TagsRow({ tags, searchTags }: { tags: string[]; searchTags: string[] }) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const mirrorRef = useRef<HTMLDivElement>(null);
+  const [visibleCount, setVisibleCount] = useState(tags.length);
+
+  useLayoutEffect(() => {
+    setVisibleCount(tags.length);
+  }, [tags]);
+
+  useLayoutEffect(() => {
+    const container = containerRef.current;
+    const mirror = mirrorRef.current;
+    if (!container || !mirror || tags.length === 0) return;
+
+    const measure = () => {
+      const containerWidth = container.clientWidth;
+      if (containerWidth === 0) return;
+
+      const mirrorChildren = mirror.children;
+      const tagElements = Array.from(mirrorChildren).slice(0, tags.length) as HTMLElement[];
+      const overflowEl = mirrorChildren[mirrorChildren.length - 1] as HTMLElement | undefined;
+      const overflowWidth = tags.length > 1 && overflowEl ? overflowEl.offsetWidth : 0;
+
+      const gap = 4;
+      let used = 0;
+      let count = 0;
+
+      for (let i = 0; i < tags.length; i++) {
+        const gapBefore = count > 0 ? gap : 0;
+        const tagWidth = tagElements[i]?.offsetWidth ?? 0;
+        const remaining = tags.length - (i + 1);
+        const reserveOverflow = remaining > 0 ? gap + overflowWidth : 0;
+
+        if (used + gapBefore + tagWidth + reserveOverflow <= containerWidth) {
+          used += gapBefore + tagWidth;
+          count = i + 1;
+        } else {
+          break;
+        }
+      }
+
+      if (count === 0 && tags.length > 0) count = 1;
+
+      setVisibleCount((prev) => (prev !== count ? count : prev));
+    };
+
+    measure();
+    const ro = new ResizeObserver(measure);
+    ro.observe(container);
+    return () => ro.disconnect();
+  }, [tags]);
+
+  if (tags.length === 0) return null;
+
+  const hiddenCount = tags.length - visibleCount;
+
+  return (
+    <div ref={containerRef} className="relative">
+      <div
+        ref={mirrorRef}
+        className="pointer-events-none absolute left-0 top-0 flex w-max flex-nowrap gap-1 opacity-0"
+        aria-hidden
+      >
+        {tags.map((tag) => (
+          <Badge key={tag} variant="outline" className={tagBadgeClassName(isTagSearched(tag, searchTags))}>
+            {tag}
+          </Badge>
+        ))}
+        {tags.length > 1 && (
+          <Badge variant="outline" className="text-[10px] px-1 py-0">
+            +{tags.length - 1}
+          </Badge>
+        )}
+      </div>
+      <div className="flex flex-nowrap items-center gap-1">
+        <div className="flex min-w-0 flex-nowrap gap-1 overflow-hidden">
+          {tags.slice(0, visibleCount).map((tag) => (
+            <Badge
+              key={tag}
+              variant="outline"
+              className={`flex-shrink-0 ${tagBadgeClassName(isTagSearched(tag, searchTags))}`}
+            >
+              {tag}
+            </Badge>
+          ))}
+        </div>
+        {hiddenCount > 0 && (
+          <div className="group/moretags relative flex-shrink-0">
+            <Badge variant="outline" className="text-[10px] px-1 py-0 cursor-default">
+              +{hiddenCount}
+            </Badge>
+            <div className="pointer-events-none absolute bottom-full right-0 z-20 mb-1 hidden w-40 flex-wrap gap-1 rounded border bg-popover px-2 py-1.5 shadow-md group-hover/moretags:flex">
+              {tags.slice(visibleCount).map((tag) => (
+                <Badge
+                  key={tag}
+                  variant="outline"
+                  className={tagBadgeClassName(isTagSearched(tag, searchTags))}
+                >
+                  {tag}
+                </Badge>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 // ── Component ────────────────────────────────────────────────────────────────
@@ -487,49 +610,7 @@ export function ClipCard({
         )}
 
         {/* Tags */}
-        <div className="flex flex-wrap gap-1">
-          {clip.tags.slice(0, 3).map((tag) => {
-            const isSearched = searchTags.some((t) => t.toLowerCase() === tag.toLowerCase());
-            return (
-              <Badge
-                key={tag}
-                variant="outline"
-                className={`text-[10px] px-1 py-0 ${
-                  isSearched
-                    ? "border-green-400 bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300 dark:border-green-700"
-                    : ""
-                }`}
-              >
-                {tag}
-              </Badge>
-            );
-          })}
-          {clip.tags.length > 3 && (
-            <div className="group/moretags relative">
-              <Badge variant="outline" className="text-[10px] px-1 py-0 cursor-default">
-                +{clip.tags.length - 3}
-              </Badge>
-              <div className="pointer-events-none absolute bottom-full left-0 mb-1 hidden group-hover/moretags:flex flex-wrap gap-1 z-20 max-w-40 rounded bg-popover border shadow-md px-2 py-1.5">
-                {clip.tags.slice(3).map((tag) => {
-                  const isSearched = searchTags.some((t) => t.toLowerCase() === tag.toLowerCase());
-                  return (
-                    <Badge
-                      key={tag}
-                      variant="outline"
-                      className={`text-[10px] px-1 py-0 ${
-                        isSearched
-                          ? "border-green-400 bg-green-100 text-green-700 dark:bg-green-950 dark:text-green-300 dark:border-green-700"
-                          : ""
-                      }`}
-                    >
-                      {tag}
-                    </Badge>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </div>
+        <TagsRow tags={clip.tags} searchTags={searchTags} />
 
         {/* Meta line */}
         <div className="flex items-center gap-2 text-[10px] text-muted-foreground">
