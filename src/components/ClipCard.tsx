@@ -20,6 +20,8 @@ import {
   FolderOpen,
   StickyNote,
   Play,
+  Heart,
+  MessageCircle,
 } from "lucide-react";
 
 import { getPersistedThumb, persistThumb, clearPersistedThumb, isPersistableThumbUrl } from "@/lib/thumb-cache";
@@ -35,6 +37,13 @@ export const SCORE_COLORS: Record<string, string> = {
   XS: "bg-rose-400 text-white",
   "Non-Acceptable": "bg-gray-700 text-white",
 };
+
+function formatCompactNumber(value: number): string {
+  return new Intl.NumberFormat(undefined, {
+    notation: "compact",
+    maximumFractionDigits: 1,
+  }).format(value);
+}
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -56,6 +65,9 @@ export interface ClipCardData {
   fetchedThumbnail?: string;
   editingNotes?: string;
   originalClip?: string;
+  likes?: number;
+  plays?: number;
+  comments?: number;
   // Project-specific fields (optional)
   downloadStatus?: "pending" | "downloading" | "complete" | "failed";
   downloadError?: string;
@@ -635,6 +647,35 @@ export function ClipCard({
             <span className="text-orange-500 font-medium">Ask first</span>
           )}
         </div>
+
+        {(() => {
+          const plays = clip.plays && clip.plays > 0 ? clip.plays : null;
+          const likes = clip.likes && clip.likes > 0 ? clip.likes : null;
+          const comments = clip.comments && clip.comments > 0 ? clip.comments : null;
+          if (!plays && !likes && !comments) return null;
+          return (
+            <div className="flex items-center gap-2 text-[10px] text-muted-foreground whitespace-nowrap">
+              {plays != null && (
+                <span className="flex items-center gap-0.5" title="Plays">
+                  <Play className="h-3 w-3 text-blue-400 flex-shrink-0" />
+                  {formatCompactNumber(plays)}
+                </span>
+              )}
+              {likes != null && (
+                <span className="flex items-center gap-0.5" title="Likes">
+                  <Heart className="h-3 w-3 text-pink-400 flex-shrink-0" />
+                  {formatCompactNumber(likes)}
+                </span>
+              )}
+              {comments != null && (
+                <span className="flex items-center gap-0.5" title="Comments">
+                  <MessageCircle className="h-3 w-3 text-amber-400 flex-shrink-0" />
+                  {formatCompactNumber(comments)}
+                </span>
+              )}
+            </div>
+          );
+        })()}
 
         {/* Download error */}
         {ds === "failed" && clip.downloadError && (

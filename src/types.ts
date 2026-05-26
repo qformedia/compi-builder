@@ -19,6 +19,9 @@ export interface Clip {
   fetchedThumbnail?: string;
   /** HubSpot CDN URL for the original video file (uploaded after download) */
   originalClip?: string;
+  likes?: number;
+  plays?: number;
+  comments?: number;
 }
 
 /** A local video project */

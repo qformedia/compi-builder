@@ -145,6 +145,9 @@ const CLIP_PROPERTIES: &[&str] = &[
     "creator_notes",
     "fetched_social_thumbnail",
     "original_clip",
+    "likes",
+    "plays",
+    "comments",
 ];
 
 /// Fetch the options for the "tags" property (label + internal value)

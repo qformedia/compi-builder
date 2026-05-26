@@ -289,5 +289,14 @@ function parseClip(record: {
     licenseType: p.creator_license_type ?? undefined,
     fetchedThumbnail: p.fetched_social_thumbnail ?? undefined,
     originalClip: p.original_clip ?? undefined,
+    likes: parseOptionalMetric(p.likes),
+    plays: parseOptionalMetric(p.plays),
+    comments: parseOptionalMetric(p.comments),
   };
+}
+
+function parseOptionalMetric(value: string | null | undefined): number | undefined {
+  if (value == null || value === "") return undefined;
+  const n = Number(value);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
 }
