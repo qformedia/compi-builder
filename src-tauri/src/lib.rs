@@ -4995,6 +4995,7 @@ async fn create_external_clip(
     link: String,
     owner_id: String,
     found_in: String,
+    tags: Option<Vec<String>>,
 ) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
     let url = format!(
@@ -5002,13 +5003,21 @@ async fn create_external_clip(
         EXTERNAL_CLIPS_OBJECT_ID
     );
 
-    let body = serde_json::json!({
-        "properties": {
-            "link": link,
-            "hubspot_owner_id": owner_id,
-            "found_in": found_in,
+    let mut props = serde_json::Map::new();
+    props.insert("link".to_string(), serde_json::json!(link));
+    props.insert("hubspot_owner_id".to_string(), serde_json::json!(owner_id));
+    props.insert("found_in".to_string(), serde_json::json!(found_in));
+    if let Some(t) = tags.as_ref() {
+        let joined: Vec<&str> = t
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if !joined.is_empty() {
+            props.insert("tags".to_string(), serde_json::json!(joined.join(";")));
         }
-    });
+    }
+    let body = serde_json::json!({ "properties": props });
 
     let res = client
         .post(&url)

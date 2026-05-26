@@ -19,6 +19,8 @@ export interface ClipSessionClip {
   socialMediaTags: string | null;
   foundIn: string;
   existedAlready: boolean;
+  /** Resolved tag labels applied at creation (Specific Search sessions). */
+  appliedTags?: string[];
 }
 
 export interface ClipSessionRecord {

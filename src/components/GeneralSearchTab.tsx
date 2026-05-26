@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { saveSession, getSessions, type ClipSessionRecord } from "@/lib/clip-sessions";
@@ -52,6 +52,8 @@ import {
   RefreshCw,
 } from "lucide-react";
 import type { AppSettings } from "@/types";
+import { TagPicker } from "@/components/TagPicker";
+import { fetchTagOptions, type TagOption } from "@/lib/tags";
 
 interface ParsedEntry {
   url: string;
@@ -242,6 +244,8 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
   const [owners, setOwners] = useState<Array<{ id: string; email: string; firstName: string; lastName: string }>>([]);
   const [selectedOwnerId, setSelectedOwnerId] = useState(settings.ownerId || "");
   const [searchType, setSearchType] = useState<SearchType>("General Search");
+  const [sessionTags, setSessionTags] = useState<string[]>([]);
+  const [tagOptions, setTagOptions] = useState<TagOption[]>([]);
   const [sessionHistory, setSessionHistory] = useState<ClipSessionRecord[]>([]);
   const [historyVisible, setHistoryVisible] = useState(5);
   const [expandedSession, setExpandedSession] = useState<string | null>(null);
@@ -303,11 +307,31 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
   }, [settings.ownerId]);
 
   useEffect(() => {
+    if (!token) return;
+    fetchTagOptions(token).then(setTagOptions).catch(() => {});
+  }, [token]);
+
+  useEffect(() => {
     if (!historyLoaded.current) {
       historyLoaded.current = true;
       setSessionHistory(getSessions());
     }
   }, []);
+
+  const handleSearchTypeChange = useCallback((next: SearchType) => {
+    setSearchType(next);
+    if (next === "General Search") {
+      setSessionTags([]);
+    }
+  }, []);
+
+  const sessionTagLabels = useMemo(
+    () =>
+      sessionTags.map(
+        (value) => tagOptions.find((o) => o.value === value)?.label ?? value,
+      ),
+    [sessionTags, tagOptions],
+  );
 
   const loadLatestClips = useCallback(async () => {
     if (!token) {
@@ -750,6 +774,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
         let clipId: string;
         const alreadyExisted = !!entry.existingClipId;
         if (alreadyExisted) {
+          // Pre-existing clips are linked only — session tags are not applied.
           clipId = entry.existingClipId!;
         } else {
           const clipResult: { id: string; link: string } = await invoke("create_external_clip", {
@@ -757,6 +782,9 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
             link: entry.url,
             ownerId,
             foundIn: searchType,
+            ...(searchType === "Specific Search" && sessionTags.length > 0
+              ? { tags: sessionTags }
+              : {}),
           });
           clipId = clipResult.id;
         }
@@ -963,6 +991,9 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
           socialMediaTags: tags,
           foundIn: searchType,
           existedAlready: !!e.existingClipId,
+          ...(searchType === "Specific Search" && sessionTagLabels.length > 0 && !e.existingClipId
+            ? { appliedTags: sessionTagLabels }
+            : {}),
         };
       });
 
@@ -992,6 +1023,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
     setEntries([]);
     setPhase("input");
     setCreateProgress({ current: 0, total: 0 });
+    setSessionTags([]);
   };
 
   const readyToCreate = entries.length > 0
@@ -1055,7 +1087,21 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
             )}
           </div>
 
-          <SearchTypeToggle value={searchType} onChange={setSearchType} />
+          <SearchTypeToggle value={searchType} onChange={handleSearchTypeChange} />
+
+          {searchType === "Specific Search" && (
+            <div className="grid gap-2">
+              <Label>Apply tags to clips in this session</Label>
+              <TagPicker
+                options={tagOptions}
+                selected={sessionTags}
+                onChange={setSessionTags}
+              />
+              <p className="text-xs text-muted-foreground">
+                Only newly created clips will be tagged. Existing clips found in HubSpot are left as-is.
+              </p>
+            </div>
+          )}
 
           <Button
             onClick={handleParse}
@@ -1205,7 +1251,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
                               if (s.includes(",") || s.includes('"') || s.includes("\n")) return `"${s.replace(/"/g, '""')}"`;
                               return s;
                             };
-                            const header = "Clip ID,Link,Platform,Handle,Creator ID,Creator Main Link,Found In,Caption,Likes,Comments,Views,Shares,Posted Date,Social Media Tags,Already Existed";
+                            const header = "Clip ID,Link,Platform,Handle,Creator ID,Creator Main Link,Found In,Caption,Likes,Comments,Views,Shares,Posted Date,Social Media Tags,Applied Tags,Already Existed";
                             const rows = session.clips.map((c) =>
                               [
                                 c.clipId,
@@ -1222,6 +1268,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
                                 c.shares != null ? String(c.shares) : "",
                                 c.postedDate ?? "",
                                 escape(c.socialMediaTags ?? ""),
+                                escape((c.appliedTags ?? []).join(";")),
                                 c.existedAlready ? "Yes" : "No",
                               ].join(",")
                             );
@@ -1249,6 +1296,11 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
                                 {c.link}
                               </button>
                               {c.handle && <span className="text-muted-foreground flex-shrink-0">@{c.handle}</span>}
+                              {c.appliedTags && c.appliedTags.length > 0 && (
+                                <Badge variant="secondary" className="text-[9px] h-3.5 px-1">
+                                  {c.appliedTags.join(", ")}
+                                </Badge>
+                              )}
                               {c.existedAlready && <Badge variant="outline" className="text-[9px] h-3.5 px-1">existed</Badge>}
                             </div>
                           ))}
