@@ -5,6 +5,15 @@ The latest release is at the top.
 
 <!-- changelog-entries -->
 
+## v2.3.0 - 2026-05-26
+
+### What's new
+
+- Specific Search clip sessions now include a tag picker both for clips and creators.
+- Search can look up external clips by video code, not just by URL.
+- External clip search cards now show HubSpot social metrics (views/plays, likes, comments).
+- Clip cards have a copy-link button in the action bar.
+
 ## v2.2.0 - 2026-05-20
 
 ### What's new
