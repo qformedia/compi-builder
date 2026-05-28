@@ -177,6 +177,14 @@ pub(crate) fn find_file_by_id(dir: &PathBuf, id_prefix: &str) -> Option<PathBuf>
     None
 }
 
+/// Sort project folder names by recency (newest `project.json` mtime first).
+pub(crate) fn sort_projects_by_recency(
+    mut entries: Vec<(String, std::time::SystemTime)>,
+) -> Vec<String> {
+    entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.0.cmp(&a.0)));
+    entries.into_iter().map(|(n, _)| n).collect()
+}
+
 /// Find a downloaded file by clip ID prefix.
 /// Returns a **relative** path like "clips/ID_title.mp4".
 /// When multiple files match (e.g. a leftover .m4a and a new .mp4),
@@ -1474,6 +1482,43 @@ mod tests {
     #[test]
     fn strip_prefix_empty_string() {
         assert_eq!(strip_prefix(""), "");
+    }
+
+    // ── sort_projects_by_recency ─────────────────────────────────────────
+
+    #[test]
+    fn sort_projects_by_recency_newer_mtime_first() {
+        let older = std::time::UNIX_EPOCH;
+        let newer = older + std::time::Duration::from_secs(3600);
+        let names = sort_projects_by_recency(vec![
+            ("260112 SAND".into(), older),
+            ("260428 TIPS".into(), newer),
+        ]);
+        assert_eq!(names, vec!["260428 TIPS", "260112 SAND"]);
+    }
+
+    #[test]
+    fn sort_projects_by_recency_equal_mtime_reverse_alphabetical() {
+        let t = std::time::UNIX_EPOCH;
+        let names = sort_projects_by_recency(vec![
+            ("Alpha".into(), t),
+            ("Beta".into(), t),
+        ]);
+        assert_eq!(names, vec!["Beta", "Alpha"]);
+    }
+
+    #[test]
+    fn sort_projects_by_recency_empty() {
+        assert!(sort_projects_by_recency(vec![]).is_empty());
+    }
+
+    #[test]
+    fn sort_projects_by_recency_single() {
+        let t = std::time::UNIX_EPOCH;
+        assert_eq!(
+            sort_projects_by_recency(vec![("Test".into(), t)]),
+            vec!["Test"]
+        );
     }
 
     // ── platform_key ──────────────────────────────────────────────────────

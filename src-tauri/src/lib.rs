@@ -3674,17 +3674,21 @@ fn list_projects(root_folder: String) -> Result<Vec<String>, String> {
     if !path.exists() {
         return Ok(vec![]);
     }
-    let mut names = vec![];
+    let mut entries_with_mtime: Vec<(String, std::time::SystemTime)> = Vec::new();
     let entries = fs::read_dir(&path).map_err(|e| format!("Failed to read folder: {e}"))?;
     for entry in entries.flatten() {
-        if entry.path().join("project.json").exists() {
+        let project_json = entry.path().join("project.json");
+        if project_json.exists() {
             if let Some(name) = entry.file_name().to_str() {
-                names.push(name.to_string());
+                let mtime = fs::metadata(&project_json)
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                entries_with_mtime.push((name.to_string(), mtime));
             }
         }
     }
-    names.sort();
-    Ok(names)
+    Ok(helpers::sort_projects_by_recency(entries_with_mtime))
 }
 
 #[tauri::command]

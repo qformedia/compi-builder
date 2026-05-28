@@ -171,6 +171,7 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip, 
           } catch { /* skip broken projects */ }
         }
         if (candidates.length === 0) { setExistingProjects([]); return; }
+        if (!settings.hubspotToken) { setExistingProjects([]); return; }
         try {
           const res = await invoke<{ results?: Array<{ id: string }> }>("fetch_video_projects_by_ids", {
             token: settings.hubspotToken,
@@ -179,11 +180,11 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip, 
           const validIds = new Set((res.results ?? []).map((r) => r.id));
           setExistingProjects(candidates.filter((c) => validIds.has(c.vpId)).map((c) => c.name));
         } catch {
-          setExistingProjects(candidates.map((c) => c.name));
+          setExistingProjects([]);
         }
       })
       .catch(() => {});
-  }, [settings.rootFolder, project]);
+  }, [settings.rootFolder, settings.hubspotToken, project]);
 
   const createProjectInHubSpot = async () => {
     if (!newName.trim()) return;
