@@ -1,4 +1,4 @@
-import { Film, Briefcase, Settings, PanelLeftClose, PanelLeft, ShieldAlert, History, Copy } from "lucide-react";
+import { Film, Folder, Settings, PanelLeftClose, PanelLeft, ShieldAlert, History, Copy } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export type Page = "videos" | "clips" | "data-integrity" | "duplicates" | "settings";
@@ -13,7 +13,7 @@ interface NavItem extends SidebarItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { id: "videos", label: "Video Proj.", icon: Briefcase },
+  { id: "videos", label: "Video Proj.", icon: Folder },
   { id: "clips", label: "Clips", icon: Film },
   { id: "data-integrity", label: "Integrity", icon: ShieldAlert },
   { id: "duplicates", label: "Duplicates", icon: Copy },
