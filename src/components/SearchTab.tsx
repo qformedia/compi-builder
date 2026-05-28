@@ -20,6 +20,7 @@ import {
   CalendarRange,
   ChevronLeft,
   ChevronRight,
+  ArrowRight,
   ArrowLeft,
   Link as LinkIcon,
   Check,
@@ -1003,10 +1004,11 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip, 
       <Button
         onClick={onArrangeClips}
         size="lg"
-        className="fixed bottom-6 right-6 z-40 shadow-lg gap-2 cursor-pointer"
+        className="fixed bottom-6 right-12 z-40 shadow-lg gap-2 cursor-pointer"
       >
         <ListOrdered className="h-4 w-4" />
         Arrange clips
+        <ArrowRight className="h-4 w-4" />
       </Button>
     </div>
   );
