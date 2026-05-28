@@ -8,6 +8,7 @@ import {
   PopoverContent,
 } from "@/components/ui/popover";
 import {
+  ListOrdered,
   Loader2,
   X,
   Cookie,
@@ -19,6 +20,7 @@ import {
   CalendarRange,
   ChevronLeft,
   ChevronRight,
+  ArrowLeft,
   Link as LinkIcon,
   Check,
   AlertCircle,
@@ -143,9 +145,10 @@ interface Props {
   setProject: (p: Project | null) => void;
   addClip: (clip: Clip) => void;
   removeClip: (hubspotId: string) => void;
+  onArrangeClips: () => void;
 }
 
-export function SearchTab({ settings, project, setProject, addClip, removeClip }: Props) {
+export function SearchTab({ settings, project, setProject, addClip, removeClip, onArrangeClips }: Props) {
   // ── Project lifecycle state ────────────────────────────────────────────
   const [newName, setNewName] = useState("");
   const [existingProjects, setExistingProjects] = useState<string[]>([]);
@@ -562,8 +565,31 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
   // ── No project: show project lifecycle UI ────────────────────────────
   if (!project) {
     return (
-      <div className="flex h-full flex-col gap-6 py-4">
+      <div className="flex h-full flex-col gap-8 py-4">
         {projectError && <p className="text-sm text-destructive">{projectError}</p>}
+
+        <div className="flex flex-col gap-2">
+          <h2 className="text-sm font-medium flex items-center gap-1.5">
+            <Plus className="h-4 w-4" />
+            Create new Video Project
+          </h2>
+          <div className="flex gap-2">
+            <Input
+              placeholder="Project name (e.g. 260212 Minecraft)"
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && createProjectInHubSpot()}
+            />
+            <Button onClick={createProjectInHubSpot} disabled={!newName.trim() || creating} variant="create">
+              {creating ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Plus className="mr-2 h-4 w-4" />
+              )}
+              Create in HubSpot
+            </Button>
+          </div>
+        </div>
 
         <div className="flex flex-col gap-2">
           <h2 className="text-sm font-medium flex items-center gap-1.5">
@@ -606,62 +632,26 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
           )}
         </div>
 
-        <div className="flex items-center gap-3">
-          <div className="flex-1 border-t" />
-          <span className="text-xs text-muted-foreground">or</span>
-          <div className="flex-1 border-t" />
-        </div>
-
-        <div className="flex flex-col gap-2">
-          <h2 className="text-sm font-medium flex items-center gap-1.5">
-            <Plus className="h-4 w-4" />
-            Create new Video Project
-          </h2>
-          <div className="flex gap-2">
-            <Input
-              placeholder="Project name (e.g. 260212 Minecraft)"
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && createProjectInHubSpot()}
-            />
-            <Button onClick={createProjectInHubSpot} disabled={!newName.trim() || creating}>
-              {creating ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-              ) : (
-                <Globe className="mr-2 h-4 w-4" />
-              )}
-              Create in HubSpot
-            </Button>
-          </div>
-        </div>
-
         {existingProjects.length > 0 && (
-          <>
-            <div className="flex items-center gap-3">
-              <div className="flex-1 border-t" />
-              <span className="text-xs text-muted-foreground">recent</span>
-              <div className="flex-1 border-t" />
+          <div className="flex flex-col gap-2">
+            <h2 className="text-sm font-medium flex items-center gap-1.5">
+              <FolderOpen className="h-4 w-4" />
+              Recent projects
+            </h2>
+            <div className="flex flex-col gap-1">
+              {existingProjects.map((name) => (
+                <Button
+                  key={name}
+                  variant="ghost"
+                  className="justify-start"
+                  onClick={() => openProject(name)}
+                >
+                  <FolderOpen className="mr-2 h-4 w-4" />
+                  {name}
+                </Button>
+              ))}
             </div>
-            <div className="flex flex-col gap-2">
-              <h2 className="text-sm font-medium flex items-center gap-1.5">
-                <FolderOpen className="h-4 w-4" />
-                Recent projects
-              </h2>
-              <div className="flex flex-col gap-1">
-                {existingProjects.map((name) => (
-                  <Button
-                    key={name}
-                    variant="ghost"
-                    className="justify-start"
-                    onClick={() => openProject(name)}
-                  >
-                    <FolderOpen className="mr-2 h-4 w-4" />
-                    {name}
-                  </Button>
-                ))}
-              </div>
-            </div>
-          </>
+          </div>
         )}
       </div>
     );
@@ -671,19 +661,19 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
   return (
     <div className="flex h-full flex-col gap-3 py-4">
       {/* Project header */}
-      <div className="flex items-center justify-between">
-        <span className="text-sm font-medium text-muted-foreground">
-          Project: <span className="text-foreground">{project.name}</span>
-        </span>
+      <div className="flex items-center gap-2">
         <Button
           variant="ghost"
           size="sm"
           onClick={() => setProject(null)}
-          className="cursor-pointer text-xs h-7"
+          className="cursor-pointer h-7 w-7 p-0 shrink-0"
+          title="Close project"
         >
-          <X className="mr-1 h-3 w-3" />
-          Close project
+          <ArrowLeft className="h-4 w-4" />
         </Button>
+        <span className="text-sm font-medium text-muted-foreground">
+          Project: <span className="text-foreground">{project.name}</span>
+        </span>
       </div>
 
       {/* Search controls */}
@@ -911,6 +901,15 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip }
           )}
         </div>
       </div>
+
+      <Button
+        onClick={onArrangeClips}
+        size="lg"
+        className="fixed bottom-6 right-6 z-40 shadow-lg gap-2 cursor-pointer"
+      >
+        <ListOrdered className="h-4 w-4" />
+        Arrange clips
+      </Button>
     </div>
   );
 }

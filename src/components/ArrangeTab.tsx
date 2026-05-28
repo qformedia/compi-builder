@@ -466,21 +466,15 @@ export function ArrangeTab({ settings, project, setProject, isActive, removeClip
     enqueueClipUpload?.(clip.hubspotId);
   }, [settings.hubspotToken, enqueueClipUpload]);
 
-  if (!project) {
+  if (allClips.length === 0) {
     return (
       <div className="flex h-full items-center justify-center text-muted-foreground">
-        <p>Open a project in the Search tab first.</p>
+        <p>No clips yet. Click &apos;Back to Search&apos; to add some.</p>
       </div>
     );
   }
 
-  if (allClips.length === 0) {
-    return (
-      <div className="flex h-full items-center justify-center text-muted-foreground">
-        <p>No clips yet. Add clips in the Search tab.</p>
-      </div>
-    );
-  }
+  if (!project) return null;
 
   const handleDragEnd = (event: DragEndEvent) => {
     const { active, over } = event;

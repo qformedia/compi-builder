@@ -1325,7 +1325,7 @@ export function TagClipsTab({ token, tagOptions, settings, onTagsCreated }: Prop
                 <Button variant="outline" onClick={() => setSocialTagModal(null)} className="cursor-pointer">
                   Cancel
                 </Button>
-                <Button onClick={handleCreateNewTag} disabled={creatingTag} className="cursor-pointer">
+                <Button onClick={handleCreateNewTag} disabled={creatingTag} variant="create" className="cursor-pointer">
                   {creatingTag && <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />}
                   Create tag
                 </Button>

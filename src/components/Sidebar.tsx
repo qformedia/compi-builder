@@ -13,7 +13,7 @@ interface NavItem extends SidebarItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { id: "videos", label: "Videos", icon: Briefcase },
+  { id: "videos", label: "Video Proj.", icon: Briefcase },
   { id: "clips", label: "Clips", icon: Film },
   { id: "data-integrity", label: "Integrity", icon: ShieldAlert },
   { id: "duplicates", label: "Duplicates", icon: Copy },

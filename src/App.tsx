@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { check, type Update } from "@tauri-apps/plugin-updater";
 import { relaunch } from "@tauri-apps/plugin-process";
-import { Clock, Film, CheckCircle, Loader2, Sparkles, RefreshCw, X, RulerDimensionLine, AlertTriangle, Search, ListOrdered, MessageSquarePlus, Globe, Tags, ShieldAlert, ArrowRight, ScrollText /* , Bot — re-enable with the hidden MiniMiki button below */ } from "lucide-react";
+import { Clock, Film, CheckCircle, Loader2, Sparkles, RefreshCw, X, RulerDimensionLine, AlertTriangle, MessageSquarePlus, Globe, Tags, ShieldAlert, ArrowRight, ArrowLeft, ScrollText /* , Bot — re-enable with the hidden MiniMiki button below */ } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { HubSpotIcon } from "@/components/ClipCard";
 import { fetchVideoProjectClips } from "@/lib/hubspot";
@@ -215,8 +215,11 @@ function App() {
   );
   const [project, setProject] = useState<Project | null>(null);
   const [activePage, setActivePage] = useState<Page>("videos");
-  const [activeVideoTab, setActiveVideoTab] = useState("search");
+  const [videoView, setVideoView] = useState<"search" | "arrange">("search");
   const [activeClipTab, setActiveClipTab] = useState("general-search");
+  useEffect(() => {
+    if (!project) setVideoView("search");
+  }, [project]);
   /**
    * Pair key requested by a `duplicates:open-pair` event (currently
    * dispatched by the "Open in Duplicates" button on the Creator URL
@@ -1414,120 +1417,119 @@ function App() {
                 </div>
               </div>
             ) : (
-              <Tabs
-                value={activeVideoTab}
-                onValueChange={setActiveVideoTab}
-                className="flex flex-1 flex-col overflow-hidden"
-              >
-                <div className="flex items-center justify-between mx-4 mt-2">
-                  <TabsList className="w-fit">
-                    <TabsTrigger value="search">
-                      <Search className="mr-1.5 h-4 w-4" />
-                      Search
-                    </TabsTrigger>
-                    <TabsTrigger value="arrange">
-                      <ListOrdered className="mr-1.5 h-4 w-4" />
-                      Arrange
-                    </TabsTrigger>
-                  </TabsList>
+              <div className="flex flex-1 flex-col overflow-hidden">
+                {videoView === "arrange" && (
+                  <div className="flex items-center justify-between mx-4 mt-2 pb-4">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => setVideoView("search")}
+                      className="cursor-pointer gap-1.5"
+                    >
+                      <ArrowLeft className="h-4 w-4" />
+                      Back to Search
+                    </Button>
 
-                  {activeVideoTab === "arrange" && arrangeStats && (
-                    <div className="flex items-center gap-2">
-                      <div className="flex items-center gap-3 text-sm text-muted-foreground mr-2">
-                        <span className="flex items-center gap-1.5">
-                          <RulerDimensionLine className="h-3.5 w-3.5 flex-shrink-0" />
-                          <input
-                            type="range"
-                            min={60}
-                            max={200}
-                            value={thumbWidth}
-                            onChange={(e) => setThumbWidth(Number(e.target.value))}
-                            className="w-20 accent-primary cursor-pointer"
-                          />
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <Film className="h-3.5 w-3.5" />
-                          {arrangeStats.count} clip{arrangeStats.count !== 1 ? "s" : ""}
-                        </span>
-                        <span className="flex items-center gap-1">
-                          <Clock className="h-3.5 w-3.5" />
-                          {arrangeStats.duration}
-                        </span>
+                    {arrangeStats && (
+                      <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-3 text-sm text-muted-foreground mr-2">
+                          <span className="flex items-center gap-1.5">
+                            <RulerDimensionLine className="h-3.5 w-3.5 flex-shrink-0" />
+                            <input
+                              type="range"
+                              min={60}
+                              max={200}
+                              value={thumbWidth}
+                              onChange={(e) => setThumbWidth(Number(e.target.value))}
+                              className="w-20 accent-primary cursor-pointer"
+                            />
+                          </span>
+                          <span className="flex items-center gap-1">
+                            <Film className="h-3.5 w-3.5" />
+                            {arrangeStats.count} clip{arrangeStats.count !== 1 ? "s" : ""}
+                          </span>
+                          <span className="flex items-center gap-1">
+                            <Clock className="h-3.5 w-3.5" />
+                            {arrangeStats.duration}
+                          </span>
+                        </div>
+                        {project?.hubspotVideoProjectId && (
+                          <>
+                            <Button
+                              onClick={() =>
+                                openUrl(`https://app-eu1.hubspot.com/contacts/146859718/record/2-192286893/${project.hubspotVideoProjectId}`)
+                              }
+                              size="sm"
+                              variant="outline"
+                              title="Open in HubSpot"
+                              className="cursor-pointer h-8 w-8 p-0"
+                            >
+                              <HubSpotIcon className="h-3.5 w-3.5" />
+                            </Button>
+                            <Button
+                              onClick={syncFromHubSpot}
+                              disabled={syncing}
+                              size="sm"
+                              variant="outline"
+                              title="Sync clips from HubSpot"
+                              className="cursor-pointer h-8 w-8 p-0"
+                            >
+                              <RefreshCw className={`h-3.5 w-3.5 ${syncing ? "animate-spin" : ""}`} />
+                            </Button>
+                          </>
+                        )}
+                        <Button
+                          onClick={() => setDownloadsLogOpen(true)}
+                          size="sm"
+                          variant="outline"
+                          title="Downloads log (technical)"
+                          className="cursor-pointer h-8 w-8 p-0"
+                        >
+                          <ScrollText className="h-3.5 w-3.5" />
+                        </Button>
+                        <Button
+                          size="sm"
+                          onClick={openFinishDialog}
+                          className="gap-1.5 cursor-pointer"
+                        >
+                          <Sparkles className="h-3.5 w-3.5" />
+                          Finish Video
+                        </Button>
                       </div>
-                      {project?.hubspotVideoProjectId && (
-                        <>
-                          <Button
-                            onClick={() =>
-                              openUrl(`https://app-eu1.hubspot.com/contacts/146859718/record/2-192286893/${project.hubspotVideoProjectId}`)
-                            }
-                            size="sm"
-                            variant="outline"
-                            title="Open in HubSpot"
-                            className="cursor-pointer h-8 w-8 p-0"
-                          >
-                            <HubSpotIcon className="h-3.5 w-3.5" />
-                          </Button>
-                          <Button
-                            onClick={syncFromHubSpot}
-                            disabled={syncing}
-                            size="sm"
-                            variant="outline"
-                            title="Sync clips from HubSpot"
-                            className="cursor-pointer h-8 w-8 p-0"
-                          >
-                            <RefreshCw className={`h-3.5 w-3.5 ${syncing ? "animate-spin" : ""}`} />
-                          </Button>
-                        </>
-                      )}
-                      <Button
-                        onClick={() => setDownloadsLogOpen(true)}
-                        size="sm"
-                        variant="outline"
-                        title="Downloads log (technical)"
-                        className="cursor-pointer h-8 w-8 p-0"
-                      >
-                        <ScrollText className="h-3.5 w-3.5" />
-                      </Button>
-                      <Button
-                        size="sm"
-                        onClick={openFinishDialog}
-                        className="gap-1.5 cursor-pointer"
-                      >
-                        <Sparkles className="h-3.5 w-3.5" />
-                        Finish Video
-                      </Button>
-                    </div>
+                    )}
+                  </div>
+                )}
+
+                <div className="flex-1 overflow-auto px-4">
+                  {videoView === "search" ? (
+                    <TabErrorBoundary name="Search">
+                      <SearchTab
+                        settings={settings}
+                        project={project}
+                        setProject={setProject}
+                        addClip={addClipToProject}
+                        removeClip={removeClipFromProject}
+                        onArrangeClips={() => setVideoView("arrange")}
+                      />
+                    </TabErrorBoundary>
+                  ) : (
+                    <TabErrorBoundary name="Arrange">
+                      <ArrangeTab
+                        settings={settings}
+                        project={project}
+                        setProject={setProject}
+                        isActive={videoView === "arrange"}
+                        removeClip={removeClipFromProject}
+                        thumbWidth={thumbWidth}
+                        suppressAutoPlay={finishDialogOpen}
+                        uploadingClipIds={uploadingClipIds}
+                        enqueueClipUpload={enqueueClipUpload}
+                        downloadProgress={downloadProgress}
+                      />
+                    </TabErrorBoundary>
                   )}
                 </div>
-
-                <div className={`flex-1 overflow-auto px-4 ${activeVideoTab === "search" ? "" : "hidden"}`}>
-                  <TabErrorBoundary name="Search">
-                    <SearchTab
-                      settings={settings}
-                      project={project}
-                      setProject={setProject}
-                      addClip={addClipToProject}
-                      removeClip={removeClipFromProject}
-                    />
-                  </TabErrorBoundary>
-                </div>
-                <div className={`flex-1 overflow-auto px-4 ${activeVideoTab === "arrange" ? "" : "hidden"}`}>
-                  <TabErrorBoundary name="Arrange">
-                    <ArrangeTab
-                      settings={settings}
-                      project={project}
-                      setProject={setProject}
-                      isActive={activeVideoTab === "arrange"}
-                      removeClip={removeClipFromProject}
-                      thumbWidth={thumbWidth}
-                      suppressAutoPlay={finishDialogOpen}
-                      uploadingClipIds={uploadingClipIds}
-                      enqueueClipUpload={enqueueClipUpload}
-                      downloadProgress={downloadProgress}
-                    />
-                  </TabErrorBoundary>
-                </div>
-              </Tabs>
+              </div>
             )}
           </div>
 

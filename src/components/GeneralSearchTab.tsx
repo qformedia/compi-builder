@@ -1322,7 +1322,8 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
             <Button
               onClick={handleParse}
               disabled={!rawUrls.trim() || !token}
-              className="cursor-pointer w-fit bg-emerald-600 text-white shadow-none hover:bg-emerald-600/90 dark:bg-emerald-600 dark:hover:bg-emerald-600/90"
+              variant="create"
+              className="cursor-pointer w-fit"
             >
               <Clipboard className="mr-2 h-4 w-4" />
               Process URLs
@@ -1678,6 +1679,7 @@ export function GeneralSearchTab({ settings, onSettingsChange }: Props) {
                   onClick={handleCreateAll}
                   disabled={!readyToCreate || creating || !selectedOwnerId}
                   size="sm"
+                  variant="create"
                   className="cursor-pointer"
                 >
                   {creating ? <Loader2 className="mr-2 h-3.5 w-3.5 animate-spin" /> : null}

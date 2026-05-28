@@ -460,7 +460,7 @@ export function useCreatorSuggestion({
             {!hasStrong ? (
               <Button
                 type="button"
-                variant="default"
+                variant="create"
                 size="sm"
                 className="h-8 cursor-pointer gap-1.5 text-[11px]"
                 disabled={busy}
