@@ -37,6 +37,10 @@ export async function searchClipsByTags(
   dateFrom?: string | null,
   /** Inclusive upper bound on HubSpot `date_found` (`YYYY-MM-DD`). */
   dateTo?: string | null,
+  /** Free-text query matched against `social_media_caption` OR `social_media_tags`. */
+  textQuery?: string | null,
+  /** How to combine the text filter with curated tags. Defaults to "AND". */
+  textMode: "AND" | "OR" = "AND",
 ): Promise<{ clips: Clip[]; total: number; nextAfter?: string }> {
   const data = await invoke<HubSpotSearchResponse>("search_clips", {
     token,
@@ -48,6 +52,12 @@ export async function searchClipsByTags(
     after: after ?? null,
     date_from: dateFrom?.trim() || null,
     date_to: dateTo?.trim() || null,
+    // Tauri 2 expects camelCase argument keys by default — the Rust params
+    // `text_query` / `text_mode` are matched as `textQuery` / `textMode` here.
+    // (Note: `date_from` / `date_to` above use snake_case for historical
+    //  consistency; that path appears to be silently broken upstream.)
+    textQuery: textQuery?.trim() || null,
+    textMode,
   });
 
   const clips = data.results.map(parseClip);
@@ -74,6 +84,8 @@ export async function searchCreatorClips(
   maxResults: number = DEFAULT_CREATOR_CLIP_CAP,
   dateFrom?: string | null,
   dateTo?: string | null,
+  textQuery?: string | null,
+  textMode: "AND" | "OR" = "AND",
 ): Promise<{ clips: Clip[]; capped: boolean }> {
   const data = await invoke<HubSpotSearchResponse>("search_creator_clips", {
     token,
@@ -86,6 +98,9 @@ export async function searchCreatorClips(
     max_results: maxResults,
     date_from: dateFrom?.trim() || null,
     date_to: dateTo?.trim() || null,
+    // Tauri 2 expects camelCase argument keys (see note in `searchClipsByTags`).
+    textQuery: textQuery?.trim() || null,
+    textMode,
   });
 
   return {
@@ -303,6 +318,8 @@ function parseClip(record: {
     likes: parseOptionalMetric(p.likes),
     plays: parseOptionalMetric(p.plays),
     comments: parseOptionalMetric(p.comments),
+    socialMediaCaption: p.social_media_caption ?? undefined,
+    socialMediaTags: p.social_media_tags ?? undefined,
   };
 }
 

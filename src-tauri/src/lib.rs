@@ -148,6 +148,8 @@ const CLIP_PROPERTIES: &[&str] = &[
     "likes",
     "plays",
     "comments",
+    "social_media_caption",
+    "social_media_tags",
 ];
 
 /// Fetch the options for the "tags" property (label + internal value)
@@ -281,8 +283,11 @@ async fn search_clips(
     after: Option<String>,
     date_from: Option<String>,
     date_to: Option<String>,
+    text_query: Option<String>,
+    text_mode: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
+    let resolved_text_mode = text_mode.unwrap_or_else(|| "AND".to_string());
     let filter_groups = build_filter_groups(
         &tags,
         &scores,
@@ -291,6 +296,8 @@ async fn search_clips(
         creator_main_link.as_deref(),
         date_from.as_deref(),
         date_to.as_deref(),
+        text_query.as_deref(),
+        &resolved_text_mode,
     );
 
     let props: Vec<serde_json::Value> = CLIP_PROPERTIES
@@ -349,11 +356,14 @@ async fn search_creator_clips(
     max_results: Option<u32>,
     date_from: Option<String>,
     date_to: Option<String>,
+    text_query: Option<String>,
+    text_mode: Option<String>,
 ) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())?;
+    let resolved_text_mode = text_mode.unwrap_or_else(|| "AND".to_string());
     let mut filter_groups = build_filter_groups(
         &tags,
         &scores,
@@ -362,6 +372,8 @@ async fn search_creator_clips(
         creator_main_link.as_deref(),
         date_from.as_deref(),
         date_to.as_deref(),
+        text_query.as_deref(),
+        &resolved_text_mode,
     );
 
     // Add creator_name filter to every group

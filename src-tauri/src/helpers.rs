@@ -21,6 +21,17 @@ fn is_plausible_iso_date(s: &str) -> bool {
 /// `tag_mode` = "AND" → one group with all tag filters; "OR" → one group per tag.
 /// When `creator_main_link` is provided, every group is narrowed to that creator.
 /// `date_from` / `date_to` filter on `date_found` (inclusive, `YYYY-MM-DD`).
+///
+/// `text_query` (when non-empty after trim) matches `social_media_caption` OR
+/// `social_media_tags` via HubSpot `CONTAINS_TOKEN`. `text_mode` controls how
+/// it combines with curated `tags`:
+///   - "AND" (default): each tag branch is cross-produced with the two text
+///     fields → `tag_branches.len() * 2` groups.
+///   - "OR": tag branches as-is, plus two extra groups carrying just the shared
+///     filters + one text-field filter each → `tag_branches.len() + 2` groups.
+///
+/// HubSpot CRM Search v3 caps requests at 5 `filterGroups`; callers that mix
+/// many tags with text may exceed that limit.
 pub(crate) fn build_filter_groups(
     tags: &[String],
     scores: &[String],
@@ -29,6 +40,8 @@ pub(crate) fn build_filter_groups(
     creator_main_link: Option<&str>,
     date_from: Option<&str>,
     date_to: Option<&str>,
+    text_query: Option<&str>,
+    text_mode: &str,
 ) -> Vec<serde_json::Value> {
     let mut shared: Vec<serde_json::Value> = Vec::new();
 
@@ -87,11 +100,10 @@ pub(crate) fn build_filter_groups(
         }));
     }
 
-    if tags.is_empty() {
-        return vec![serde_json::json!({ "filters": shared })];
-    }
-
-    if tag_mode == "OR" {
+    // Build tag branches (each branch is a Vec of AND'd filters; branches are OR'd).
+    let tag_branches: Vec<Vec<serde_json::Value>> = if tags.is_empty() {
+        vec![shared.clone()]
+    } else if tag_mode == "OR" {
         tags.iter()
             .map(|tag| {
                 let mut group = shared.clone();
@@ -100,11 +112,11 @@ pub(crate) fn build_filter_groups(
                     "operator": "CONTAINS_TOKEN",
                     "value": tag
                 }));
-                serde_json::json!({ "filters": group })
+                group
             })
             .collect()
     } else {
-        let mut group = shared;
+        let mut group = shared.clone();
         for tag in tags {
             group.push(serde_json::json!({
                 "propertyName": "tags",
@@ -112,7 +124,63 @@ pub(crate) fn build_filter_groups(
                 "value": tag
             }));
         }
-        vec![serde_json::json!({ "filters": group })]
+        vec![group]
+    };
+
+    // No text filter → wrap each tag branch and return.
+    let trimmed_text = text_query.map(|s| s.trim()).filter(|s| !s.is_empty());
+    let text = match trimmed_text {
+        None => {
+            return tag_branches
+                .into_iter()
+                .map(|g| serde_json::json!({ "filters": g }))
+                .collect();
+        }
+        Some(t) => t,
+    };
+
+    let caption_filter = serde_json::json!({
+        "propertyName": "social_media_caption",
+        "operator": "CONTAINS_TOKEN",
+        "value": text
+    });
+    let social_tags_filter = serde_json::json!({
+        "propertyName": "social_media_tags",
+        "operator": "CONTAINS_TOKEN",
+        "value": text
+    });
+
+    // text_mode = "OR" only makes sense when curated tags are also present;
+    // with no tags, OR/AND collapse to the same thing (text-only branches).
+    if text_mode == "OR" && !tags.is_empty() {
+        let mut groups: Vec<serde_json::Value> = tag_branches
+            .into_iter()
+            .map(|g| serde_json::json!({ "filters": g }))
+            .collect();
+        let mut cap_group = shared.clone();
+        cap_group.push(caption_filter);
+        let mut tag_group = shared;
+        tag_group.push(social_tags_filter);
+        groups.push(serde_json::json!({ "filters": cap_group }));
+        groups.push(serde_json::json!({ "filters": tag_group }));
+        groups
+    } else {
+        // AND mode (or no curated tags): cross-product each tag branch with
+        // the two text-field filters so the result is
+        // `(tag-branch) AND (caption-match OR tags-match)`.
+        tag_branches
+            .into_iter()
+            .flat_map(|branch| {
+                let mut with_caption = branch.clone();
+                with_caption.push(caption_filter.clone());
+                let mut with_tags = branch;
+                with_tags.push(social_tags_filter.clone());
+                vec![
+                    serde_json::json!({ "filters": with_caption }),
+                    serde_json::json!({ "filters": with_tags }),
+                ]
+            })
+            .collect()
     }
 }
 
@@ -1880,7 +1948,8 @@ mod tests {
 
     #[test]
     fn filter_groups_empty_tags_single_group() {
-        let groups = build_filter_groups(&[], &[], false, "AND", None, None, None);
+        let groups =
+            build_filter_groups(&[], &[], false, "AND", None, None, None, None, "AND");
         assert_eq!(groups.len(), 1);
         let filters = groups[0]["filters"].as_array().unwrap();
         assert!(filters
@@ -1894,7 +1963,8 @@ mod tests {
     #[test]
     fn filter_groups_or_mode_creates_group_per_tag() {
         let tags = vec!["tag1".into(), "tag2".into()];
-        let groups = build_filter_groups(&tags, &[], false, "OR", None, None, None);
+        let groups =
+            build_filter_groups(&tags, &[], false, "OR", None, None, None, None, "AND");
         assert_eq!(groups.len(), 2);
         for (i, group) in groups.iter().enumerate() {
             let filters = group["filters"].as_array().unwrap();
@@ -1909,7 +1979,8 @@ mod tests {
     #[test]
     fn filter_groups_and_mode_single_group_all_tags() {
         let tags = vec!["a".into(), "b".into(), "c".into()];
-        let groups = build_filter_groups(&tags, &[], false, "AND", None, None, None);
+        let groups =
+            build_filter_groups(&tags, &[], false, "AND", None, None, None, None, "AND");
         assert_eq!(groups.len(), 1);
         let filters = groups[0]["filters"].as_array().unwrap();
         let tag_filters: Vec<_> = filters
@@ -1922,7 +1993,8 @@ mod tests {
     #[test]
     fn filter_groups_with_scores() {
         let scores = vec!["A".into(), "B".into()];
-        let groups = build_filter_groups(&[], &scores, false, "AND", None, None, None);
+        let groups =
+            build_filter_groups(&[], &scores, false, "AND", None, None, None, None, "AND");
         let filters = groups[0]["filters"].as_array().unwrap();
         let score_filter = filters
             .iter()
@@ -1934,7 +2006,8 @@ mod tests {
 
     #[test]
     fn filter_groups_never_used() {
-        let groups = build_filter_groups(&[], &[], true, "AND", None, None, None);
+        let groups =
+            build_filter_groups(&[], &[], true, "AND", None, None, None, None, "AND");
         let filters = groups[0]["filters"].as_array().unwrap();
         assert!(filters
             .iter()
@@ -1952,6 +2025,8 @@ mod tests {
             Some("https://example.com"),
             None,
             None,
+            None,
+            "AND",
         );
         assert_eq!(groups.len(), 2);
         for group in &groups {
@@ -1973,6 +2048,8 @@ mod tests {
             None,
             Some("2025-01-15"),
             Some("2025-06-01"),
+            None,
+            "AND",
         );
         let filters = groups[0]["filters"].as_array().unwrap();
         let gte = filters
@@ -1989,10 +2066,268 @@ mod tests {
 
     #[test]
     fn filter_groups_ignores_bad_date_strings() {
-        let groups =
-            build_filter_groups(&[], &[], false, "AND", None, Some("not-a-date"), Some(""));
+        let groups = build_filter_groups(
+            &[],
+            &[],
+            false,
+            "AND",
+            None,
+            Some("not-a-date"),
+            Some(""),
+            None,
+            "AND",
+        );
         let filters = groups[0]["filters"].as_array().unwrap();
         assert!(!filters.iter().any(|f| f["propertyName"] == "date_found"));
+    }
+
+    // ── text_query variants ──────────────────────────────────────────────
+
+    #[test]
+    fn filter_groups_text_only_emits_two_groups_for_caption_and_tags() {
+        let groups = build_filter_groups(
+            &[],
+            &[],
+            false,
+            "AND",
+            None,
+            None,
+            None,
+            Some("cooking"),
+            "AND",
+        );
+        assert_eq!(groups.len(), 2);
+        let g0 = groups[0]["filters"].as_array().unwrap();
+        let g1 = groups[1]["filters"].as_array().unwrap();
+        // Both groups carry the shared filters.
+        for g in [g0, g1] {
+            assert!(g.iter().any(|f| f["propertyName"] == "creator_status"));
+            assert!(g.iter().any(|f| f["propertyName"] == "link_not_working_anymore"));
+        }
+        // One group hits caption, the other hits social_media_tags.
+        let has_caption = g0
+            .iter()
+            .any(|f| f["propertyName"] == "social_media_caption" && f["value"] == "cooking");
+        let has_social_tags = g1
+            .iter()
+            .any(|f| f["propertyName"] == "social_media_tags" && f["value"] == "cooking");
+        assert!(
+            has_caption && has_social_tags,
+            "expected caption + tags filter split across the two groups"
+        );
+        // No curated tags filter when none requested.
+        for g in [g0, g1] {
+            assert!(!g.iter().any(|f| f["propertyName"] == "tags"));
+        }
+    }
+
+    #[test]
+    fn filter_groups_text_and_single_tag_and_mode() {
+        let tags = vec!["t1".into()];
+        let groups = build_filter_groups(
+            &tags,
+            &[],
+            false,
+            "AND",
+            None,
+            None,
+            None,
+            Some("cats"),
+            "AND",
+        );
+        assert_eq!(groups.len(), 2);
+        // Each group must include the curated tag filter AND exactly one text filter.
+        for group in &groups {
+            let filters = group["filters"].as_array().unwrap();
+            assert!(filters
+                .iter()
+                .any(|f| f["propertyName"] == "tags" && f["value"] == "t1"));
+            let text_filters: Vec<_> = filters
+                .iter()
+                .filter(|f| {
+                    f["propertyName"] == "social_media_caption"
+                        || f["propertyName"] == "social_media_tags"
+                })
+                .collect();
+            assert_eq!(text_filters.len(), 1);
+            assert_eq!(text_filters[0]["value"], "cats");
+            assert_eq!(text_filters[0]["operator"], "CONTAINS_TOKEN");
+        }
+    }
+
+    #[test]
+    fn filter_groups_text_and_two_tags_and_mode_cross_product() {
+        let tags = vec!["a".into(), "b".into()];
+        let groups = build_filter_groups(
+            &tags,
+            &[],
+            false,
+            "OR",
+            None,
+            None,
+            None,
+            Some("foo"),
+            "AND",
+        );
+        // 2 tag branches × 2 text fields = 4 groups
+        assert_eq!(groups.len(), 4);
+        // Every group must carry a curated tag filter (a or b) AND one text filter.
+        for group in &groups {
+            let filters = group["filters"].as_array().unwrap();
+            let has_curated_tag = filters.iter().any(|f| {
+                f["propertyName"] == "tags" && (f["value"] == "a" || f["value"] == "b")
+            });
+            assert!(has_curated_tag, "missing curated tag filter in group");
+            let text_filters: Vec<_> = filters
+                .iter()
+                .filter(|f| {
+                    f["propertyName"] == "social_media_caption"
+                        || f["propertyName"] == "social_media_tags"
+                })
+                .collect();
+            assert_eq!(text_filters.len(), 1);
+            assert_eq!(text_filters[0]["value"], "foo");
+        }
+    }
+
+    #[test]
+    fn filter_groups_text_and_tags_or_mode_adds_two_text_groups() {
+        let tags = vec!["a".into(), "b".into()];
+        let groups = build_filter_groups(
+            &tags,
+            &[],
+            false,
+            "OR",
+            None,
+            None,
+            None,
+            Some("foo"),
+            "OR",
+        );
+        // 2 tag branches + 2 text-only branches = 4 groups
+        assert_eq!(groups.len(), 4);
+        // The first two preserve the tag-only branches (no text filters).
+        for (i, group) in groups.iter().take(2).enumerate() {
+            let filters = group["filters"].as_array().unwrap();
+            assert!(filters
+                .iter()
+                .any(|f| f["propertyName"] == "tags" && f["value"] == tags[i]));
+            assert!(!filters
+                .iter()
+                .any(|f| f["propertyName"] == "social_media_caption"
+                    || f["propertyName"] == "social_media_tags"));
+        }
+        // The last two are text-only branches: no curated tags, one text filter each.
+        let last_two = &groups[2..];
+        for group in last_two {
+            let filters = group["filters"].as_array().unwrap();
+            assert!(!filters.iter().any(|f| f["propertyName"] == "tags"));
+        }
+        let group_caption = last_two[0]["filters"].as_array().unwrap();
+        let group_tags = last_two[1]["filters"].as_array().unwrap();
+        assert!(group_caption
+            .iter()
+            .any(|f| f["propertyName"] == "social_media_caption" && f["value"] == "foo"));
+        assert!(group_tags
+            .iter()
+            .any(|f| f["propertyName"] == "social_media_tags" && f["value"] == "foo"));
+    }
+
+    #[test]
+    fn filter_groups_blank_text_is_noop() {
+        // Pure whitespace text must not introduce text filters.
+        let groups = build_filter_groups(
+            &[],
+            &[],
+            false,
+            "AND",
+            None,
+            None,
+            None,
+            Some("   "),
+            "AND",
+        );
+        assert_eq!(groups.len(), 1);
+        let filters = groups[0]["filters"].as_array().unwrap();
+        assert!(!filters
+            .iter()
+            .any(|f| f["propertyName"] == "social_media_caption"
+                || f["propertyName"] == "social_media_tags"));
+    }
+
+    #[test]
+    fn filter_groups_text_trimmed_before_use() {
+        let groups = build_filter_groups(
+            &[],
+            &[],
+            false,
+            "AND",
+            None,
+            None,
+            None,
+            Some("  cooking  "),
+            "AND",
+        );
+        let g0 = groups[0]["filters"].as_array().unwrap();
+        assert!(g0
+            .iter()
+            .any(|f| f["propertyName"] == "social_media_caption" && f["value"] == "cooking"));
+    }
+
+    #[test]
+    fn filter_groups_text_carries_shared_filters() {
+        // never_used + scores + creator_main_link + date range must appear in
+        // every emitted group, including text-only ones.
+        let scores = vec!["XL".into(), "L".into()];
+        let groups = build_filter_groups(
+            &[],
+            &scores,
+            true,
+            "AND",
+            Some("https://creator.example"),
+            Some("2025-01-15"),
+            Some("2025-06-01"),
+            Some("hello"),
+            "AND",
+        );
+        assert_eq!(groups.len(), 2);
+        for group in &groups {
+            let filters = group["filters"].as_array().unwrap();
+            assert!(filters
+                .iter()
+                .any(|f| f["propertyName"] == "score" && f["operator"] == "IN"));
+            assert!(filters.iter().any(|f| f["propertyName"]
+                == "num_of_published_video_project"
+                && f["value"] == "0"));
+            assert!(filters.iter().any(|f| f["propertyName"]
+                == "creator_main_link"
+                && f["value"] == "https://creator.example"));
+            assert!(filters
+                .iter()
+                .any(|f| f["propertyName"] == "date_found" && f["operator"] == "GTE"));
+            assert!(filters
+                .iter()
+                .any(|f| f["propertyName"] == "date_found" && f["operator"] == "LTE"));
+        }
+    }
+
+    #[test]
+    fn filter_groups_text_or_mode_without_tags_falls_back_to_two_groups() {
+        // With no curated tags, text_mode "OR" and "AND" must behave the same:
+        // two groups (caption, tags). This guards against accidentally emitting
+        // 0 or 1 groups in the OR branch when tags is empty.
+        let groups = build_filter_groups(
+            &[],
+            &[],
+            false,
+            "AND",
+            None,
+            None,
+            None,
+            Some("foo"),
+            "OR",
+        );
+        assert_eq!(groups.len(), 2);
     }
 
     // ── find_downloaded_file ─────────────────────────────────────────────

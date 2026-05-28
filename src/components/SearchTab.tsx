@@ -318,9 +318,21 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip, 
   const [selectedTags, setSelectedTags] = useState<string[]>([]);
   const [tagMode, setTagMode] = useState<"AND" | "OR">("AND");
   const [selectedCreator, setSelectedCreator] = useState<CreatorOption | null>(null);
+  /** Free-text query matched against `social_media_caption` OR `social_media_tags`. */
+  const [textQuery, setTextQuery] = useState("");
+  /** Debounced mirror of `textQuery` so auto-search doesn't fire per keystroke. */
+  const [debouncedTextQuery, setDebouncedTextQuery] = useState("");
+  /** When both curated tags AND text are present, how should they combine? */
+  const [textMode, setTextMode] = useState<"AND" | "OR">("AND");
   /** HubSpot `date_found` inclusive range (`YYYY-MM-DD` from `<input type="date">`). */
   const [dateFoundFrom, setDateFoundFrom] = useState("");
   const [dateFoundTo, setDateFoundTo] = useState("");
+
+  // Debounce text query → debouncedTextQuery for the auto-search effect.
+  useEffect(() => {
+    const handle = setTimeout(() => setDebouncedTextQuery(textQuery), 400);
+    return () => clearTimeout(handle);
+  }, [textQuery]);
 
   const [thumbRetryKey, setThumbRetryKey] = useState(0);
   useEffect(() => {
@@ -448,7 +460,12 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip, 
   );
 
   const search = async (loadMore = false) => {
-    if (selectedTags.length === 0 && selectedCreator === null) return;
+    if (
+      selectedTags.length === 0 &&
+      selectedCreator === null &&
+      !textQuery.trim()
+    )
+      return;
     if (loadMore && initialClips.length >= MAX_INITIAL_CLIPS) {
       setInitialClipsCapReached(true);
       return;
@@ -468,6 +485,8 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip, 
         loadMore ? nextAfter : undefined,
         dateFrom,
         dateTo,
+        textQuery,
+        textMode,
       );
 
       if (loadMore) {
@@ -531,6 +550,8 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip, 
           DEFAULT_CREATOR_CLIP_CAP,
           dateFrom,
           dateTo,
+          textQuery,
+          textMode,
         );
         setCreatorClipsMap((prev) => new Map(prev).set(creatorName, clips));
         setCreatorClipsCapped((prev) => new Map(prev).set(creatorName, capped));
@@ -548,6 +569,8 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip, 
       selectedCreator,
       dateFoundFrom,
       dateFoundTo,
+      textQuery,
+      textMode,
     ],
   );
 
@@ -555,10 +578,24 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip, 
   const searchRef = useRef(search);
   searchRef.current = search;
   useEffect(() => {
-    if (selectedTags.length > 0 || selectedCreator !== null) {
+    if (
+      selectedTags.length > 0 ||
+      selectedCreator !== null ||
+      debouncedTextQuery.trim()
+    ) {
       searchRef.current(false);
     }
-  }, [selectedTags, selectedScores, neverUsed, tagMode, selectedCreator, dateFoundFrom, dateFoundTo]);
+  }, [
+    selectedTags,
+    selectedScores,
+    neverUsed,
+    tagMode,
+    selectedCreator,
+    dateFoundFrom,
+    dateFoundTo,
+    debouncedTextQuery,
+    textMode,
+  ]);
 
   const isInProject = (clipId: string) =>
     project?.clips.some((c) => c.hubspotId === clipId) ?? false;
@@ -683,9 +720,42 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip, 
           <div className="flex-1">
             <TagPicker options={tagOptions} selected={selectedTags} onChange={setSelectedTags} />
           </div>
+          <div className="relative w-72 shrink-0">
+            <Input
+              type="text"
+              value={textQuery}
+              onChange={(e) => setTextQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") {
+                  e.preventDefault();
+                  setDebouncedTextQuery(textQuery);
+                  search(false);
+                }
+              }}
+              placeholder="Search caption or social tags…"
+              className="pr-7"
+              aria-label="Search by social media caption or tags"
+            />
+            {textQuery && (
+              <button
+                type="button"
+                onClick={() => setTextQuery("")}
+                className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
+                title="Clear text search"
+                aria-label="Clear text search"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            )}
+          </div>
           <Button
             onClick={() => search(false)}
-            disabled={selectedTags.length === 0 || loading}
+            disabled={
+              (selectedTags.length === 0 &&
+                selectedCreator === null &&
+                !textQuery.trim()) ||
+              loading
+            }
           >
             {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
             Search
@@ -707,6 +777,33 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip, 
               >
                 {tagMode}
               </button>
+              <span className="mx-1 text-muted-foreground/30">|</span>
+            </>
+          )}
+          {/* Tags vs. text mode toggle (only shown when both are present) */}
+          {selectedTags.length > 0 && debouncedTextQuery.trim() && (
+            <>
+              <span className="text-[11px] font-medium text-muted-foreground">
+                Tags
+              </span>
+              <button
+                onClick={() => setTextMode((m) => (m === "AND" ? "OR" : "AND"))}
+                className={`rounded px-2 py-0.5 text-[11px] font-bold cursor-pointer transition-all ${
+                  textMode === "AND"
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-blue-500 text-white"
+                }`}
+                title={
+                  textMode === "AND"
+                    ? "Clips must match the tags AND the text"
+                    : "Clips can match either the tags OR the text"
+                }
+              >
+                {textMode}
+              </button>
+              <span className="text-[11px] font-medium text-muted-foreground">
+                Text
+              </span>
               <span className="mx-1 text-muted-foreground/30">|</span>
             </>
           )}

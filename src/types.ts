@@ -22,6 +22,10 @@ export interface Clip {
   likes?: number;
   plays?: number;
   comments?: number;
+  /** Free-text caption / description fetched from the source social platform */
+  socialMediaCaption?: string;
+  /** Hashtags fetched from the source social platform (raw `;`-joined HubSpot string) */
+  socialMediaTags?: string;
 }
 
 /** A local video project */
