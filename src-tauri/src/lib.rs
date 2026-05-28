@@ -90,6 +90,15 @@ pub struct Project {
         skip_serializing_if = "Option::is_none"
     )]
     pub hubspot_video_project_id: Option<String>,
+    /// Autofill bucket configuration. Stored as opaque JSON so the Rust side
+    /// doesn't have to track the evolving filter schema — it only persists
+    /// whatever the frontend wrote into `project.json`.
+    #[serde(
+        rename = "autofillConfig",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub autofill_config: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Clone)]
@@ -285,9 +294,11 @@ async fn search_clips(
     date_to: Option<String>,
     text_query: Option<String>,
     text_mode: Option<String>,
+    extra_filters: Option<Vec<serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::new();
     let resolved_text_mode = text_mode.unwrap_or_else(|| "AND".to_string());
+    let extras = extra_filters.unwrap_or_default();
     let filter_groups = build_filter_groups(
         &tags,
         &scores,
@@ -298,6 +309,7 @@ async fn search_clips(
         date_to.as_deref(),
         text_query.as_deref(),
         &resolved_text_mode,
+        &extras,
     );
 
     let props: Vec<serde_json::Value> = CLIP_PROPERTIES
@@ -358,12 +370,14 @@ async fn search_creator_clips(
     date_to: Option<String>,
     text_query: Option<String>,
     text_mode: Option<String>,
+    extra_filters: Option<Vec<serde_json::Value>>,
 ) -> Result<serde_json::Value, String> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())?;
     let resolved_text_mode = text_mode.unwrap_or_else(|| "AND".to_string());
+    let extras = extra_filters.unwrap_or_default();
     let mut filter_groups = build_filter_groups(
         &tags,
         &scores,
@@ -374,6 +388,7 @@ async fn search_creator_clips(
         date_to.as_deref(),
         text_query.as_deref(),
         &resolved_text_mode,
+        &extras,
     );
 
     // Add creator_name filter to every group
@@ -3617,6 +3632,7 @@ fn create_project(root_folder: String, name: String) -> Result<Project, String> 
         created_at: chrono_now(),
         clips: vec![],
         hubspot_video_project_id: None,
+        autofill_config: None,
     };
     save_project(&path, &project)?;
     Ok(project)

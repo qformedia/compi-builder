@@ -30,6 +30,11 @@ fn is_plausible_iso_date(s: &str) -> bool {
 ///   - "OR": tag branches as-is, plus two extra groups carrying just the shared
 ///     filters + one text-field filter each → `tag_branches.len() + 2` groups.
 ///
+/// `extra_shared_filters` are fully-formed HubSpot filter dicts (e.g.
+/// `{ "propertyName": "edited_duration", "operator": "GTE", "value": "15" }`)
+/// that get AND'd into every emitted group. The Autofill runner uses this to
+/// inject numeric range / contains filters without a parallel filter builder.
+///
 /// HubSpot CRM Search v3 caps requests at 5 `filterGroups`; callers that mix
 /// many tags with text may exceed that limit.
 pub(crate) fn build_filter_groups(
@@ -42,6 +47,7 @@ pub(crate) fn build_filter_groups(
     date_to: Option<&str>,
     text_query: Option<&str>,
     text_mode: &str,
+    extra_shared_filters: &[serde_json::Value],
 ) -> Vec<serde_json::Value> {
     let mut shared: Vec<serde_json::Value> = Vec::new();
 
@@ -98,6 +104,13 @@ pub(crate) fn build_filter_groups(
             "operator": "EQ",
             "value": link
         }));
+    }
+
+    // Caller-supplied filters get AND'd into every group. Used by the Autofill
+    // runner for fields the dedicated builder doesn't model (duration, likes,
+    // plays, comments, usedCount ranges, etc.).
+    for f in extra_shared_filters {
+        shared.push(f.clone());
     }
 
     // Build tag branches (each branch is a Vec of AND'd filters; branches are OR'd).
@@ -1949,7 +1962,7 @@ mod tests {
     #[test]
     fn filter_groups_empty_tags_single_group() {
         let groups =
-            build_filter_groups(&[], &[], false, "AND", None, None, None, None, "AND");
+            build_filter_groups(&[], &[], false, "AND", None, None, None, None, "AND", &[]);
         assert_eq!(groups.len(), 1);
         let filters = groups[0]["filters"].as_array().unwrap();
         assert!(filters
@@ -1964,7 +1977,7 @@ mod tests {
     fn filter_groups_or_mode_creates_group_per_tag() {
         let tags = vec!["tag1".into(), "tag2".into()];
         let groups =
-            build_filter_groups(&tags, &[], false, "OR", None, None, None, None, "AND");
+            build_filter_groups(&tags, &[], false, "OR", None, None, None, None, "AND", &[]);
         assert_eq!(groups.len(), 2);
         for (i, group) in groups.iter().enumerate() {
             let filters = group["filters"].as_array().unwrap();
@@ -1980,7 +1993,7 @@ mod tests {
     fn filter_groups_and_mode_single_group_all_tags() {
         let tags = vec!["a".into(), "b".into(), "c".into()];
         let groups =
-            build_filter_groups(&tags, &[], false, "AND", None, None, None, None, "AND");
+            build_filter_groups(&tags, &[], false, "AND", None, None, None, None, "AND", &[]);
         assert_eq!(groups.len(), 1);
         let filters = groups[0]["filters"].as_array().unwrap();
         let tag_filters: Vec<_> = filters
@@ -1994,7 +2007,7 @@ mod tests {
     fn filter_groups_with_scores() {
         let scores = vec!["A".into(), "B".into()];
         let groups =
-            build_filter_groups(&[], &scores, false, "AND", None, None, None, None, "AND");
+            build_filter_groups(&[], &scores, false, "AND", None, None, None, None, "AND", &[]);
         let filters = groups[0]["filters"].as_array().unwrap();
         let score_filter = filters
             .iter()
@@ -2007,7 +2020,7 @@ mod tests {
     #[test]
     fn filter_groups_never_used() {
         let groups =
-            build_filter_groups(&[], &[], true, "AND", None, None, None, None, "AND");
+            build_filter_groups(&[], &[], true, "AND", None, None, None, None, "AND", &[]);
         let filters = groups[0]["filters"].as_array().unwrap();
         assert!(filters
             .iter()
@@ -2027,6 +2040,7 @@ mod tests {
             None,
             None,
             "AND",
+            &[],
         );
         assert_eq!(groups.len(), 2);
         for group in &groups {
@@ -2050,6 +2064,7 @@ mod tests {
             Some("2025-06-01"),
             None,
             "AND",
+            &[],
         );
         let filters = groups[0]["filters"].as_array().unwrap();
         let gte = filters
@@ -2076,6 +2091,7 @@ mod tests {
             Some(""),
             None,
             "AND",
+            &[],
         );
         let filters = groups[0]["filters"].as_array().unwrap();
         assert!(!filters.iter().any(|f| f["propertyName"] == "date_found"));
@@ -2095,6 +2111,7 @@ mod tests {
             None,
             Some("cooking"),
             "AND",
+            &[],
         );
         assert_eq!(groups.len(), 2);
         let g0 = groups[0]["filters"].as_array().unwrap();
@@ -2134,6 +2151,7 @@ mod tests {
             None,
             Some("cats"),
             "AND",
+            &[],
         );
         assert_eq!(groups.len(), 2);
         // Each group must include the curated tag filter AND exactly one text filter.
@@ -2168,6 +2186,7 @@ mod tests {
             None,
             Some("foo"),
             "AND",
+            &[],
         );
         // 2 tag branches × 2 text fields = 4 groups
         assert_eq!(groups.len(), 4);
@@ -2203,6 +2222,7 @@ mod tests {
             None,
             Some("foo"),
             "OR",
+            &[],
         );
         // 2 tag branches + 2 text-only branches = 4 groups
         assert_eq!(groups.len(), 4);
@@ -2246,6 +2266,7 @@ mod tests {
             None,
             Some("   "),
             "AND",
+            &[],
         );
         assert_eq!(groups.len(), 1);
         let filters = groups[0]["filters"].as_array().unwrap();
@@ -2267,6 +2288,7 @@ mod tests {
             None,
             Some("  cooking  "),
             "AND",
+            &[],
         );
         let g0 = groups[0]["filters"].as_array().unwrap();
         assert!(g0
@@ -2289,6 +2311,7 @@ mod tests {
             Some("2025-06-01"),
             Some("hello"),
             "AND",
+            &[],
         );
         assert_eq!(groups.len(), 2);
         for group in &groups {
@@ -2326,9 +2349,163 @@ mod tests {
             None,
             Some("foo"),
             "OR",
+            &[],
         );
         assert_eq!(groups.len(), 2);
     }
+
+    // ── extra_shared_filters (Autofill bucket injection) ─────────────────
+
+    #[test]
+    fn filter_groups_extra_filters_added_to_every_group() {
+        // Two tag branches in OR mode → 2 groups. Each must carry the extra
+        // numeric range filter.
+        let tags = vec!["a".into(), "b".into()];
+        let duration_gte = serde_json::json!({
+            "propertyName": "edited_duration",
+            "operator": "GTE",
+            "value": "15"
+        });
+        let groups = build_filter_groups(
+            &tags,
+            &[],
+            false,
+            "OR",
+            None,
+            None,
+            None,
+            None,
+            "AND",
+            &[duration_gte.clone()],
+        );
+        assert_eq!(groups.len(), 2);
+        for group in &groups {
+            let filters = group["filters"].as_array().unwrap();
+            assert!(
+                filters
+                    .iter()
+                    .any(|f| f["propertyName"] == "edited_duration"
+                        && f["operator"] == "GTE"
+                        && f["value"] == "15"),
+                "extra filter missing from group {:?}",
+                group,
+            );
+        }
+    }
+
+    #[test]
+    fn filter_groups_extra_filters_propagate_with_text() {
+        // With a text query, build_filter_groups emits 2 cross-product groups
+        // (caption + tags). Extra filters must land in both.
+        let likes_gte = serde_json::json!({
+            "propertyName": "likes",
+            "operator": "GTE",
+            "value": "1000"
+        });
+        let groups = build_filter_groups(
+            &[],
+            &[],
+            false,
+            "AND",
+            None,
+            None,
+            None,
+            Some("cats"),
+            "AND",
+            &[likes_gte],
+        );
+        assert_eq!(groups.len(), 2);
+        for group in &groups {
+            let filters = group["filters"].as_array().unwrap();
+            assert!(filters
+                .iter()
+                .any(|f| f["propertyName"] == "likes" && f["operator"] == "GTE" && f["value"] == "1000"));
+        }
+    }
+
+    #[test]
+    fn filter_groups_extra_filters_combine_range_as_two_entries() {
+        // A "between" range is expressed as two filters (GTE + LTE) in the
+        // same shared bucket and both must appear in every emitted group.
+        let groups = build_filter_groups(
+            &[],
+            &[],
+            false,
+            "AND",
+            None,
+            None,
+            None,
+            None,
+            "AND",
+            &[
+                serde_json::json!({
+                    "propertyName": "edited_duration",
+                    "operator": "GTE",
+                    "value": "10"
+                }),
+                serde_json::json!({
+                    "propertyName": "edited_duration",
+                    "operator": "LTE",
+                    "value": "30"
+                }),
+            ],
+        );
+        let filters = groups[0]["filters"].as_array().unwrap();
+        let dur_filters: Vec<_> = filters
+            .iter()
+            .filter(|f| f["propertyName"] == "edited_duration")
+            .collect();
+        assert_eq!(dur_filters.len(), 2);
+        assert!(dur_filters
+            .iter()
+            .any(|f| f["operator"] == "GTE" && f["value"] == "10"));
+        assert!(dur_filters
+            .iter()
+            .any(|f| f["operator"] == "LTE" && f["value"] == "30"));
+    }
+
+    #[test]
+    fn filter_groups_extra_filters_empty_is_noop() {
+        // Sanity: passing an empty slice produces the same shape as before
+        // (one group with only the canonical shared filters).
+        let groups =
+            build_filter_groups(&[], &[], false, "AND", None, None, None, None, "AND", &[]);
+        assert_eq!(groups.len(), 1);
+        let filters = groups[0]["filters"].as_array().unwrap();
+        assert!(filters.iter().all(|f| {
+            let name = f["propertyName"].as_str().unwrap_or("");
+            matches!(name, "creator_status" | "link_not_working_anymore")
+        }));
+    }
+
+    #[test]
+    fn filter_groups_extra_filters_in_operator_for_provider_set() {
+        // Score-style IN filter shape: `values` array instead of `value`.
+        let scores_in = serde_json::json!({
+            "propertyName": "score",
+            "operator": "IN",
+            "values": ["XL", "L"]
+        });
+        let groups = build_filter_groups(
+            &[],
+            &[],
+            false,
+            "AND",
+            None,
+            None,
+            None,
+            None,
+            "AND",
+            &[scores_in],
+        );
+        let filters = groups[0]["filters"].as_array().unwrap();
+        let score_filter = filters
+            .iter()
+            .find(|f| f["propertyName"] == "score" && f["operator"] == "IN")
+            .expect("score IN filter missing");
+        assert_eq!(score_filter["values"], serde_json::json!(["XL", "L"]));
+    }
+
 
     // ── find_downloaded_file ─────────────────────────────────────────────
 

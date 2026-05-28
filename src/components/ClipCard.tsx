@@ -28,6 +28,9 @@ import {
 
 import { getPersistedThumb, persistThumb, clearPersistedThumb, isPersistableThumbUrl } from "@/lib/thumb-cache";
 import { setThumbCacheEntry } from "@/lib/thumb-cache-mem";
+import { getPlatform } from "@/lib/getPlatform";
+
+export { getPlatform };
 
 // ── Score badge colors (mimicking HubSpot) ──────────────────────────────────
 
@@ -1015,17 +1018,6 @@ function formatDuration(seconds: number): string {
   const m = Math.floor(seconds / 60);
   const s = Math.round(seconds % 60);
   return m > 0 ? `${m}:${s.toString().padStart(2, "0")}` : `${s}s`;
-}
-
-export function getPlatform(url: string): string {
-  if (url.includes("tiktok.com")) return "TikTok";
-  if (url.includes("instagram.com")) return "Instagram";
-  if (url.includes("youtube.com") || url.includes("youtu.be")) return "YouTube";
-  if (url.includes("douyin.com")) return "Douyin";
-  if (url.includes("bilibili.com")) return "Bilibili";
-  if (url.includes("xiaohongshu.com")) return "Xiaohongshu";
-  if (url.includes("kuaishou.com")) return "Kuaishou";
-  return "Video";
 }
 
 /** Returns a warning string if the URL looks like a profile/page rather than

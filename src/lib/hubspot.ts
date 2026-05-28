@@ -24,46 +24,60 @@ interface ClipVpTagsResponseRow {
   vpTags: string[];
 }
 
-/** Search External Clips by tags (and optionally scores) via the Rust backend */
-export async function searchClipsByTags(
-  token: string,
-  tags: string[],
-  scores: string[] = [],
-  neverUsed = false,
-  tagMode = "AND",
-  creatorMainLink?: string,
-  after?: string,
+/** A single HubSpot CRM Search filter dict (`{ propertyName, operator, value | values }`).
+ *  Used as the on-the-wire shape for autofill's extra per-bucket filters. */
+export type HubSpotFilter = Record<string, unknown>;
+
+/** Named parameters for {@link searchClips}. All fields except `token` are
+ *  optional so the same function serves both the External Clips search page
+ *  (rich filter UI) and the Autofill runner (per-bucket queries). */
+export interface ClipSearchParams {
+  token: string;
+  tags?: string[];
+  /** How multi-tag selections combine inside HubSpot filter groups. */
+  tagMode?: "AND" | "OR";
+  scores?: string[];
+  neverUsed?: boolean;
+  creatorMainLink?: string;
+  /** Cursor returned from a previous page. */
+  after?: string;
   /** Inclusive lower bound on HubSpot `date_found` (`YYYY-MM-DD`). */
-  dateFrom?: string | null,
+  dateFrom?: string | null;
   /** Inclusive upper bound on HubSpot `date_found` (`YYYY-MM-DD`). */
-  dateTo?: string | null,
+  dateTo?: string | null;
   /** Free-text query matched against `social_media_caption` OR `social_media_tags`. */
-  textQuery?: string | null,
+  textQuery?: string | null;
   /** How to combine the text filter with curated tags. Defaults to "AND". */
-  textMode: "AND" | "OR" = "AND",
+  textMode?: "AND" | "OR";
+  /** Fully-formed HubSpot filter dicts that get AND'd into every group built
+   *  server-side. Autofill uses this to inject numeric range / contains
+   *  filters (duration, likes, plays, comments, caption) without forking the
+   *  Rust filter builder. */
+  extraFilters?: HubSpotFilter[];
+}
+
+/** Search External Clips via the Rust backend. Single function shared by the
+ *  search page and the Autofill runner. */
+export async function searchClips(
+  params: ClipSearchParams,
 ): Promise<{ clips: Clip[]; total: number; nextAfter?: string }> {
   const data = await invoke<HubSpotSearchResponse>("search_clips", {
-    token,
-    tags,
-    scores,
-    neverUsed,
-    tagMode,
-    creatorMainLink: creatorMainLink ?? null,
-    after: after ?? null,
-    date_from: dateFrom?.trim() || null,
-    date_to: dateTo?.trim() || null,
-    // Tauri 2 expects camelCase argument keys by default — the Rust params
-    // `text_query` / `text_mode` are matched as `textQuery` / `textMode` here.
-    // (Note: `date_from` / `date_to` above use snake_case for historical
-    //  consistency; that path appears to be silently broken upstream.)
-    textQuery: textQuery?.trim() || null,
-    textMode,
+    token: params.token,
+    tags: params.tags ?? [],
+    scores: params.scores ?? [],
+    neverUsed: params.neverUsed ?? false,
+    tagMode: params.tagMode ?? "AND",
+    creatorMainLink: params.creatorMainLink ?? null,
+    after: params.after ?? null,
+    dateFrom: params.dateFrom?.trim() || null,
+    dateTo: params.dateTo?.trim() || null,
+    textQuery: params.textQuery?.trim() || null,
+    textMode: params.textMode ?? "AND",
+    extraFilters: params.extraFilters ?? [],
   });
 
-  const clips = data.results.map(parseClip);
-
   return {
-    clips,
+    clips: data.results.map(parseClip),
     total: data.total,
     nextAfter: data.paging?.next?.after,
   };
@@ -72,35 +86,30 @@ export async function searchClipsByTags(
 /** Max clips loaded per creator in search UI (HubSpot may have more). */
 export const DEFAULT_CREATOR_CLIP_CAP = 200;
 
+/** Named parameters for {@link searchCreatorClips}. */
+export interface CreatorClipsParams extends Omit<ClipSearchParams, "after"> {
+  creatorName: string;
+  maxResults?: number;
+}
+
 /** Fetch clips for a specific creator matching the same filters (capped for memory). */
 export async function searchCreatorClips(
-  token: string,
-  tags: string[],
-  scores: string[],
-  neverUsed: boolean,
-  tagMode: string,
-  creatorMainLink: string | undefined,
-  creatorName: string,
-  maxResults: number = DEFAULT_CREATOR_CLIP_CAP,
-  dateFrom?: string | null,
-  dateTo?: string | null,
-  textQuery?: string | null,
-  textMode: "AND" | "OR" = "AND",
+  params: CreatorClipsParams,
 ): Promise<{ clips: Clip[]; capped: boolean }> {
   const data = await invoke<HubSpotSearchResponse>("search_creator_clips", {
-    token,
-    tags,
-    scores,
-    neverUsed,
-    tagMode,
-    creatorMainLink: creatorMainLink ?? null,
-    creatorName,
-    max_results: maxResults,
-    date_from: dateFrom?.trim() || null,
-    date_to: dateTo?.trim() || null,
-    // Tauri 2 expects camelCase argument keys (see note in `searchClipsByTags`).
-    textQuery: textQuery?.trim() || null,
-    textMode,
+    token: params.token,
+    tags: params.tags ?? [],
+    scores: params.scores ?? [],
+    neverUsed: params.neverUsed ?? false,
+    tagMode: params.tagMode ?? "AND",
+    creatorMainLink: params.creatorMainLink ?? null,
+    creatorName: params.creatorName,
+    maxResults: params.maxResults ?? DEFAULT_CREATOR_CLIP_CAP,
+    dateFrom: params.dateFrom?.trim() || null,
+    dateTo: params.dateTo?.trim() || null,
+    textQuery: params.textQuery?.trim() || null,
+    textMode: params.textMode ?? "AND",
+    extraFilters: params.extraFilters ?? [],
   });
 
   return {

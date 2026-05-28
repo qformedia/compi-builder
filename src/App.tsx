@@ -26,6 +26,7 @@ import { FeedbackDialog } from "@/components/FeedbackDialog";
 import { DownloadsLogDialog } from "@/components/DownloadsLogDialog";
 import { SearchTab } from "@/components/SearchTab";
 import { ArrangeTab, decodeEditingNotes } from "@/components/ArrangeTab";
+import { AutofillTab } from "@/components/AutofillTab";
 import { GeneralSearchTab } from "@/components/GeneralSearchTab";
 import { DataIntegrityPage } from "@/components/DataIntegrityPage";
 import { DuplicatesPage } from "@/components/DuplicatesPage";
@@ -215,7 +216,7 @@ function App() {
   );
   const [project, setProject] = useState<Project | null>(null);
   const [activePage, setActivePage] = useState<Page>("videos");
-  const [videoView, setVideoView] = useState<"search" | "arrange">("search");
+  const [videoView, setVideoView] = useState<"search" | "autofill" | "arrange">("search");
   const [activeClipTab, setActiveClipTab] = useState("general-search");
   useEffect(() => {
     if (!project) setVideoView("search");
@@ -1501,7 +1502,7 @@ function App() {
                 )}
 
                 <div className="flex-1 overflow-auto px-4">
-                  {videoView === "search" ? (
+                  {videoView === "search" && (
                     <TabErrorBoundary name="Search">
                       <SearchTab
                         settings={settings}
@@ -1510,9 +1511,22 @@ function App() {
                         addClip={addClipToProject}
                         removeClip={removeClipFromProject}
                         onArrangeClips={() => setVideoView("arrange")}
+                        onAutofill={() => setVideoView("autofill")}
                       />
                     </TabErrorBoundary>
-                  ) : (
+                  )}
+                  {videoView === "autofill" && project && (
+                    <TabErrorBoundary name="Autofill">
+                      <AutofillTab
+                        settings={settings}
+                        project={project}
+                        setProject={setProject}
+                        addClip={addClipToProject}
+                        onBackToSearch={() => setVideoView("search")}
+                      />
+                    </TabErrorBoundary>
+                  )}
+                  {videoView === "arrange" && (
                     <TabErrorBoundary name="Arrange">
                       <ArrangeTab
                         settings={settings}

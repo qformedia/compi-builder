@@ -35,6 +35,76 @@ export interface Project {
   clips: ProjectClip[];
   /** HubSpot Video Project ID (set after "Finish Video" or when opened from HubSpot) */
   hubspotVideoProjectId?: string;
+  /** Autofill bucket configuration for this project. Persisted with the
+   *  project so reopening it restores the user's bucket setup. */
+  autofillConfig?: AutofillConfig;
+}
+
+// ── Autofill ────────────────────────────────────────────────────────────────
+
+/** Every field a bucket filter can target. Each maps to either a HubSpot
+ *  property (server-side filter) or a client-side predicate. */
+export type BucketFilterField =
+  | "tag"
+  | "score"
+  | "creator"
+  | "dateFound"
+  | "duration"
+  | "licenseType"
+  | "usedCount"
+  | "provider"
+  | "likes"
+  | "plays"
+  | "comments"
+  | "caption"
+  | "availableAskFirst";
+
+/** Operators supported across bucket filter fields. Not every operator is
+ *  valid for every field — see `OPERATORS_BY_FIELD` in `lib/autofill.ts`. */
+export type BucketFilterOperator =
+  | "equals"
+  | "in"
+  | "contains"
+  | "gte"
+  | "lte"
+  | "between";
+
+/** A single filter row inside a bucket. `value` shape depends on
+ *  `field` + `operator` (string, string[], number, [number, number], etc.).
+ *  Bucket filters are always AND-combined (no OR inside a bucket — use
+ *  another bucket to express an OR). */
+export interface BucketFilter {
+  /** Stable ID for React keys and per-row drag/drop. */
+  id: string;
+  field: BucketFilterField;
+  operator: BucketFilterOperator;
+  value: unknown;
+}
+
+/** How a bucket's matching clips are ordered before the count cap applies. */
+export type BucketSort = "newest" | "oldest" | "random" | "mostLiked";
+
+/** One bucket: a target count + AND-combined filter conditions + sort. */
+export interface AutofillBucket {
+  id: string;
+  /** Display label shown in the bucket header. Empty = auto label "Bucket N". */
+  label?: string;
+  /** Target clip count. `runAutofill` may return fewer (partial fill). */
+  count: number;
+  sort: BucketSort;
+  filters: BucketFilter[];
+}
+
+/** Whole-page autofill configuration: global filters + ordered buckets. */
+export interface AutofillConfig {
+  /** Always-on global filter: only pick clips that have never been used in a
+   *  published Video Project. AND-combined with every bucket. */
+  globalNeverUsed: boolean;
+  /** Always-on global filter: license types to allow. Empty = all. */
+  globalLicenseTypes: string[];
+  /** Display order matters: earlier buckets pick first; later buckets dedup
+   *  against them. */
+  buckets: AutofillBucket[];
 }
 
 /** A clip within a project */
