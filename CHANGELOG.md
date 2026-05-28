@@ -5,6 +5,18 @@ The latest release is at the top.
 
 <!-- changelog-entries -->
 
+## v2.4.0 - 2026-05-28
+
+### What's new
+
+- Project search can find clips by caption or tags.
+
+### What got better
+
+- Recent projects sort newest-first and hide when HubSpot can't verify them.
+- Video project sidebar uses a folder icon; navigation and create buttons are unified.
+- Search controls have clearer labels; Arrange clips button shows a direction arrow.
+
 ## v2.3.0 - 2026-05-26
 
 ### What's new
