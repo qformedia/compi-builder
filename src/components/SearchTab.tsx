@@ -718,7 +718,10 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip, 
       {/* Search controls */}
       <div className="flex flex-col gap-2">
         <div className="flex items-start gap-2">
-          <div className="flex-1">
+          <div className="flex min-w-0 flex-1 flex-col gap-1">
+            <span className="text-[11px] font-medium leading-none text-muted-foreground">
+              Curated tags
+            </span>
             <TagPicker
               variant="inline"
               options={tagOptions}
@@ -726,13 +729,20 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip, 
               onChange={setSelectedTags}
             />
           </div>
-          {selectedTags.length > 0 && debouncedTextQuery.trim() && (
+          <div
+            className="flex w-10 shrink-0 flex-col gap-1"
+            aria-hidden={!(selectedTags.length > 0 && debouncedTextQuery.trim())}
+          >
+            <span className="invisible text-[11px] leading-none select-none">.</span>
             <button
+              type="button"
               onClick={() => setTextMode((m) => (m === "AND" ? "OR" : "AND"))}
-              className={`h-9 shrink-0 self-start rounded px-2 text-[11px] font-bold cursor-pointer transition-all ${
-                textMode === "AND"
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-blue-500 text-white"
+              className={`h-9 w-10 rounded text-[11px] font-bold cursor-pointer transition-all ${
+                selectedTags.length > 0 && debouncedTextQuery.trim()
+                  ? textMode === "AND"
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-blue-500 text-white"
+                  : "invisible pointer-events-none"
               }`}
               title={
                 textMode === "AND"
@@ -740,50 +750,64 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip, 
                   : "Clips can match either the tags OR the text"
               }
               aria-label={`Combine tags and text with ${textMode}`}
+              tabIndex={selectedTags.length > 0 && debouncedTextQuery.trim() ? 0 : -1}
             >
               {textMode}
             </button>
-          )}
-          <div className="relative w-72 shrink-0">
-            <Input
-              type="text"
-              value={textQuery}
-              onChange={(e) => setTextQuery(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  e.preventDefault();
-                  setDebouncedTextQuery(textQuery);
-                  search(false);
-                }
-              }}
-              placeholder="Search caption or social tags…"
-              className="pr-8"
-              aria-label="Search by social media caption or tags"
-            />
-            {textQuery && (
-              <button
-                type="button"
-                onClick={() => setTextQuery("")}
-                className="absolute inset-y-0 right-2 my-auto flex h-5 w-5 items-center justify-center rounded p-0 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
-                title="Clear text search"
-                aria-label="Clear text search"
-              >
-                <X className="h-3.5 w-3.5" />
-              </button>
-            )}
           </div>
-          <Button
-            onClick={() => search(false)}
-            disabled={
-              (selectedTags.length === 0 &&
-                selectedCreator === null &&
-                !textQuery.trim()) ||
-              loading
-            }
-          >
-            {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            Search
-          </Button>
+          <div className="flex w-72 shrink-0 flex-col gap-1">
+            <label
+              htmlFor="search-social-text"
+              className="text-[11px] font-medium leading-none text-muted-foreground"
+            >
+              Social media caption or tags
+            </label>
+            <div className="relative">
+              <Input
+                id="search-social-text"
+                type="text"
+                value={textQuery}
+                onChange={(e) => setTextQuery(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    e.preventDefault();
+                    setDebouncedTextQuery(textQuery);
+                    search(false);
+                  }
+                }}
+                placeholder="e.g. funny, dog, dance…"
+                className="pr-8"
+                aria-label="Search by social media caption or tags"
+              />
+              {textQuery && (
+                <button
+                  type="button"
+                  onClick={() => setTextQuery("")}
+                  className="absolute inset-y-0 right-2 my-auto flex h-5 w-5 items-center justify-center rounded p-0 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
+                  title="Clear text search"
+                  aria-label="Clear text search"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
+          </div>
+          <div className="flex shrink-0 flex-col gap-1">
+            <span className="invisible text-[11px] leading-none select-none">.</span>
+            <Button
+              onClick={() => search(false)}
+              disabled={
+                (selectedTags.length === 0 &&
+                  selectedCreator === null &&
+                  !textQuery.trim()) ||
+                loading
+              }
+              className="min-w-[110px]"
+            >
+              {loading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+              Search
+            </Button>
+          </div>
         </div>
         {/* Filters row */}
         <div className="flex flex-wrap items-center gap-1.5">

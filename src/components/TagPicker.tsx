@@ -60,6 +60,7 @@ export function TagPicker({
             variant="outline"
             className={cn(
               "justify-between",
+              isInline && "w-full",
               isInline && selected.length > 0 && "h-auto min-h-9 py-1.5",
             )}
           >
