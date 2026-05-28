@@ -324,7 +324,7 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip, 
   /** Debounced mirror of `textQuery` so auto-search doesn't fire per keystroke. */
   const [debouncedTextQuery, setDebouncedTextQuery] = useState("");
   /** When both curated tags AND text are present, how should they combine? */
-  const [textMode, setTextMode] = useState<"AND" | "OR">("AND");
+  const [textMode, setTextMode] = useState<"AND" | "OR">("OR");
   /** HubSpot `date_found` inclusive range (`YYYY-MM-DD` from `<input type="date">`). */
   const [dateFoundFrom, setDateFoundFrom] = useState("");
   const [dateFoundTo, setDateFoundTo] = useState("");
@@ -717,10 +717,33 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip, 
 
       {/* Search controls */}
       <div className="flex flex-col gap-2">
-        <div className="flex gap-2">
+        <div className="flex items-start gap-2">
           <div className="flex-1">
-            <TagPicker options={tagOptions} selected={selectedTags} onChange={setSelectedTags} />
+            <TagPicker
+              variant="inline"
+              options={tagOptions}
+              selected={selectedTags}
+              onChange={setSelectedTags}
+            />
           </div>
+          {selectedTags.length > 0 && debouncedTextQuery.trim() && (
+            <button
+              onClick={() => setTextMode((m) => (m === "AND" ? "OR" : "AND"))}
+              className={`h-9 shrink-0 self-start rounded px-2 text-[11px] font-bold cursor-pointer transition-all ${
+                textMode === "AND"
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-blue-500 text-white"
+              }`}
+              title={
+                textMode === "AND"
+                  ? "Clips must match the tags AND the text"
+                  : "Clips can match either the tags OR the text"
+              }
+              aria-label={`Combine tags and text with ${textMode}`}
+            >
+              {textMode}
+            </button>
+          )}
           <div className="relative w-72 shrink-0">
             <Input
               type="text"
@@ -734,14 +757,14 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip, 
                 }
               }}
               placeholder="Search caption or social tags…"
-              className="pr-7"
+              className="pr-8"
               aria-label="Search by social media caption or tags"
             />
             {textQuery && (
               <button
                 type="button"
                 onClick={() => setTextQuery("")}
-                className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
+                className="absolute inset-y-0 right-2 my-auto flex h-5 w-5 items-center justify-center rounded p-0 text-muted-foreground hover:bg-muted hover:text-foreground cursor-pointer"
                 title="Clear text search"
                 aria-label="Clear text search"
               >
@@ -778,33 +801,6 @@ export function SearchTab({ settings, project, setProject, addClip, removeClip, 
               >
                 {tagMode}
               </button>
-              <span className="mx-1 text-muted-foreground/30">|</span>
-            </>
-          )}
-          {/* Tags vs. text mode toggle (only shown when both are present) */}
-          {selectedTags.length > 0 && debouncedTextQuery.trim() && (
-            <>
-              <span className="text-[11px] font-medium text-muted-foreground">
-                Tags
-              </span>
-              <button
-                onClick={() => setTextMode((m) => (m === "AND" ? "OR" : "AND"))}
-                className={`rounded px-2 py-0.5 text-[11px] font-bold cursor-pointer transition-all ${
-                  textMode === "AND"
-                    ? "bg-primary text-primary-foreground"
-                    : "bg-blue-500 text-white"
-                }`}
-                title={
-                  textMode === "AND"
-                    ? "Clips must match the tags AND the text"
-                    : "Clips can match either the tags OR the text"
-                }
-              >
-                {textMode}
-              </button>
-              <span className="text-[11px] font-medium text-muted-foreground">
-                Text
-              </span>
               <span className="mx-1 text-muted-foreground/30">|</span>
             </>
           )}
